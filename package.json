@@ -1,0 +1,35 @@
+{
+  "name": "@contentful-labs/worklog",
+  "version": "0.1.0",
+  "description": "A weekly 5-minute habit that turns your Jira/GitHub/Confluence activity into a brag book with career coaching.",
+  "license": "MIT",
+  "bin": {
+    "worklog": "./fetch-weekly-work-log.ts",
+    "wl": "./fetch-weekly-work-log.ts"
+  },
+  "files": [
+    "fetch-weekly-work-log.ts",
+    "generate-prep-doc.ts",
+    "fetch-performance-data.ts",
+    "lib/",
+    "commands/",
+    "prompts/",
+    "LICENSE",
+    "README.md"
+  ],
+  "engines": {
+    "bun": ">=1.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/contentful-labs/worklog.git"
+  },
+  "homepage": "https://github.com/contentful-labs/worklog",
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  },
+  "dependencies": {
+    "@clack/prompts": "^1.0.1",
+    "@openai/agents": "^0.1.0"
+  }
+}

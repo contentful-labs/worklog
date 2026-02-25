@@ -1,0 +1,194 @@
+import { existsSync, mkdirSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+
+// --- XDG config directory ---
+
+export const CONFIG_DIR = join(
+  process.env.XDG_CONFIG_HOME || join(homedir(), ".config"),
+  "worklog"
+);
+
+const CONFIG_FILE = join(CONFIG_DIR, "config.json");
+const LEGACY_CONFIG_PATH = join(homedir(), ".dotfiles", ".worklog.json");
+
+// --- Schema ---
+
+export interface WorklogConfig {
+  version: 1;
+
+  vault: string;
+
+  atlassian: {
+    url: string;
+    email: string;
+  };
+
+  githubOrgs: string[];
+
+  ai: {
+    authMethod: "subscription" | "api-key";
+    model?: string;
+  };
+
+  profile: {
+    fullName: string;
+    displayName: string;
+    jobTitle: string;
+    level: string;
+    company: string;
+    location: string;
+    startDate: string;
+    domain: string;
+    team: string;
+    teamDomain: string;
+    ticketPrefixes: string[];
+  };
+
+  career: {
+    framework: string;
+    currentLevel: string;
+    targetLevel: string;
+    companyValues: string[];
+    reviewCycleDates: Array<{
+      type: string;
+      date: string;
+    }>;
+    skills: string[];
+    growthAreas: string[];
+    careerDocPaths: string[];
+  };
+
+  coaching: {
+    tone: "direct" | "balanced" | "gentle";
+    focusAreas: string[];
+  };
+}
+
+// --- Stats path (colocated with config) ---
+
+export const STATS_PATH = join(CONFIG_DIR, "worklog-stats.json");
+export const TEAM_TIMELINE_PATH = join(CONFIG_DIR, "team-timeline.json");
+
+// --- Load / Save / Validate ---
+
+let _config: WorklogConfig | undefined;
+
+export function loadConfig(): WorklogConfig | null {
+  if (_config) return _config;
+
+  if (existsSync(CONFIG_FILE)) {
+    try {
+      _config = JSON.parse(require("fs").readFileSync(CONFIG_FILE, "utf-8"));
+      return _config!;
+    } catch {
+      return null;
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Load config or exit with an error message directing the user to run init.
+ */
+export function requireConfig(): WorklogConfig {
+  const config = loadConfig();
+  if (!config) {
+    console.error("No worklog configuration found. Run `worklog init` to set up.");
+    process.exit(1);
+  }
+  return config;
+}
+
+export function saveConfig(config: WorklogConfig): void {
+  if (!existsSync(CONFIG_DIR)) {
+    mkdirSync(CONFIG_DIR, { recursive: true });
+  }
+  require("fs").writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2) + "\n");
+  _config = config;
+}
+
+/** Reset cached config (useful after save or for testing) */
+export function resetConfigCache(): void {
+  _config = undefined;
+}
+
+// --- Legacy migration ---
+
+interface LegacyConfig {
+  githubOrgs: string[];
+}
+
+/**
+ * Detect legacy `.worklog.json` in dotfiles root.
+ * Returns the legacy githubOrgs if found, null otherwise.
+ */
+export function detectLegacyConfig(): LegacyConfig | null {
+  if (!existsSync(LEGACY_CONFIG_PATH)) return null;
+  try {
+    return JSON.parse(require("fs").readFileSync(LEGACY_CONFIG_PATH, "utf-8"));
+  } catch {
+    return null;
+  }
+}
+
+// --- Validation helpers ---
+
+export function validateAtlassianUrl(url: string): string | null {
+  try {
+    const parsed = new URL(url);
+    if (!parsed.hostname.endsWith(".atlassian.net")) {
+      return "URL should end with .atlassian.net (e.g. https://company.atlassian.net)";
+    }
+    return null;
+  } catch {
+    return "Invalid URL";
+  }
+}
+
+export function validateEmail(email: string): string | null {
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    return "Invalid email address";
+  }
+  return null;
+}
+
+export function validateISODate(date: string): string | null {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || isNaN(new Date(date).getTime())) {
+    return "Must be YYYY-MM-DD format";
+  }
+  return null;
+}
+
+export function parseCommaSeparated(input: string): string[] {
+  return input
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+export function parseReviewCycleDates(
+  input: string
+): Array<{ type: string; date: string }> {
+  // Format: "Self-review: 2026-06-01, Manager review: 2026-07-01"
+  return input
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map((entry) => {
+      const colonIdx = entry.indexOf(":");
+      if (colonIdx === -1) return null;
+      const type = entry.slice(0, colonIdx).trim();
+      const date = entry.slice(colonIdx + 1).trim();
+      if (!type || validateISODate(date) !== null) return null;
+      return { type, date };
+    })
+    .filter((e): e is { type: string; date: string } => e !== null);
+}
+
+// --- Config path getter (for display) ---
+
+export function getConfigPath(): string {
+  return CONFIG_FILE;
+}
