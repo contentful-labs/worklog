@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.1.0](https://github.com/contentful-labs/worklog/compare/v1.0.1...v1.1.0) (2026-02-27)
+
+
+### Features
+
+* guide users through API token setup during init ([708144d](https://github.com/contentful-labs/worklog/commit/708144dffa64c12dfa3c40566d0751d5cce6e9b1))
+* guide users through API token setup during init ([eff5f5e](https://github.com/contentful-labs/worklog/commit/eff5f5eaacf06ef3bacb904abf8e98e12eabbbb1))
+
 ## [1.0.1](https://github.com/contentful-labs/worklog/compare/v1.0.0...v1.0.1) (2026-02-27)
 
 
