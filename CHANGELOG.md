@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.0.1](https://github.com/contentful-labs/worklog/compare/v1.0.0...v1.0.1) (2026-02-27)
+
+
+### Bug Fixes
+
+* [] ensure typecheck passes ([d633058](https://github.com/contentful-labs/worklog/commit/d633058a14756add8f3247f32451bc14401488f2))
+* [] guard against undefined shellTool export ([8886db7](https://github.com/contentful-labs/worklog/commit/8886db7dbb52b508db0fa9def51ece18914b3797))
+* [] guard validate callbacks against undefined input ([7bad1ef](https://github.com/contentful-labs/worklog/commit/7bad1efb3b9686b131a4f120978cc3571d8794d9))
+* [] harden CLI against undefined values in init and AI tools ([a054a49](https://github.com/contentful-labs/worklog/commit/a054a4959a0ad099406c31d04c0463e916622b63))
+
 ## 1.0.0 (2026-02-27)
 
 
