@@ -574,7 +574,7 @@ export async function promptVault(
     placeholder: fallback,
     initialValue: initial,
     validate: (v) => {
-      if (!(v.trim() || fallbackValue).trim()) return "Path is required";
+      if (!((v ?? "").trim() || fallbackValue).trim()) return "Path is required";
     },
   });
   cancelGuard(vault);
@@ -666,7 +666,7 @@ export async function promptAtlassian(
       placeholder: fallbackUrl,
       initialValue: initial?.url,
       validate: (v) =>
-        validateAtlassianUrl((v.trim() || fallbackUrl).trim()) ?? undefined,
+        validateAtlassianUrl(((v ?? "").trim() || fallbackUrl).trim()) ?? undefined,
     });
     cancelGuard(url);
     urlStr = ((url as string).trim() || fallbackUrl).replace(/\/$/, "");
@@ -676,7 +676,7 @@ export async function promptAtlassian(
     message: "Your Atlassian email:",
     placeholder: "you@company.com",
     initialValue: initial?.email,
-    validate: (v) => validateEmail(v.trim()) ?? undefined,
+    validate: (v) => validateEmail((v ?? "").trim()) ?? undefined,
   });
   cancelGuard(email);
 
@@ -720,7 +720,7 @@ export async function promptGitHub(
       placeholder: fallbackText || "myorg",
       initialValue: initial?.join(", "),
       validate: (v) => {
-        const parsed = parseCommaSeparated((v.trim() || fallbackText).trim());
+        const parsed = parseCommaSeparated(((v ?? "").trim() || fallbackText).trim());
         if (parsed.length === 0) return "At least one org required";
       },
     });
@@ -753,14 +753,14 @@ export async function promptProfile(
   const fullName = await p.text({
     message: "Full name:",
     initialValue: initial?.fullName,
-    validate: (v) => (!v.trim() ? "Required" : undefined),
+    validate: (v) => (!v?.trim() ? "Required" : undefined),
   });
   cancelGuard(fullName);
 
   const displayName = await p.text({
     message: "Display name (as it appears in Jira/Confluence):",
     initialValue: initial?.displayName ?? (fullName as string),
-    validate: (v) => (!v.trim() ? "Required" : undefined),
+    validate: (v) => (!v?.trim() ? "Required" : undefined),
   });
   cancelGuard(displayName);
   p.log.info("Must match how your name appears in Jira/Confluence comments.");
@@ -769,21 +769,21 @@ export async function promptProfile(
     message: "Job title:",
     placeholder: "Senior Software Engineer",
     initialValue: initial?.jobTitle,
-    validate: (v) => (!v.trim() ? "Required" : undefined),
+    validate: (v) => (!v?.trim() ? "Required" : undefined),
   });
   cancelGuard(jobTitle);
 
   const level = await p.text({
     message: "Level (e.g. IC-5, L5, Staff):",
     initialValue: initial?.level,
-    validate: (v) => (!v.trim() ? "Required" : undefined),
+    validate: (v) => (!v?.trim() ? "Required" : undefined),
   });
   cancelGuard(level);
 
   const company = await p.text({
     message: "Company:",
     initialValue: initial?.company,
-    validate: (v) => (!v.trim() ? "Required" : undefined),
+    validate: (v) => (!v?.trim() ? "Required" : undefined),
   });
   cancelGuard(company);
 
@@ -798,7 +798,7 @@ export async function promptProfile(
     message: "Role start date (YYYY-MM-DD):",
     placeholder: "2024-01-01",
     initialValue: initial?.startDate,
-    validate: (v) => validateISODate(v.trim()) ?? undefined,
+    validate: (v) => validateISODate((v ?? "").trim()) ?? undefined,
   });
   cancelGuard(startDate);
   p.log.info("Coaching uses tenure to calibrate expectations.");
@@ -806,14 +806,14 @@ export async function promptProfile(
   const domain = await p.text({
     message: "What does your team build? (1-2 sentences):",
     initialValue: initial?.domain,
-    validate: (v) => (!v.trim() ? "Required" : undefined),
+    validate: (v) => (!v?.trim() ? "Required" : undefined),
   });
   cancelGuard(domain);
 
   const team = await p.text({
     message: "Current team name:",
     initialValue: initial?.team,
-    validate: (v) => (!v.trim() ? "Required" : undefined),
+    validate: (v) => (!v?.trim() ? "Required" : undefined),
   });
   cancelGuard(team);
 
@@ -865,14 +865,14 @@ export async function promptCareer(
   const currentLevel = await p.text({
     message: "Current level:",
     initialValue: initial?.currentLevel,
-    validate: (v) => (!v.trim() ? "Required" : undefined),
+    validate: (v) => (!v?.trim() ? "Required" : undefined),
   });
   cancelGuard(currentLevel);
 
   const targetLevel = await p.text({
     message: "Target level (coach nudges you toward this):",
     initialValue: initial?.targetLevel,
-    validate: (v) => (!v.trim() ? "Required" : undefined),
+    validate: (v) => (!v?.trim() ? "Required" : undefined),
   });
   cancelGuard(targetLevel);
 
@@ -959,7 +959,7 @@ export async function promptTeamHistory(
   while (addMore) {
     const teamName = await p.text({
       message: "Team name:",
-      validate: (v) => (!v.trim() ? "Required" : undefined),
+      validate: (v) => (!v?.trim() ? "Required" : undefined),
     });
     cancelGuard(teamName);
 
@@ -970,15 +970,15 @@ export async function promptTeamHistory(
 
     const start = await p.text({
       message: "Start date (YYYY-MM-DD):",
-      validate: (v) => validateISODate(v.trim()) ?? undefined,
+      validate: (v) => validateISODate((v ?? "").trim()) ?? undefined,
     });
     cancelGuard(start);
 
     const end = await p.text({
       message: "End date (YYYY-MM-DD, or Enter if current):",
       validate: (v) => {
-        if (!v.trim()) return undefined;
-        return validateISODate(v.trim()) ?? undefined;
+        if (!(v ?? "").trim()) return undefined;
+        return validateISODate((v ?? "").trim()) ?? undefined;
       },
     });
     cancelGuard(end);
@@ -1021,7 +1021,7 @@ export async function promptTeamHistory(
     while (moreNotes) {
       const note = await p.text({
         message: "Transition note:",
-        validate: (v) => (!v.trim() ? "Required" : undefined),
+        validate: (v) => (!v?.trim() ? "Required" : undefined),
       });
       cancelGuard(note);
       timeline.transitionNotes.push((note as string).trim());
