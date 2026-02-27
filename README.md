@@ -24,7 +24,7 @@ You *can* generate retroactively for past weeks — and it works fine for that. 
 Requires [Bun](https://bun.sh) v1.x+.
 
 ```bash
-# One-time registry setup for GitHub Packages
+# If using npm global install, ensure this is in ~/.npmrc
 echo "@contentful-labs:registry=https://npm.pkg.github.com" >> ~/.npmrc
 
 # Install
