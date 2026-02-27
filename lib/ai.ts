@@ -50,9 +50,9 @@ async function queryOpenAI(options: AIQueryOptions, modelOverride?: string): Pro
 
   const tools: any[] = [];
   if (options.tools?.includes("Bash")) {
-    const { shellTool } = await import("@openai/agents");
-    if (shellTool) {
-      tools.push(shellTool);
+    const agentsMod = await import("@openai/agents") as Record<string, unknown>;
+    if ("shellTool" in agentsMod && agentsMod.shellTool) {
+      tools.push(agentsMod.shellTool);
     }
   }
 

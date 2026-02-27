@@ -1271,7 +1271,7 @@ async function fetchDataForWeek(
   githubUsername: string,
   weekInfo: WeekInfo,
   config: WorklogConfig
-): Promise<{ issues: JiraIssue[]; pages: ConfluencePage[]; prs: GitHubPR[]; reviews: PRReview[] }> {
+): Promise<{ issues: JiraIssue[]; pages: ConfluencePage[]; prs: GitHubPR[]; reviews: PRReview[]; teamSprintItems: JiraIssue[] }> {
   const startDate = weekInfo.startDate.toISOString().split("T")[0];
   const endDate = weekInfo.endDate.toISOString().split("T")[0];
 
