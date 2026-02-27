@@ -6,7 +6,6 @@ import {
   type WorklogConfig,
   saveConfig,
   loadConfig,
-  detectLegacyConfig,
   getConfigPath,
   validateAtlassianUrl,
   validateEmail,
@@ -31,6 +30,17 @@ function expandHome(path: string): string {
   if (path.startsWith("~/")) return join(homedir(), path.slice(2));
   return resolve(path);
 }
+
+const DEFAULT_VAULT_PATH = "~/Documents/worklog";
+const DEFAULT_ATLASSIAN_URL = "https://contentful.atlassian.net";
+const DEFAULT_GITHUB_ORGS = ["contentful", "contentful-labs"];
+const DEFAULT_PROFILE_COMPANY = "Contentful";
+const DEFAULT_CAREER_COMPANY_VALUES = [
+  "Relentless Customer Focus",
+  "Be Bold",
+  "Own It",
+  "Win Together",
+];
 
 // --- Vault doc writer with existing-file handling ---
 
@@ -554,17 +564,22 @@ _Edit this document to adjust coaching style. Changes affect all future brag boo
 
 // --- Prompt helpers (reusable by configure) ---
 
-export async function promptVault(initial?: string): Promise<string> {
+export async function promptVault(
+  initial?: string,
+  fallback: string = DEFAULT_VAULT_PATH
+): Promise<string> {
+  const fallbackValue = initial?.trim() || fallback;
   const vault = await p.text({
     message: "Vault path (where to save brag books and docs):",
-    placeholder: "~/Documents/worklog",
+    placeholder: fallback,
     initialValue: initial,
     validate: (v) => {
-      if (!v.trim()) return "Path is required";
+      if (!(v.trim() || fallbackValue).trim()) return "Path is required";
     },
   });
   cancelGuard(vault);
-  return expandHome((vault as string).trim());
+  const selected = (vault as string).trim() || fallbackValue;
+  return expandHome(selected);
 }
 
 export async function promptAI(
@@ -631,15 +646,31 @@ export async function promptAI(
 }
 
 export async function promptAtlassian(
-  initial?: WorklogConfig["atlassian"]
+  initial?: WorklogConfig["atlassian"],
+  options?: { defaultUrl?: string; skipUrlPrompt?: boolean }
 ): Promise<WorklogConfig["atlassian"]> {
-  const url = await p.text({
-    message: "Atlassian instance URL:",
-    placeholder: "https://company.atlassian.net",
-    initialValue: initial?.url,
-    validate: (v) => validateAtlassianUrl(v.trim()) ?? undefined,
-  });
-  cancelGuard(url);
+  const fallbackUrl = (
+    initial?.url ||
+    options?.defaultUrl ||
+    DEFAULT_ATLASSIAN_URL
+  )
+    .trim()
+    .replace(/\/$/, "");
+  let urlStr = fallbackUrl;
+
+  if (options?.skipUrlPrompt) {
+    p.log.info(`Using Atlassian instance URL: ${urlStr}`);
+  } else {
+    const url = await p.text({
+      message: "Atlassian instance URL:",
+      placeholder: fallbackUrl,
+      initialValue: initial?.url,
+      validate: (v) =>
+        validateAtlassianUrl((v.trim() || fallbackUrl).trim()) ?? undefined,
+    });
+    cancelGuard(url);
+    urlStr = ((url as string).trim() || fallbackUrl).replace(/\/$/, "");
+  }
 
   const email = await p.text({
     message: "Your Atlassian email:",
@@ -649,7 +680,6 @@ export async function promptAtlassian(
   });
   cancelGuard(email);
 
-  const urlStr = (url as string).trim().replace(/\/$/, "");
   const emailStr = (email as string).trim();
 
   // Verify connectivity
@@ -669,16 +699,36 @@ export async function promptAtlassian(
   return { url: urlStr, email: emailStr };
 }
 
-export async function promptGitHub(initial?: string[]): Promise<string[]> {
-  const orgs = await p.text({
-    message: "GitHub orgs to track (comma-separated):",
-    placeholder: "myorg",
-    initialValue: initial?.join(", "),
-    validate: (v) => {
-      if (!v.trim()) return "At least one org required";
-    },
-  });
-  cancelGuard(orgs);
+export async function promptGitHub(
+  initial?: string[],
+  options?: { defaultOrgs?: string[]; skipOrgPrompt?: boolean }
+): Promise<string[]> {
+  const fallbackOrgs =
+    initial?.length
+      ? initial
+      : options?.defaultOrgs?.length
+        ? options.defaultOrgs
+        : DEFAULT_GITHUB_ORGS;
+  let selectedOrgs = fallbackOrgs;
+
+  if (options?.skipOrgPrompt) {
+    p.log.info(`Using GitHub orgs: ${selectedOrgs.join(", ")}`);
+  } else {
+    const fallbackText = fallbackOrgs.join(", ");
+    const orgs = await p.text({
+      message: "GitHub orgs to track (comma-separated):",
+      placeholder: fallbackText || "myorg",
+      initialValue: initial?.join(", "),
+      validate: (v) => {
+        const parsed = parseCommaSeparated((v.trim() || fallbackText).trim());
+        if (parsed.length === 0) return "At least one org required";
+      },
+    });
+    cancelGuard(orgs);
+    selectedOrgs = parseCommaSeparated(
+      ((orgs as string).trim() || fallbackText).trim()
+    );
+  }
 
   // Verify connectivity
   const check = await checkGitHubConnection();
@@ -694,7 +744,7 @@ export async function promptGitHub(initial?: string[]): Promise<string[]> {
     }
   }
 
-  return parseCommaSeparated(orgs as string);
+  return selectedOrgs;
 }
 
 export async function promptProfile(
@@ -1061,17 +1111,16 @@ export async function runInit(options?: { dryRun?: boolean }): Promise<void> {
     useExisting = true;
   }
 
-  // Pre-fill from legacy config if available
-  const legacy = detectLegacyConfig();
-  if (legacy) {
-    p.log.info("Found legacy .worklog.json — pre-filling GitHub orgs.");
-  }
-
   // --- Step 1: Vault ---
   p.log.message(
     "\nWorklog generates markdown files — brag books, work logs, and coaching notes.\nThese work with Obsidian, any markdown reader, or just your filesystem.\n"
   );
-  const vault = await promptVault(useExisting ? existing!.vault : undefined);
+  const vault = useExisting
+    ? existing!.vault
+    : expandHome(DEFAULT_VAULT_PATH);
+  if (!useExisting) {
+    p.log.info(`Using default vault: ${DEFAULT_VAULT_PATH}`);
+  }
 
   // --- Step 2: AI Authentication ---
   p.log.message(
@@ -1086,18 +1135,41 @@ export async function runInit(options?: { dryRun?: boolean }): Promise<void> {
   p.log.message(
     "\nWorklog fetches your Jira tickets and Confluence contributions each week.\n"
   );
-  const atlassian = await promptAtlassian(useExisting ? existing!.atlassian : undefined);
+  const atlassianInitial = useExisting
+    ? existing!.atlassian
+    : { url: DEFAULT_ATLASSIAN_URL, email: "" };
+  const atlassian = await promptAtlassian(
+    atlassianInitial,
+    {
+      defaultUrl: DEFAULT_ATLASSIAN_URL,
+      skipUrlPrompt: true,
+    }
+  );
 
   // --- Step 4: GitHub ---
   p.log.message("\nWorklog fetches your PRs authored and reviewed.\n");
-  const githubOrgs = await promptGitHub(useExisting ? existing!.githubOrgs : legacy?.githubOrgs);
+  const githubOrgs = await promptGitHub(
+    useExisting ? existing!.githubOrgs : DEFAULT_GITHUB_ORGS,
+    {
+      defaultOrgs: DEFAULT_GITHUB_ORGS,
+      skipOrgPrompt: true,
+    }
+  );
 
-  // --- Steps 5-8: Document parsing (skip when updating existing config) ---
+  // --- Steps 5-7: Optional document parsing (skip when updating existing config) ---
   // Collect partial extractions to pre-fill prompts
   let resumeData: ResumeExtraction | null = null;
   let companyData: CompanyExtraction | null = null;
   let levelingData: LevelingExtraction | null = null;
   let reviewData: ReviewGuidelinesExtraction | null = null;
+  if (!useExisting) {
+    companyData = {
+      companyValues: [...DEFAULT_CAREER_COMPANY_VALUES],
+      companyCulture: null,
+      companyDescription: null,
+    };
+    p.log.info("Using bundled company defaults.");
+  }
 
   if (useExisting) {
     p.log.info("Using existing config values — skipping document parsing.");
@@ -1141,38 +1213,7 @@ export async function runInit(options?: { dryRun?: boolean }): Promise<void> {
       }
     }
 
-    // Step 6: Company website
-    const companyUrl = await p.text({
-      message: "Company website URL:",
-      placeholder: "https://company.com (Enter to skip)",
-    });
-    cancelGuard(companyUrl);
-
-    if ((companyUrl as string).trim()) {
-      const spinner = p.spinner();
-      spinner.start("Fetching company website...");
-      try {
-        companyData = await parseCompanyWebsite(
-          (companyUrl as string).trim(),
-          ai.model
-        );
-        if (companyData) {
-          spinner.stop("Company info extracted");
-          if (companyData.companyValues?.length) {
-            p.log.info(`Values: ${companyData.companyValues.join(", ")}`);
-          }
-          if (companyData.companyDescription) {
-            p.log.info(`About: ${companyData.companyDescription}`);
-          }
-        } else {
-          spinner.stop("Could not extract company info (will ask manually)");
-        }
-      } catch {
-        spinner.stop("Company website parsing failed (will ask manually)");
-      }
-    }
-
-    // Step 7: Leveling guide
+    // Step 6: Leveling guide
     const levelingPath = await p.text({
       message: "Career leveling guide file path:",
       placeholder: "~/Documents/leveling-guide.md (Enter to skip)",
@@ -1203,7 +1244,7 @@ export async function runInit(options?: { dryRun?: boolean }): Promise<void> {
       }
     }
 
-    // Step 8: Self-review guidelines
+    // Step 7: Self-review guidelines
     const reviewPath = await p.text({
       message: "Self-review guidelines file path:",
       placeholder: "~/Documents/review-guidelines.md (Enter to skip)",
@@ -1245,12 +1286,11 @@ export async function runInit(options?: { dryRun?: boolean }): Promise<void> {
   // Build pre-filled initial values from existing config or document extractions
   const profileInitial: Partial<WorklogConfig["profile"]> = useExisting
     ? { ...existing!.profile }
-    : {};
+    : { company: DEFAULT_PROFILE_COMPANY };
   if (!useExisting && resumeData) {
     if (resumeData.fullName) profileInitial.fullName = resumeData.fullName;
     if (resumeData.jobTitle) profileInitial.jobTitle = resumeData.jobTitle;
     if (resumeData.level) profileInitial.level = resumeData.level;
-    if (resumeData.company) profileInitial.company = resumeData.company;
     if (resumeData.location) profileInitial.location = resumeData.location;
     if (resumeData.domain) profileInitial.domain = resumeData.domain;
   }
@@ -1265,7 +1305,7 @@ export async function runInit(options?: { dryRun?: boolean }): Promise<void> {
   // Build career initial values
   const careerInitial: Partial<WorklogConfig["career"]> = useExisting
     ? { ...existing!.career }
-    : {};
+    : { companyValues: [...DEFAULT_CAREER_COMPANY_VALUES] };
   if (!useExisting) {
     if (resumeData?.skills?.length) careerInitial.skills = resumeData.skills;
     if (resumeData?.growthAreas?.length) careerInitial.growthAreas = resumeData.growthAreas;

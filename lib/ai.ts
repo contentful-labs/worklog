@@ -1,4 +1,4 @@
-import { requireConfig } from "./config";
+import { loadConfig } from "./config";
 import { resolveOpenAIAuth } from "./openai-auth";
 
 export interface AIQueryOptions {
@@ -14,8 +14,8 @@ export interface AIQueryOptions {
  * Returns the final text output with preamble stripped and code block unwrapped.
  */
 export async function aiQuery(options: AIQueryOptions): Promise<string> {
-  const config = requireConfig();
-  const model = options.model ?? config.ai.model;
+  const config = loadConfig();
+  const model = options.model ?? config?.ai.model;
 
   const raw = await queryOpenAI(options, model);
   return postProcess(raw);
