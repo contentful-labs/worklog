@@ -452,12 +452,16 @@ async function getPreviousBragBooks(currentWeek: number, currentYear: number): P
 function getEnvTokens(): { apiToken: string; githubToken: string } {
   const apiToken = process.env.ATLASSIAN_API_TOKEN;
   if (!apiToken) {
-    p.log.error("ATLASSIAN_API_TOKEN env var required\nGenerate at: https://id.atlassian.com/manage-profile/security/api-tokens");
+    p.log.error(
+      "ATLASSIAN_API_TOKEN not set. Run `worklog init` to set up credentials.\nOr generate manually at: https://id.atlassian.com/manage-profile/security/api-tokens"
+    );
     process.exit(1);
   }
   const githubToken = process.env.GITHUB_TOKEN;
   if (!githubToken) {
-    p.log.error("GITHUB_TOKEN env var required");
+    p.log.error(
+      "GITHUB_TOKEN not set. Run `worklog init` to set up credentials.\nOr generate manually at: https://github.com/settings/tokens"
+    );
     process.exit(1);
   }
   return { apiToken, githubToken };

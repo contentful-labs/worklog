@@ -1,5 +1,5 @@
 import * as p from "@clack/prompts";
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, appendFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve, extname } from "node:path";
 import {
@@ -133,6 +133,100 @@ function checkOpenAIAuth(method: "subscription" | "api-key"): {
   }
   // env key works too
   return { ok: true, source: "env" };
+}
+
+// --- Token prompt helper ---
+
+function getShellProfile(): string {
+  const shell = process.env.SHELL ?? "";
+  if (shell.endsWith("/zsh")) return join(homedir(), ".zshrc");
+  return join(homedir(), ".bashrc");
+}
+
+async function persistTokenToShellProfile(
+  envVar: string,
+  value: string
+): Promise<boolean> {
+  const profilePath = getShellProfile();
+  const profileName = profilePath.split("/").pop()!;
+
+  const shouldPersist = await p.confirm({
+    message: `Add export ${envVar}="..." to ~/${profileName}?`,
+    initialValue: true,
+  });
+  cancelGuard(shouldPersist);
+
+  if (!shouldPersist) return false;
+
+  // Check for existing export line to avoid duplicates
+  if (existsSync(profilePath)) {
+    const contents = readFileSync(profilePath, "utf-8");
+    const exportPattern = new RegExp(`^export ${envVar}=`, "m");
+    if (exportPattern.test(contents)) {
+      p.log.warn(
+        `${envVar} already exported in ~/${profileName}. Update it manually if needed.`
+      );
+      return false;
+    }
+  }
+
+  const line = `\nexport ${envVar}="${value}" # worklog\n`;
+  appendFileSync(profilePath, line);
+  p.log.success(`Added to ~/${profileName}. Restart your shell or run: source ~/${profileName}`);
+  return true;
+}
+
+interface PromptForTokenOptions {
+  envVar: string;
+  label: string;
+  generateUrl: string;
+  validate: () => Promise<{ ok: boolean; detail?: string }> | { ok: boolean; detail?: string };
+}
+
+async function promptForToken(opts: PromptForTokenOptions): Promise<boolean> {
+  const MAX_RETRIES = 2;
+
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    p.log.info(
+      `${opts.label} token not found.\nGenerate one at: ${opts.generateUrl}`
+    );
+
+    const token = await p.password({
+      message: `Paste your ${opts.label} token:`,
+    });
+    cancelGuard(token);
+
+    const tokenStr = (token as string ?? "").trim();
+    if (!tokenStr) {
+      p.log.warn("Empty token, skipping.");
+      return false;
+    }
+
+    process.env[opts.envVar] = tokenStr;
+
+    const result = await opts.validate();
+    if (result.ok) {
+      p.log.success(result.detail ?? `${opts.label} connected.`);
+      await persistTokenToShellProfile(opts.envVar, tokenStr);
+      return true;
+    }
+
+    p.log.warn(`Validation failed: ${result.detail ?? "unknown error"}`);
+    // Clear the invalid token
+    delete process.env[opts.envVar];
+
+    if (attempt < MAX_RETRIES) {
+      const retry = await p.confirm({
+        message: "Try again?",
+        initialValue: true,
+      });
+      cancelGuard(retry);
+      if (!retry) return false;
+    }
+  }
+
+  p.log.warn(`Skipping ${opts.label} setup. You can set ${opts.envVar} manually later.`);
+  return false;
 }
 
 // --- Document reading helpers ---
@@ -620,13 +714,20 @@ export async function promptAI(
         ].join("\n")
       );
     } else {
-      p.log.warn(
-        [
-          "OPENAI_API_KEY not found in environment.",
-          'Set it in your shell profile: export OPENAI_API_KEY="sk-..."',
-          "Get one at: https://platform.openai.com/api-keys",
-        ].join("\n")
-      );
+      const set = await promptForToken({
+        envVar: "OPENAI_API_KEY",
+        label: "OpenAI API",
+        generateUrl: "https://platform.openai.com/api-keys",
+        validate: () => {
+          const r = checkOpenAIAuth("api-key");
+          return { ok: r.ok, detail: r.ok ? "OPENAI_API_KEY set." : r.reason };
+        },
+      });
+      if (!set) {
+        p.log.warn(
+          "OpenAI API key not configured. Set OPENAI_API_KEY before running worklog."
+        );
+      }
     }
   } else if (keyStatus.source === "codex-subscription") {
     p.log.success("ChatGPT subscription tokens found via ~/.codex/auth.json");
@@ -683,17 +784,27 @@ export async function promptAtlassian(
   const emailStr = (email as string).trim();
 
   // Verify connectivity
-  const check = await checkAtlassianConnection(urlStr, emailStr);
+  let check = await checkAtlassianConnection(urlStr, emailStr);
   if (check.ok) {
     p.log.success(`Connected as ${check.accountId}`);
-  } else {
-    if (check.error?.includes("not set")) {
+  } else if (check.error?.includes("not set")) {
+    const set = await promptForToken({
+      envVar: "ATLASSIAN_API_TOKEN",
+      label: "Atlassian API",
+      generateUrl:
+        "https://id.atlassian.com/manage-profile/security/api-tokens",
+      validate: async () => {
+        const r = await checkAtlassianConnection(urlStr, emailStr);
+        return { ok: r.ok, detail: r.ok ? `Connected as ${r.accountId}` : r.error };
+      },
+    });
+    if (!set) {
       p.log.warn(
-        `ATLASSIAN_API_TOKEN not set.\nSet it in your shell profile.\nGenerate at: https://id.atlassian.com/manage-profile/security/api-tokens`
+        "Atlassian token not configured. Set ATLASSIAN_API_TOKEN before running worklog."
       );
-    } else {
-      p.log.warn(`Could not verify connection: ${check.error}`);
     }
+  } else {
+    p.log.warn(`Could not verify connection: ${check.error}`);
   }
 
   return { url: urlStr, email: emailStr };
@@ -734,14 +845,23 @@ export async function promptGitHub(
   const check = await checkGitHubConnection();
   if (check.ok) {
     p.log.success(`Connected as ${check.username}`);
-  } else {
-    if (check.error?.includes("not set")) {
+  } else if (check.error?.includes("not set")) {
+    const set = await promptForToken({
+      envVar: "GITHUB_TOKEN",
+      label: "GitHub",
+      generateUrl: "https://github.com/settings/tokens",
+      validate: async () => {
+        const r = await checkGitHubConnection();
+        return { ok: r.ok, detail: r.ok ? `Connected as ${r.username}` : r.error };
+      },
+    });
+    if (!set) {
       p.log.warn(
-        `GITHUB_TOKEN not set.\nSet it in your shell profile.\nGenerate at: https://github.com/settings/tokens`
+        "GitHub token not configured. Set GITHUB_TOKEN before running worklog."
       );
-    } else {
-      p.log.warn(`Could not verify GitHub connection: ${check.error}`);
     }
+  } else {
+    p.log.warn(`Could not verify GitHub connection: ${check.error}`);
   }
 
   return selectedOrgs;
