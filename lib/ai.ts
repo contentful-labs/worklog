@@ -51,7 +51,9 @@ async function queryOpenAI(options: AIQueryOptions, modelOverride?: string): Pro
   const tools: any[] = [];
   if (options.tools?.includes("Bash")) {
     const { shellTool } = await import("@openai/agents");
-    tools.push(shellTool);
+    if (shellTool) {
+      tools.push(shellTool);
+    }
   }
 
   const model = modelOverride || "gpt-5";
