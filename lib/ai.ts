@@ -1,5 +1,5 @@
 import { loadConfig } from "./config";
-import { resolveOpenAIAuth } from "./openai-auth";
+import { resolveOpenAIAuth, type OpenAIAuthResolution } from "./openai-auth";
 
 export interface AIQueryOptions {
   prompt: string;
@@ -7,9 +7,11 @@ export interface AIQueryOptions {
 }
 
 /**
- * AI query function. Uses OpenAI Chat Completions API.
+ * AI query function.
  *
- * Works with both API keys and ChatGPT subscription tokens.
+ * - ChatGPT subscription tokens → Responses API (/v1/responses)
+ * - API keys → Chat Completions API (/v1/chat/completions)
+ *
  * Returns the final text output with preamble stripped and code block unwrapped.
  */
 export async function aiQuery(options: AIQueryOptions): Promise<string> {
@@ -22,7 +24,7 @@ export async function aiQuery(options: AIQueryOptions): Promise<string> {
 
 // --- OpenAI path ---
 
-async function queryOpenAI(options: AIQueryOptions, modelOverride?: string): Promise<string> {
+function resolveAuthOrThrow(): Exclude<OpenAIAuthResolution, { source: "none" }> {
   const auth = resolveOpenAIAuth();
   if (auth.source === "none") {
     throw new Error(
@@ -43,9 +45,70 @@ async function queryOpenAI(options: AIQueryOptions, modelOverride?: string): Pro
         .join("\n")
     );
   }
+  return auth;
+}
 
+async function queryOpenAI(options: AIQueryOptions, modelOverride?: string): Promise<string> {
+  const auth = resolveAuthOrThrow();
   const model = modelOverride || "gpt-5";
 
+  if (auth.source === "codex-subscription") {
+    return queryViaResponses(auth, model, options.prompt);
+  }
+  return queryViaChatCompletions(auth, model, options.prompt);
+}
+
+/** Responses API — works with ChatGPT subscription tokens */
+async function queryViaResponses(
+  auth: Extract<OpenAIAuthResolution, { source: "codex-subscription" }>,
+  model: string,
+  prompt: string
+): Promise<string> {
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    Authorization: `Bearer ${auth.apiKey}`,
+  };
+  if (auth.accountId) {
+    headers["ChatGPT-Account-Id"] = auth.accountId;
+  }
+
+  const res = await fetch("https://api.openai.com/v1/responses", {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      model,
+      instructions: "You are a helpful assistant. Follow the user's instructions precisely.",
+      input: prompt,
+    }),
+  });
+
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`OpenAI Responses API error ${res.status}: ${body}`);
+  }
+
+  const data = await res.json();
+
+  // Extract text from output items
+  let text = "";
+  for (const item of data.output ?? []) {
+    if (item.type === "message") {
+      for (const block of item.content ?? []) {
+        if (block.type === "output_text") {
+          text += block.text;
+        }
+      }
+    }
+  }
+  return text;
+}
+
+/** Chat Completions API — works with standard API keys */
+async function queryViaChatCompletions(
+  auth: Extract<OpenAIAuthResolution, { source: "env" }>,
+  model: string,
+  prompt: string
+): Promise<string> {
   const res = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: {
@@ -59,7 +122,7 @@ async function queryOpenAI(options: AIQueryOptions, modelOverride?: string): Pro
           role: "system",
           content: "You are a helpful assistant. Follow the user's instructions precisely.",
         },
-        { role: "user", content: options.prompt },
+        { role: "user", content: prompt },
       ],
     }),
   });

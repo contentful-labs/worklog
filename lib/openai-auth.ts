@@ -3,7 +3,8 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 export type OpenAIAuthResolution =
-  | { apiKey: string; source: "env" | "codex-subscription" }
+  | { apiKey: string; source: "env" }
+  | { apiKey: string; source: "codex-subscription"; accountId: string }
   | { apiKey?: undefined; source: "none"; reason: string };
 
 const CODEX_AUTH_PATH = join(homedir(), ".codex", "auth.json");
@@ -40,12 +41,14 @@ export function resolveOpenAIAuth(): OpenAIAuthResolution {
     return { source: "none", reason: `${CODEX_AUTH_PATH} has unexpected format` };
   }
 
-  const tokens = (parsed as { tokens?: { access_token?: unknown } }).tokens;
+  const tokens = (parsed as { tokens?: { access_token?: unknown; account_id?: unknown } }).tokens;
   const accessToken =
     typeof tokens?.access_token === "string" ? tokens.access_token.trim() : "";
+  const accountId =
+    typeof tokens?.account_id === "string" ? tokens.account_id.trim() : "";
 
   if (accessToken) {
-    return { apiKey: accessToken, source: "codex-subscription" };
+    return { apiKey: accessToken, source: "codex-subscription", accountId };
   }
 
   return {
