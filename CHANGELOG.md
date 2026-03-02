@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.1.2](https://github.com/contentful-labs/worklog/compare/v1.1.1...v1.1.2) (2026-03-02)
+
+
+### Bug Fixes
+
+* [] use Chat Completions API instead of Agents SDK ([5e45e39](https://github.com/contentful-labs/worklog/commit/5e45e39c15d8866b695a02d12263999d9235c1cc))
+* use Chat Completions API instead of Agents SDK ([041e5bb](https://github.com/contentful-labs/worklog/commit/041e5bbae8a10ffc93b5d12a965fe4d109415845))
+
 ## [1.1.1](https://github.com/contentful-labs/worklog/compare/v1.1.0...v1.1.1) (2026-03-02)
 
 
