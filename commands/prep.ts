@@ -188,7 +188,7 @@ export async function runPrep(): Promise<void> {
 
   // Generate via AI
   s.start("Generating...");
-  let result = await aiQuery({ prompt, tools: [], maxTurns: 1 });
+  let result = await aiQuery({ prompt });
   s.stop("Generated");
 
   // Ensure frontmatter tag

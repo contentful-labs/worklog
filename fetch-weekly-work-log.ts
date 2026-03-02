@@ -950,8 +950,6 @@ Write the brag book entry as markdown. Output ONLY the markdown content, no expl
 
   let result = await aiQuery({
     prompt: fullPrompt,
-    tools: ["Bash"],
-    maxTurns: 5,
   });
 
   // Parse out the memory update section
