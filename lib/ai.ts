@@ -9,7 +9,7 @@ export interface AIQueryOptions {
 /**
  * AI query function. Dispatches to the configured provider at runtime.
  *
- * Anthropic → Messages API (/v1/messages)
+ * Anthropic → Claude Agent SDK (works with Max subscription or API key)
  * OpenAI subscription → Responses API (/v1/responses)
  * OpenAI API key → Chat Completions API (/v1/chat/completions)
  *
@@ -22,7 +22,7 @@ export async function aiQuery(options: AIQueryOptions): Promise<string> {
 
   let raw: string;
   if (provider === "anthropic") {
-    raw = await queryAnthropic(model, options.prompt);
+    raw = await queryAnthropic(options.prompt);
   } else {
     raw = await queryOpenAI(model, options.prompt);
   }
@@ -30,50 +30,35 @@ export async function aiQuery(options: AIQueryOptions): Promise<string> {
   return postProcess(raw);
 }
 
-// --- Anthropic path ---
+// --- Anthropic path (via Claude Agent SDK — works with Max subscription) ---
 
-async function queryAnthropic(modelOverride: string | undefined, prompt: string): Promise<string> {
-  const apiKey = process.env.ANTHROPIC_API_KEY?.trim();
-  if (!apiKey) {
-    throw new Error(
-      [
-        "Anthropic API key not found.",
-        "",
-        '  export ANTHROPIC_API_KEY="sk-ant-..."',
-        "  Get one at https://console.anthropic.com/settings/keys",
-      ].join("\n")
-    );
-  }
+async function queryAnthropic(prompt: string): Promise<string> {
+  const { query } = await import("@anthropic-ai/claude-agent-sdk");
 
-  const model = modelOverride || "claude-sonnet-4-20250514";
-
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-api-key": apiKey,
-      "anthropic-version": "2023-06-01",
+  let result = "";
+  for await (const message of query({
+    prompt,
+    options: {
+      allowedTools: [],
+      maxTurns: 1,
+      cwd: process.cwd(),
     },
-    body: JSON.stringify({
-      model,
-      max_tokens: 8192,
-      messages: [{ role: "user", content: prompt }],
-    }),
-  });
-
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`Anthropic API error ${res.status}: ${body}`);
-  }
-
-  const data = await res.json();
-  let text = "";
-  for (const block of data.content ?? []) {
-    if (block.type === "text") {
-      text += block.text;
+  })) {
+    if (message.type === "assistant" && message.message?.content) {
+      const hasToolUse = message.message.content.some(
+        (b: { type: string }) => b.type === "tool_use"
+      );
+      if (!hasToolUse) {
+        for (const block of message.message.content) {
+          if ("text" in block) {
+            result += block.text;
+          }
+        }
+      }
     }
   }
-  return text;
+
+  return result;
 }
 
 // --- OpenAI path ---
