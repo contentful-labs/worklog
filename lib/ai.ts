@@ -1,5 +1,5 @@
 import { loadConfig } from "./config";
-import { resolveOpenAIAuth, type OpenAIAuthResolution } from "./openai-auth";
+import { resolveOpenAIAuth, refreshCodexToken, type OpenAIAuthResolution } from "./openai-auth";
 
 export interface AIQueryOptions {
   prompt: string;
@@ -58,29 +58,43 @@ async function queryOpenAI(options: AIQueryOptions, modelOverride?: string): Pro
   return queryViaChatCompletions(auth, model, options.prompt);
 }
 
-/** Responses API — works with ChatGPT subscription tokens */
+/** Codex Responses API — works with ChatGPT subscription tokens */
 async function queryViaResponses(
   auth: Extract<OpenAIAuthResolution, { source: "codex-subscription" }>,
   model: string,
   prompt: string
 ): Promise<string> {
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-    Authorization: `Bearer ${auth.apiKey}`,
-  };
-  if (auth.accountId) {
-    headers["ChatGPT-Account-Id"] = auth.accountId;
-  }
+  const doRequest = async (token: string) => {
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+      "OpenAI-Beta": "responses=experimental",
+      originator: "codex_cli_rs",
+    };
+    if (auth.accountId) {
+      headers["chatgpt-account-id"] = auth.accountId;
+    }
 
-  const res = await fetch("https://api.openai.com/v1/responses", {
-    method: "POST",
-    headers,
-    body: JSON.stringify({
-      model,
-      instructions: "You are a helpful assistant. Follow the user's instructions precisely.",
-      input: prompt,
-    }),
-  });
+    return fetch("https://api.openai.com/v1/codex/responses", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        model,
+        instructions: "You are a helpful assistant. Follow the user's instructions precisely.",
+        input: prompt,
+      }),
+    });
+  };
+
+  let res = await doRequest(auth.apiKey);
+
+  // If 401, try refreshing the token once
+  if (res.status === 401) {
+    const freshToken = await refreshCodexToken();
+    if (freshToken) {
+      res = await doRequest(freshToken);
+    }
+  }
 
   if (!res.ok) {
     const body = await res.text();
