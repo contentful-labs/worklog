@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.1.3](https://github.com/contentful-labs/worklog/compare/v1.1.2...v1.1.3) (2026-03-02)
+
+
+### Bug Fixes
+
+* [] route subscription tokens to Responses API ([66711ff](https://github.com/contentful-labs/worklog/commit/66711ffedc215b5f878a4234d7dd03c3649ca400))
+* route subscription tokens to Responses API with account header ([c062260](https://github.com/contentful-labs/worklog/commit/c062260d142d89c1c5c558b186e6b12949d2861f))
+
 ## [1.1.2](https://github.com/contentful-labs/worklog/compare/v1.1.1...v1.1.2) (2026-03-02)
 
 
