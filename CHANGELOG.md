@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.2.3](https://github.com/contentful-labs/worklog/compare/v1.2.2...v1.2.3) (2026-03-02)
+
+
+### Bug Fixes
+
+* [] send input as message array for codex endpoint ([c36f16b](https://github.com/contentful-labs/worklog/commit/c36f16b3d43bd59878edab45ca51d4f3964ab613))
+* [] send input as message array for codex endpoint ([be2562b](https://github.com/contentful-labs/worklog/commit/be2562b5ea62bda1960a14f0ec1baa6f71283538))
+
 ## [1.2.2](https://github.com/contentful-labs/worklog/compare/v1.2.1...v1.2.2) (2026-03-02)
 
 
