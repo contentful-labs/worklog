@@ -118,9 +118,8 @@ function checkAIAuth(provider: "anthropic" | "openai"): {
   reason?: string;
 } {
   if (provider === "anthropic") {
-    const key = process.env.ANTHROPIC_API_KEY?.trim();
-    if (key) return { ok: true, source: "env" };
-    return { ok: false, reason: "ANTHROPIC_API_KEY not found in environment" };
+    // Claude Agent SDK handles auth — Max subscription or API key both work
+    return { ok: true, source: "claude-agent-sdk" };
   }
   // OpenAI — auto-detect subscription vs API key
   const resolved = resolveOpenAIAuth();
@@ -488,7 +487,7 @@ export async function promptAI(
       {
         value: "anthropic" as const,
         label: "Anthropic (Claude)",
-        hint: "uses ANTHROPIC_API_KEY",
+        hint: "works with Claude Max subscription or API key",
       },
       {
         value: "openai" as const,
@@ -503,47 +502,30 @@ export async function promptAI(
   const selected = provider as "anthropic" | "openai";
   const keyStatus = checkAIAuth(selected);
 
-  if (!keyStatus.ok) {
-    if (selected === "anthropic") {
-      const set = await promptForToken({
-        envVar: "ANTHROPIC_API_KEY",
-        label: "Anthropic API",
-        generateUrl: "https://console.anthropic.com/settings/keys",
-        validate: () => {
-          const r = checkAIAuth("anthropic");
-          return { ok: r.ok, detail: r.ok ? "ANTHROPIC_API_KEY set." : r.reason };
-        },
-      });
-      if (!set) {
-        p.log.warn(
-          "Anthropic API key not configured. Set ANTHROPIC_API_KEY before running worklog."
-        );
-      }
-    } else {
-      // OpenAI — guide based on what's missing
-      const resolved = resolveOpenAIAuth();
-      if (resolved.source === "none") {
-        p.log.warn(
-          [
-            "OpenAI credentials not found.",
-            "",
-            "Option 1 — ChatGPT subscription:",
-            "  npx codex@latest login",
-            "  Tokens cache at ~/.codex/auth.json",
-            "",
-            "Option 2 — API key:",
-            '  export OPENAI_API_KEY="sk-..."',
-            "  Get one at https://platform.openai.com/api-keys",
-          ].join("\n")
-        );
-      }
+  if (selected === "anthropic") {
+    p.log.info("Uses Claude Agent SDK — works with your Claude Max subscription or ANTHROPIC_API_KEY.");
+  } else if (!keyStatus.ok) {
+    // OpenAI — guide based on what's missing
+    const resolved = resolveOpenAIAuth();
+    if (resolved.source === "none") {
+      p.log.warn(
+        [
+          "OpenAI credentials not found.",
+          "",
+          "Option 1 — ChatGPT subscription:",
+          "  npx codex@latest login",
+          "  Tokens cache at ~/.codex/auth.json",
+          "",
+          "Option 2 — API key:",
+          '  export OPENAI_API_KEY="sk-..."',
+          "  Get one at https://platform.openai.com/api-keys",
+        ].join("\n")
+      );
     }
-  } else if (selected === "openai" && keyStatus.source === "codex-subscription") {
+  } else if (keyStatus.source === "codex-subscription") {
     p.log.success("ChatGPT subscription tokens found via ~/.codex/auth.json");
-  } else if (selected === "openai") {
-    p.log.success("OPENAI_API_KEY found in environment");
   } else {
-    p.log.success("ANTHROPIC_API_KEY found in environment");
+    p.log.success("OPENAI_API_KEY found in environment");
   }
 
   const defaultModel = selected === "anthropic" ? "claude-sonnet-4-20250514" : "gpt-5";

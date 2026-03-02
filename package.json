@@ -29,6 +29,7 @@
     "registry": "https://npm.pkg.github.com"
   },
   "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.2.25",
     "@clack/prompts": "^1.0.1"
   },
   "devDependencies": {
