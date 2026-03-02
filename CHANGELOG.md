@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.1.1](https://github.com/contentful-labs/worklog/compare/v1.1.0...v1.1.1) (2026-03-02)
+
+
+### Bug Fixes
+
+* [] remove dead document parsing code from init ([e95ad48](https://github.com/contentful-labs/worklog/commit/e95ad48845c0995d882e47da8450dd09604f2967))
+* remove dead document parsing code from init ([22457ca](https://github.com/contentful-labs/worklog/commit/22457cade6dac73a0322be98bf147b399fc9945e))
+
 ## [1.1.0](https://github.com/contentful-labs/worklog/compare/v1.0.1...v1.1.0) (2026-02-27)
 
 
