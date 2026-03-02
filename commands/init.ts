@@ -112,26 +112,22 @@ async function checkGitHubConnection(): Promise<{
   }
 }
 
-function checkOpenAIAuth(method: "subscription" | "api-key"): {
+function checkAIAuth(provider: "anthropic" | "openai"): {
   ok: boolean;
-  source?: "env" | "codex-subscription";
+  source?: string;
   reason?: string;
 } {
-  if (method === "api-key") {
-    const envKey = process.env.OPENAI_API_KEY?.trim();
-    if (envKey) return { ok: true, source: "env" };
-    return { ok: false, reason: "OPENAI_API_KEY not found in environment" };
+  if (provider === "anthropic") {
+    const key = process.env.ANTHROPIC_API_KEY?.trim();
+    if (key) return { ok: true, source: "env" };
+    return { ok: false, reason: "ANTHROPIC_API_KEY not found in environment" };
   }
-  // subscription — check codex auth
+  // OpenAI — auto-detect subscription vs API key
   const resolved = resolveOpenAIAuth();
   if (resolved.source === "none") {
     return { ok: false, reason: resolved.reason };
   }
-  if (resolved.source === "codex-subscription") {
-    return { ok: true, source: "codex-subscription" };
-  }
-  // env key works too
-  return { ok: true, source: "env" };
+  return { ok: true, source: resolved.source };
 }
 
 // --- Token prompt helper ---
@@ -486,71 +482,80 @@ export async function promptVault(
 export async function promptAI(
   initial?: WorklogConfig["ai"]
 ): Promise<WorklogConfig["ai"]> {
-  const authMethod = await p.select({
-    message: "How do you want to authenticate with OpenAI?",
+  const provider = await p.select({
+    message: "AI provider for brag book generation:",
     options: [
       {
-        value: "subscription" as const,
-        label: "ChatGPT subscription (recommended)",
-        hint: "uses your existing ChatGPT Plus/Business/Pro login",
+        value: "anthropic" as const,
+        label: "Anthropic (Claude)",
+        hint: "uses ANTHROPIC_API_KEY",
       },
       {
-        value: "api-key" as const,
-        label: "API key",
-        hint: "uses OPENAI_API_KEY for direct API billing",
+        value: "openai" as const,
+        label: "OpenAI",
+        hint: "ChatGPT subscription or API key",
       },
     ],
-    initialValue: initial?.authMethod ?? "subscription",
+    initialValue: initial?.provider ?? "anthropic",
   });
-  cancelGuard(authMethod);
+  cancelGuard(provider);
 
-  const method = authMethod as "subscription" | "api-key";
-  const keyStatus = checkOpenAIAuth(method);
+  const selected = provider as "anthropic" | "openai";
+  const keyStatus = checkAIAuth(selected);
 
   if (!keyStatus.ok) {
-    if (method === "subscription") {
-      p.log.warn(
-        [
-          "ChatGPT subscription tokens not found.",
-          "",
-          "Sign in with your ChatGPT account first:",
-          "",
-          "  npx codex@latest login",
-          "",
-          "This opens a browser for OAuth. Tokens cache at ~/.codex/auth.json.",
-        ].join("\n")
-      );
-    } else {
+    if (selected === "anthropic") {
       const set = await promptForToken({
-        envVar: "OPENAI_API_KEY",
-        label: "OpenAI API",
-        generateUrl: "https://platform.openai.com/api-keys",
+        envVar: "ANTHROPIC_API_KEY",
+        label: "Anthropic API",
+        generateUrl: "https://console.anthropic.com/settings/keys",
         validate: () => {
-          const r = checkOpenAIAuth("api-key");
-          return { ok: r.ok, detail: r.ok ? "OPENAI_API_KEY set." : r.reason };
+          const r = checkAIAuth("anthropic");
+          return { ok: r.ok, detail: r.ok ? "ANTHROPIC_API_KEY set." : r.reason };
         },
       });
       if (!set) {
         p.log.warn(
-          "OpenAI API key not configured. Set OPENAI_API_KEY before running worklog."
+          "Anthropic API key not configured. Set ANTHROPIC_API_KEY before running worklog."
+        );
+      }
+    } else {
+      // OpenAI — guide based on what's missing
+      const resolved = resolveOpenAIAuth();
+      if (resolved.source === "none") {
+        p.log.warn(
+          [
+            "OpenAI credentials not found.",
+            "",
+            "Option 1 — ChatGPT subscription:",
+            "  npx codex@latest login",
+            "  Tokens cache at ~/.codex/auth.json",
+            "",
+            "Option 2 — API key:",
+            '  export OPENAI_API_KEY="sk-..."',
+            "  Get one at https://platform.openai.com/api-keys",
+          ].join("\n")
         );
       }
     }
-  } else if (keyStatus.source === "codex-subscription") {
+  } else if (selected === "openai" && keyStatus.source === "codex-subscription") {
     p.log.success("ChatGPT subscription tokens found via ~/.codex/auth.json");
-  } else {
+  } else if (selected === "openai") {
     p.log.success("OPENAI_API_KEY found in environment");
+  } else {
+    p.log.success("ANTHROPIC_API_KEY found in environment");
   }
 
+  const defaultModel = selected === "anthropic" ? "claude-sonnet-4-20250514" : "gpt-5";
   const model = await p.text({
     message: "Model override (leave blank for default):",
-    placeholder: "gpt-5",
+    placeholder: defaultModel,
     initialValue: initial?.model ?? "",
   });
   cancelGuard(model);
   const modelStr = (model as string).trim() || undefined;
 
-  return { authMethod: method, model: modelStr };
+  return { provider: selected, model: modelStr };
 }
 
 export async function promptAtlassian(
