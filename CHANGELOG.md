@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.2.1](https://github.com/contentful-labs/worklog/compare/v1.2.0...v1.2.1) (2026-03-02)
+
+
+### Bug Fixes
+
+* [] use Claude Agent SDK for Max subscription support ([9a1ae5b](https://github.com/contentful-labs/worklog/commit/9a1ae5bd4f2fc640172cfd879476ad26a971eab5))
+* [] use Claude Agent SDK for Max subscription support ([99801c5](https://github.com/contentful-labs/worklog/commit/99801c5c984146918b23d1242d57900989c9d5f9))
+
 ## [1.2.0](https://github.com/contentful-labs/worklog/compare/v1.1.5...v1.2.0) (2026-03-02)
 
 
