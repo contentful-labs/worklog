@@ -3,14 +3,13 @@ import { resolveOpenAIAuth } from "./openai-auth";
 
 export interface AIQueryOptions {
   prompt: string;
-  tools?: string[];
-  maxTurns?: number;
   model?: string;
 }
 
 /**
- * AI query function. Uses OpenAI Agents SDK.
+ * AI query function. Uses OpenAI Chat Completions API.
  *
+ * Works with both API keys and ChatGPT subscription tokens.
  * Returns the final text output with preamble stripped and code block unwrapped.
  */
 export async function aiQuery(options: AIQueryOptions): Promise<string> {
@@ -45,43 +44,33 @@ async function queryOpenAI(options: AIQueryOptions, modelOverride?: string): Pro
     );
   }
 
-  const { Agent, run, setDefaultOpenAIKey } = await import("@openai/agents");
-  setDefaultOpenAIKey(auth.apiKey);
-
-  const tools: any[] = [];
-  if (options.tools?.includes("Bash")) {
-    const agentsMod = await import("@openai/agents") as Record<string, unknown>;
-    if ("shellTool" in agentsMod && agentsMod.shellTool) {
-      tools.push(agentsMod.shellTool);
-    }
-  }
-
   const model = modelOverride || "gpt-5";
 
-  const agent = new Agent({
-    name: "worklog",
-    instructions: "You are a helpful assistant. Follow the user's instructions precisely.",
-    model,
-    tools,
+  const res = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${auth.apiKey}`,
+    },
+    body: JSON.stringify({
+      model,
+      messages: [
+        {
+          role: "system",
+          content: "You are a helpful assistant. Follow the user's instructions precisely.",
+        },
+        { role: "user", content: options.prompt },
+      ],
+    }),
   });
 
-  const result = await run(agent, options.prompt, {
-    maxTurns: options.maxTurns ?? 1,
-  });
-
-  // Extract all text output from the result
-  let text = "";
-  for (const item of result.output) {
-    if (item.type === "message") {
-      for (const block of item.content) {
-        if (block.type === "output_text") {
-          text += block.text;
-        }
-      }
-    }
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`OpenAI API error ${res.status}: ${body}`);
   }
 
-  return text;
+  const data = await res.json();
+  return data.choices?.[0]?.message?.content ?? "";
 }
 
 // --- Post-processing ---
