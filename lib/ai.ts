@@ -119,8 +119,18 @@ async function queryViaResponses(
     headers,
     body: JSON.stringify({
       model,
-      instructions: "You are a helpful assistant. Follow the user's instructions precisely.",
-      input: prompt,
+      input: [
+        {
+          type: "message",
+          role: "developer",
+          content: [{ type: "input_text", text: "You are a helpful assistant. Follow the user's instructions precisely." }],
+        },
+        {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: prompt }],
+        },
+      ],
     }),
   });
 
