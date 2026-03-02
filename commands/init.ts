@@ -439,30 +439,43 @@ ${content}`,
 // --- Vault document generators ---
 
 function generateProfileDoc(config: WorklogConfig): string {
-  const p = config.profile;
+  const pr = config.profile;
   const c = config.career;
+  const field = (label: string, value: string, hint: string) =>
+    `**${label}:** ${value || `<!-- TODO: update your ${hint} -->`}`;
+
+  const skillsSection =
+    c.skills.length > 0
+      ? c.skills.map((s) => `- ${s}`).join("\n")
+      : "<!-- TODO: add your technical skills (e.g. TypeScript, React, Node.js) -->";
+
+  const growthSection =
+    c.growthAreas.length > 0
+      ? c.growthAreas.map((a) => `- ${a}`).join("\n")
+      : "<!-- TODO: add your growth areas (e.g. system design, cross-team influence) -->";
+
   return `# My Profile
 
-**Name:** ${p.fullName}
-**Title:** ${p.jobTitle}
-**Level:** ${p.level}
-**Company:** ${p.company}
-**Location:** ${p.location}
-**Start Date:** ${p.startDate}
-**Team:** ${p.team}
-**Domain:** ${p.teamDomain}
+${field("Name", pr.fullName, "full name")}
+${field("Title", pr.jobTitle, "job title")}
+${field("Level", pr.level, "level (e.g. IC-5, Staff)")}
+${field("Company", pr.company, "company")}
+${field("Location", pr.location, "location")}
+${field("Start Date", pr.startDate, "role start date (YYYY-MM-DD)")}
+${field("Team", pr.team, "team name")}
+${field("Domain", pr.teamDomain, "team domain")}
 
 ## About
 
-${p.domain}
+${pr.domain || "<!-- TODO: describe what your team builds (1-2 sentences) -->"}
 
 ## Skills
 
-${c.skills.map((s) => `- ${s}`).join("\n")}
+${skillsSection}
 
 ## Growth Areas
 
-${c.growthAreas.map((a) => `- ${a}`).join("\n")}
+${growthSection}
 
 ## Key Strengths
 
@@ -475,31 +488,33 @@ _(Added automatically as significant achievements are recorded)_
 }
 
 function generateWorkContextDoc(config: WorklogConfig): string {
-  const p = config.profile;
+  const pr = config.profile;
   const c = config.career;
+  const todo = (hint: string) => `<!-- TODO: ${hint} -->`;
 
   const valuesSection =
     c.companyValues.length > 0
       ? `## Company Core Values\n\n${c.companyValues.map((v) => `- ${v}`).join("\n")}`
-      : "## Company Core Values\n\n_(Not configured)_";
+      : `## Company Core Values\n\n${todo("add your company core values")}`;
 
-  const reviewSection =
-    c.reviewCycleDates.length > 0
-      ? `## Review Cycle\n\n| Review Type | Date |\n|-------------|------|\n${c.reviewCycleDates.map((r) => `| ${r.type} | ${r.date} |`).join("\n")}`
-      : "## Review Cycle\n\n_(No review dates configured)_";
+  const hasReviewDates =
+    c.reviewCycleDates.length > 0 && c.reviewCycleDates.some((r) => r.date);
+  const reviewSection = hasReviewDates
+    ? `## Review Cycle\n\n| Review Type | Date |\n|-------------|------|\n${c.reviewCycleDates.map((r) => `| ${r.type} | ${r.date || "TBD"} |`).join("\n")}`
+    : `## Review Cycle\n\n${todo("add your review cycle dates (e.g. Q1 check-in: 2026-03-15, Mid-year: 2026-06-15)")}`;
 
   return `# Work Context
 
-**Company:** ${p.company}
-**Team:** ${p.team}
-**Domain:** ${p.teamDomain}
-**Ticket Prefixes:** ${p.ticketPrefixes.join(", ")}
+**Company:** ${pr.company || todo("update your company")}
+**Team:** ${pr.team || todo("update your team name")}
+**Domain:** ${pr.teamDomain || todo("update your team domain")}
+**Ticket Prefixes:** ${pr.ticketPrefixes.length > 0 ? pr.ticketPrefixes.join(", ") : todo("add your Jira ticket prefixes (e.g. TEAM-)")}
 
 ## Career Framework
 
-**Type:** ${c.framework}
-**Current Level:** ${c.currentLevel}
-**Target Level:** ${c.targetLevel}
+**Type:** ${c.framework || todo("update career framework type")}
+**Current Level:** ${c.currentLevel || todo("update your current level")}
+**Target Level:** ${c.targetLevel || todo("update your target level")}
 
 ${valuesSection}
 
@@ -1221,7 +1236,6 @@ export async function runInit(options?: { dryRun?: boolean }): Promise<void> {
       p.cancel("Keeping existing configuration.");
       return;
     }
-    // Backup existing config either way
     const backupPath = getConfigPath() + ".backup";
     require("fs").copyFileSync(getConfigPath(), backupPath);
     p.log.info(`Backed up to ${backupPath}`);
@@ -1231,332 +1245,164 @@ export async function runInit(options?: { dryRun?: boolean }): Promise<void> {
     useExisting = true;
   }
 
-  // --- Step 1: Vault ---
-  p.log.message(
-    "\nWorklog generates markdown files — brag books, work logs, and coaching notes.\nThese work with Obsidian, any markdown reader, or just your filesystem.\n"
+  // --- Prompt 1: Vault path ---
+  const vault = await promptVault(
+    useExisting ? existing!.vault : undefined,
+    DEFAULT_VAULT_PATH
   );
-  const vault = useExisting
-    ? existing!.vault
-    : expandHome(DEFAULT_VAULT_PATH);
-  if (!useExisting) {
-    p.log.info(`Using default vault: ${DEFAULT_VAULT_PATH}`);
-  }
 
-  // --- Step 2: AI Authentication ---
-  p.log.message(
-    "\nWorklog uses AI to turn your raw work data into structured brag books with coaching.\n"
-  );
+  // --- Prompt 2: Full name ---
+  const nameRaw = await p.text({
+    message: "Full name:",
+    initialValue: useExisting ? existing!.profile.fullName : undefined,
+    validate: (v) => (!v?.trim() ? "Required" : undefined),
+  });
+  cancelGuard(nameRaw);
+  const fullName = (nameRaw as string).trim();
+
+  // --- Prompt 3: Atlassian email ---
+  const emailRaw = await p.text({
+    message: "Atlassian email:",
+    placeholder: "you@contentful.com",
+    initialValue: useExisting ? existing!.atlassian.email : undefined,
+    validate: (v) => validateEmail((v ?? "").trim()) ?? undefined,
+  });
+  cancelGuard(emailRaw);
+  const atlassianEmail = (emailRaw as string).trim();
+
+  // --- Prompt 4: AI auth ---
   const ai = await promptAI(useExisting ? existing!.ai : undefined);
 
-  // Check if AI is available for document parsing
-  const hasAIKey = checkOpenAIAuth(ai.authMethod).ok;
-
-  // --- Step 3: Atlassian ---
-  p.log.message(
-    "\nWorklog fetches your Jira tickets and Confluence contributions each week.\n"
-  );
-  const atlassianInitial = useExisting
-    ? existing!.atlassian
-    : { url: DEFAULT_ATLASSIAN_URL, email: "" };
-  const atlassian = await promptAtlassian(
-    atlassianInitial,
-    {
-      defaultUrl: DEFAULT_ATLASSIAN_URL,
-      skipUrlPrompt: true,
-    }
-  );
-
-  // --- Step 4: GitHub ---
-  p.log.message("\nWorklog fetches your PRs authored and reviewed.\n");
-  const githubOrgs = await promptGitHub(
-    useExisting ? existing!.githubOrgs : DEFAULT_GITHUB_ORGS,
-    {
-      defaultOrgs: DEFAULT_GITHUB_ORGS,
-      skipOrgPrompt: true,
-    }
-  );
-
-  // --- Steps 5-7: Optional document parsing (skip when updating existing config) ---
-  // Collect partial extractions to pre-fill prompts
-  let resumeData: ResumeExtraction | null = null;
-  let companyData: CompanyExtraction | null = null;
-  let levelingData: LevelingExtraction | null = null;
-  let reviewData: ReviewGuidelinesExtraction | null = null;
-  if (!useExisting) {
-    companyData = {
-      companyValues: [...DEFAULT_CAREER_COMPANY_VALUES],
-      companyCulture: null,
-      companyDescription: null,
-    };
-    p.log.info("Using bundled company defaults.");
-  }
-
-  if (useExisting) {
-    p.log.info("Using existing config values — skipping document parsing.");
-  } else if (hasAIKey) {
-    p.log.message(
-      "\nSpeed up setup by providing documents you already have.\nThe AI will extract your profile, skills, and career details automatically.\nPress Enter to skip any you don't have.\n"
-    );
-
-    // Step 5: Resume
-    const resumePath = await p.text({
-      message: "Resume file path (.pdf, .md, .txt):",
-      placeholder: "~/Documents/resume.pdf (Enter to skip)",
+  // --- Prompt 5: API tokens ---
+  if (!process.env.ATLASSIAN_API_TOKEN) {
+    await promptForToken({
+      envVar: "ATLASSIAN_API_TOKEN",
+      label: "Atlassian API",
+      generateUrl: "https://id.atlassian.com/manage-profile/security/api-tokens",
+      validate: async () => {
+        const r = await checkAtlassianConnection(DEFAULT_ATLASSIAN_URL, atlassianEmail);
+        return { ok: r.ok, detail: r.ok ? `Connected as ${r.accountId}` : r.error };
+      },
     });
-    cancelGuard(resumePath);
-
-    if ((resumePath as string).trim()) {
-      const spinner = p.spinner();
-      spinner.start("Parsing resume...");
-      try {
-        resumeData = await parseResume(
-          (resumePath as string).trim(),
-          ai.model
-        );
-        if (resumeData) {
-          spinner.stop("Resume parsed");
-          const fields = [
-            resumeData.fullName && `Name: ${resumeData.fullName}`,
-            resumeData.jobTitle && `Title: ${resumeData.jobTitle}`,
-            resumeData.company && `Company: ${resumeData.company}`,
-            resumeData.level && `Level: ${resumeData.level}`,
-            resumeData.skills?.length && `Skills: ${resumeData.skills.slice(0, 5).join(", ")}${resumeData.skills.length > 5 ? "..." : ""}`,
-          ].filter(Boolean);
-          if (fields.length) {
-            p.log.info(`Extracted: ${fields.join(" | ")}`);
-          }
-        } else {
-          spinner.stop("Could not parse resume (will ask manually)");
-        }
-      } catch {
-        spinner.stop("Resume parsing failed (will ask manually)");
-      }
-    }
-
-    // Step 6: Leveling guide
-    const levelingPath = await p.text({
-      message: "Career leveling guide file path:",
-      placeholder: "~/Documents/leveling-guide.md (Enter to skip)",
-    });
-    cancelGuard(levelingPath);
-
-    if ((levelingPath as string).trim()) {
-      const spinner = p.spinner();
-      spinner.start("Parsing leveling guide...");
-      try {
-        levelingData = await parseLevelingGuide(
-          (levelingPath as string).trim(),
-          ai.model
-        );
-        if (levelingData) {
-          spinner.stop("Leveling guide parsed");
-          if (levelingData.framework) {
-            p.log.info(`Framework: ${levelingData.framework}`);
-          }
-          if (levelingData.levels?.length) {
-            p.log.info(`Levels: ${levelingData.levels.join(" → ")}`);
-          }
-        } else {
-          spinner.stop("Could not parse leveling guide (will ask manually)");
-        }
-      } catch {
-        spinner.stop("Leveling guide parsing failed (will ask manually)");
-      }
-    }
-
-    // Step 7: Self-review guidelines
-    const reviewPath = await p.text({
-      message: "Self-review guidelines file path:",
-      placeholder: "~/Documents/review-guidelines.md (Enter to skip)",
-    });
-    cancelGuard(reviewPath);
-
-    if ((reviewPath as string).trim()) {
-      const spinner = p.spinner();
-      spinner.start("Parsing review guidelines...");
-      try {
-        reviewData = await parseSelfReviewGuidelines(
-          (reviewPath as string).trim(),
-          ai.model
-        );
-        if (reviewData) {
-          spinner.stop("Review guidelines parsed");
-          if (reviewData.dimensions?.length) {
-            p.log.info(`Dimensions: ${reviewData.dimensions.join(", ")}`);
-          }
-          if (reviewData.reviewCycleDates?.length) {
-            p.log.info(
-              `Dates: ${reviewData.reviewCycleDates.map((d) => `${d.type}: ${d.date}`).join(", ")}`
-            );
-          }
-        } else {
-          spinner.stop("Could not parse review guidelines (will ask manually)");
-        }
-      } catch {
-        spinner.stop("Review guidelines parsing failed (will ask manually)");
-      }
-    }
   } else {
-    p.log.warn(
-      "AI key not available — skipping document parsing. All fields will be entered manually."
+    const check = await checkAtlassianConnection(
+      useExisting ? existing!.atlassian.url : DEFAULT_ATLASSIAN_URL,
+      atlassianEmail
     );
+    if (check.ok) p.log.success(`Atlassian connected as ${check.accountId}`);
+    else p.log.warn(`Atlassian connection issue: ${check.error}`);
   }
 
-  // --- Step 9: Confirm extracted + fill gaps ---
-  // Build pre-filled initial values from existing config or document extractions
-  const profileInitial: Partial<WorklogConfig["profile"]> = useExisting
-    ? { ...existing!.profile }
-    : { company: DEFAULT_PROFILE_COMPANY };
-  if (!useExisting && resumeData) {
-    if (resumeData.fullName) profileInitial.fullName = resumeData.fullName;
-    if (resumeData.jobTitle) profileInitial.jobTitle = resumeData.jobTitle;
-    if (resumeData.level) profileInitial.level = resumeData.level;
-    if (resumeData.location) profileInitial.location = resumeData.location;
-    if (resumeData.domain) profileInitial.domain = resumeData.domain;
-  }
-
-  p.log.message(
-    useExisting
-      ? "\nConfirm your profile details. Press Enter to keep existing values.\n"
-      : "\nConfirm your profile details. Fields extracted from documents are pre-filled.\n"
-  );
-  const profile = await promptProfile(profileInitial);
-
-  // Build career initial values
-  const careerInitial: Partial<WorklogConfig["career"]> = useExisting
-    ? { ...existing!.career }
-    : { companyValues: [...DEFAULT_CAREER_COMPANY_VALUES] };
-  if (!useExisting) {
-    if (resumeData?.skills?.length) careerInitial.skills = resumeData.skills;
-    if (resumeData?.growthAreas?.length) careerInitial.growthAreas = resumeData.growthAreas;
-    if (companyData?.companyValues?.length) careerInitial.companyValues = companyData.companyValues;
-    if (levelingData?.framework) careerInitial.framework = levelingData.framework;
-    if (reviewData?.reviewCycleDates?.length) careerInitial.reviewCycleDates = reviewData.reviewCycleDates;
-  }
-
-  p.log.message(
-    useExisting
-      ? "\nConfirm your career details. Press Enter to keep existing values.\n"
-      : "\nConfirm your career details. Fields extracted from documents are pre-filled.\n"
-  );
-  const career = await promptCareer(careerInitial);
-
-  // --- Step 10: Team details ---
-  p.log.message(
-    "\nTeam history helps the coach understand your trajectory and correctly attribute past work.\n"
-  );
-
-  // Load existing team-timeline if available
-  let existingTimeline: TeamTimeline | undefined;
-  if (existsSync(TEAM_TIMELINE_PATH)) {
-    try {
-      existingTimeline = JSON.parse(
-        require("fs").readFileSync(TEAM_TIMELINE_PATH, "utf-8")
-      );
-      p.log.info(
-        `Found existing team timeline with ${existingTimeline!.entries.length} entries.`
-      );
-    } catch {}
-  }
-  const teamTimeline = await promptTeamHistory(existingTimeline);
-
-  // Ensure current team is in timeline
-  const hasCurrentTeam = teamTimeline.entries.some(
-    (e) => e.team === profile.team && e.end === null
-  );
-  if (!hasCurrentTeam) {
-    teamTimeline.entries.push({
-      team: profile.team,
-      domain: profile.teamDomain || null,
-      start: profile.startDate,
-      end: null,
-      ticketPrefixes: profile.ticketPrefixes,
-      notes: null,
+  if (!process.env.GITHUB_TOKEN) {
+    await promptForToken({
+      envVar: "GITHUB_TOKEN",
+      label: "GitHub",
+      generateUrl: "https://github.com/settings/tokens",
+      validate: async () => {
+        const r = await checkGitHubConnection();
+        return { ok: r.ok, detail: r.ok ? `Connected as ${r.username}` : r.error };
+      },
     });
+  } else {
+    const check = await checkGitHubConnection();
+    if (check.ok) p.log.success(`GitHub connected as ${check.username}`);
+    else p.log.warn(`GitHub connection issue: ${check.error}`);
   }
 
-  // Sort by start date
-  teamTimeline.entries.sort((a, b) => a.start.localeCompare(b.start));
+  // --- Build config with Contentful defaults ---
+  const defaultReviewCycle = [
+    { type: "Q1 check-in", date: "" },
+    { type: "Mid-year review", date: "" },
+    { type: "Q3 check-in", date: "" },
+    { type: "Annual review", date: "" },
+  ];
 
-  // --- Step 11: Coaching ---
-  p.log.message(
-    "\nThe AI coach gives you weekly mentoring alongside your brag book.\n"
-  );
-  const coaching = await promptCoaching(useExisting ? existing!.coaching : undefined);
-
-  // --- Build config ---
   const config: WorklogConfig = {
     version: 1,
     vault,
-    atlassian,
-    githubOrgs,
+    atlassian: {
+      url: useExisting ? existing!.atlassian.url : DEFAULT_ATLASSIAN_URL,
+      email: atlassianEmail,
+    },
+    githubOrgs: useExisting ? existing!.githubOrgs : [...DEFAULT_GITHUB_ORGS],
     ai,
-    profile,
-    career,
-    coaching,
+    profile: {
+      fullName,
+      displayName: useExisting ? existing!.profile.displayName : fullName,
+      jobTitle: useExisting ? existing!.profile.jobTitle : "",
+      level: useExisting ? existing!.profile.level : "",
+      company: DEFAULT_PROFILE_COMPANY,
+      location: useExisting ? existing!.profile.location : "",
+      startDate: useExisting ? existing!.profile.startDate : "",
+      domain: useExisting ? existing!.profile.domain : "",
+      team: useExisting ? existing!.profile.team : "",
+      teamDomain: useExisting ? existing!.profile.teamDomain : "",
+      ticketPrefixes: useExisting ? existing!.profile.ticketPrefixes : [],
+    },
+    career: {
+      framework: useExisting ? existing!.career.framework : "ic",
+      currentLevel: useExisting ? existing!.career.currentLevel : "",
+      targetLevel: useExisting ? existing!.career.targetLevel : "",
+      companyValues: useExisting
+        ? existing!.career.companyValues
+        : [...DEFAULT_CAREER_COMPANY_VALUES],
+      reviewCycleDates: useExisting
+        ? existing!.career.reviewCycleDates
+        : defaultReviewCycle,
+      skills: useExisting ? existing!.career.skills : [],
+      growthAreas: useExisting ? existing!.career.growthAreas : [],
+      careerDocPaths: useExisting ? existing!.career.careerDocPaths : [],
+    },
+    coaching: {
+      tone: useExisting ? existing!.coaching.tone : "balanced",
+      focusAreas: useExisting ? existing!.coaching.focusAreas : [],
+    },
   };
 
   if (dryRun) {
-    // Print what would be written without touching disk
     p.log.message("\n--- DRY RUN: No files written ---\n");
-
     p.log.info(`Would save config to ${getConfigPath()}`);
     p.log.message(JSON.stringify(config, null, 2));
-
     p.log.message("");
     p.log.info(`Would write profile to ${join(vault, "my-profile.md")}`);
     p.log.info(`Would write work context to ${join(vault, "work-context.md")}`);
     p.log.info(`Would write coach persona to ${join(vault, "coach-persona.md")}`);
     p.log.info(`Would save team timeline to ${TEAM_TIMELINE_PATH}`);
-    p.log.message(`\nTeam timeline entries: ${teamTimeline.entries.length}`);
-    for (const e of teamTimeline.entries) {
-      p.log.message(`  ${e.start} to ${e.end ?? "present"}: ${e.team}${e.domain ? ` (${e.domain})` : ""}`);
-    }
-
     p.outro("Dry run complete. Run `worklog init` (without --dry-run) to apply.");
     return;
   }
 
-  // --- Step 12: Save + write docs + outro ---
+  // --- Save config + write vault docs ---
   saveConfig(config);
 
-  // --- Create vault directory ---
   if (!existsSync(vault)) {
     mkdirSync(vault, { recursive: true });
   }
 
-  // --- Write vault documents ---
-  const profileDoc = generateProfileDoc(config);
-  const profilePath = join(vault, "my-profile.md");
-  await writeVaultDoc(profilePath, profileDoc);
+  await writeVaultDoc(join(vault, "my-profile.md"), generateProfileDoc(config));
+  await writeVaultDoc(join(vault, "work-context.md"), generateWorkContextDoc(config));
+  await writeVaultDoc(join(vault, "coach-persona.md"), generateCoachPersonaDoc(config));
 
-  const workContextDoc = generateWorkContextDoc(config);
-  const workContextPath = join(vault, "work-context.md");
-  await writeVaultDoc(workContextPath, workContextDoc);
-
-  const coachPersonaDoc = generateCoachPersonaDoc(config);
-  const coachPersonaPath = join(vault, "coach-persona.md");
-  await writeVaultDoc(coachPersonaPath, coachPersonaDoc);
-
-  // --- Save team timeline ---
+  // --- Empty team timeline ---
   if (!existsSync(CONFIG_DIR)) {
     mkdirSync(CONFIG_DIR, { recursive: true });
   }
+  const emptyTimeline: TeamTimeline = { entries: [], transitionNotes: [] };
   await Bun.write(
     TEAM_TIMELINE_PATH,
-    JSON.stringify(teamTimeline, null, 2) + "\n"
+    JSON.stringify(emptyTimeline, null, 2) + "\n"
   );
 
-  // --- Better outro ---
+  // --- Outro ---
   p.log.success(`Config saved to ${getConfigPath()}`);
+  const vaultDisplay = vault.replace(homedir(), "~");
   p.log.message(`
-  Files written to ${vault}:
-    my-profile.md      — your profile, skills, growth areas
-    work-context.md    — company values, review cycle, org notes
-    coach-persona.md   — coaching style (edit to adjust tone)
+  Files written to ${vaultDisplay}:
+    my-profile.md      — edit to add your title, team, skills
+    work-context.md    — edit to add your team and ticket prefixes
+    coach-persona.md   — edit to adjust coaching tone
 
-  These are plain markdown — edit them anytime to refine the AI's context.
-  Run \`worklog configure\` to change any config setting.
+  Run \`worklog configure\` to change any setting later.
   Run \`worklog\` to generate your first brag book.`);
 
   p.outro("You're all set!");
