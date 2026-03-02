@@ -114,32 +114,41 @@ async function queryViaResponses(
     headers["ChatGPT-Account-Id"] = auth.accountId;
   }
 
-  const res = await fetch("https://chatgpt.com/backend-api/codex/responses", {
+  const url = "https://chatgpt.com/backend-api/codex/responses";
+  const requestBody = {
+    model,
+    input: [
+      {
+        type: "message",
+        role: "developer",
+        content: [{ type: "input_text", text: "You are a helpful assistant. Follow the user's instructions precisely." }],
+      },
+      {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: prompt }],
+      },
+    ],
+  };
+
+  console.error(`[codex] POST ${url}`);
+  console.error(`[codex] model=${model} accountId=${auth.accountId ?? "none"}`);
+  console.error(`[codex] request body: ${JSON.stringify(requestBody, null, 2)}`);
+
+  const res = await fetch(url, {
     method: "POST",
     headers,
-    body: JSON.stringify({
-      model,
-      input: [
-        {
-          type: "message",
-          role: "developer",
-          content: [{ type: "input_text", text: "You are a helpful assistant. Follow the user's instructions precisely." }],
-        },
-        {
-          type: "message",
-          role: "user",
-          content: [{ type: "input_text", text: prompt }],
-        },
-      ],
-    }),
+    body: JSON.stringify(requestBody),
   });
 
   if (!res.ok) {
     const body = await res.text();
+    console.error(`[codex] error response: ${res.status} ${body}`);
     throw new Error(`OpenAI Responses API error ${res.status}: ${body}`);
   }
 
   const data = await res.json();
+  console.error(`[codex] response keys: ${Object.keys(data).join(", ")}`);
 
   // Extract text from output items
   let text = "";
