@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.2.0](https://github.com/contentful-labs/worklog/compare/v1.1.5...v1.2.0) (2026-03-02)
+
+
+### Features
+
+* [] add Anthropic Claude as AI provider option ([d46efc1](https://github.com/contentful-labs/worklog/commit/d46efc1a623ce098e3d4b011d2eda5d385d68604))
+* [] add Anthropic Claude as AI provider option ([2d9479d](https://github.com/contentful-labs/worklog/commit/2d9479d89858e76f116dc782a17090fb6e325e81))
+
 ## [1.1.5](https://github.com/contentful-labs/worklog/compare/v1.1.4...v1.1.5) (2026-03-02)
 
 
