@@ -27,7 +27,7 @@ export interface WorklogConfig {
   githubOrgs: string[];
 
   ai: {
-    authMethod: "subscription" | "api-key";
+    provider: "anthropic" | "openai";
     model?: string;
   };
 

@@ -7,24 +7,78 @@ export interface AIQueryOptions {
 }
 
 /**
- * AI query function.
+ * AI query function. Dispatches to the configured provider at runtime.
  *
- * - ChatGPT subscription tokens → Responses API (/v1/responses)
- * - API keys → Chat Completions API (/v1/chat/completions)
+ * Anthropic → Messages API (/v1/messages)
+ * OpenAI subscription → Responses API (/v1/responses)
+ * OpenAI API key → Chat Completions API (/v1/chat/completions)
  *
  * Returns the final text output with preamble stripped and code block unwrapped.
  */
 export async function aiQuery(options: AIQueryOptions): Promise<string> {
   const config = loadConfig();
+  const provider = config?.ai.provider ?? "openai";
   const model = options.model ?? config?.ai.model;
 
-  const raw = await queryOpenAI(options, model);
+  let raw: string;
+  if (provider === "anthropic") {
+    raw = await queryAnthropic(model, options.prompt);
+  } else {
+    raw = await queryOpenAI(model, options.prompt);
+  }
+
   return postProcess(raw);
+}
+
+// --- Anthropic path ---
+
+async function queryAnthropic(modelOverride: string | undefined, prompt: string): Promise<string> {
+  const apiKey = process.env.ANTHROPIC_API_KEY?.trim();
+  if (!apiKey) {
+    throw new Error(
+      [
+        "Anthropic API key not found.",
+        "",
+        '  export ANTHROPIC_API_KEY="sk-ant-..."',
+        "  Get one at https://console.anthropic.com/settings/keys",
+      ].join("\n")
+    );
+  }
+
+  const model = modelOverride || "claude-sonnet-4-20250514";
+
+  const res = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01",
+    },
+    body: JSON.stringify({
+      model,
+      max_tokens: 8192,
+      messages: [{ role: "user", content: prompt }],
+    }),
+  });
+
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`Anthropic API error ${res.status}: ${body}`);
+  }
+
+  const data = await res.json();
+  let text = "";
+  for (const block of data.content ?? []) {
+    if (block.type === "text") {
+      text += block.text;
+    }
+  }
+  return text;
 }
 
 // --- OpenAI path ---
 
-function resolveAuthOrThrow(): Exclude<OpenAIAuthResolution, { source: "none" }> {
+function resolveOpenAIAuthOrThrow(): Exclude<OpenAIAuthResolution, { source: "none" }> {
   const auth = resolveOpenAIAuth();
   if (auth.source === "none") {
     throw new Error(
@@ -48,14 +102,14 @@ function resolveAuthOrThrow(): Exclude<OpenAIAuthResolution, { source: "none" }>
   return auth;
 }
 
-async function queryOpenAI(options: AIQueryOptions, modelOverride?: string): Promise<string> {
-  const auth = resolveAuthOrThrow();
+async function queryOpenAI(modelOverride: string | undefined, prompt: string): Promise<string> {
+  const auth = resolveOpenAIAuthOrThrow();
   const model = modelOverride || "gpt-5";
 
   if (auth.source === "codex-subscription") {
-    return queryViaResponses(auth, model, options.prompt);
+    return queryViaResponses(auth, model, prompt);
   }
-  return queryViaChatCompletions(auth, model, options.prompt);
+  return queryViaChatCompletions(auth, model, prompt);
 }
 
 /** Responses API — works with ChatGPT subscription tokens */
