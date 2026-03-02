@@ -109,14 +109,12 @@ async function queryViaResponses(
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     Authorization: `Bearer ${freshToken}`,
-    "OpenAI-Beta": "responses=experimental",
-    originator: "codex_cli_rs",
   };
   if (auth.accountId) {
-    headers["chatgpt-account-id"] = auth.accountId;
+    headers["ChatGPT-Account-Id"] = auth.accountId;
   }
 
-  const res = await fetch("https://api.openai.com/v1/responses", {
+  const res = await fetch("https://chatgpt.com/backend-api/codex/responses", {
     method: "POST",
     headers,
     body: JSON.stringify({
