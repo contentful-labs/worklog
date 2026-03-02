@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.1.4](https://github.com/contentful-labs/worklog/compare/v1.1.3...v1.1.4) (2026-03-02)
+
+
+### Bug Fixes
+
+* [] use /v1/codex/responses endpoint with proper auth ([b89c578](https://github.com/contentful-labs/worklog/commit/b89c5786957022fdc3201745a38cd7d1cb1fd998))
+* use /v1/codex/responses endpoint with proper headers and token refresh ([224ad7d](https://github.com/contentful-labs/worklog/commit/224ad7db456d4ebc32aded4636743e68a1a57c86))
+
 ## [1.1.3](https://github.com/contentful-labs/worklog/compare/v1.1.2...v1.1.3) (2026-03-02)
 
 
