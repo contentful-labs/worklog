@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.2.2](https://github.com/contentful-labs/worklog/compare/v1.2.1...v1.2.2) (2026-03-02)
+
+
+### Bug Fixes
+
+* [] use correct ChatGPT subscription endpoint ([8b3d43c](https://github.com/contentful-labs/worklog/commit/8b3d43ca486d425c669fdadd099ade6a2a7f35e1))
+* [] use correct ChatGPT subscription endpoint ([d517e27](https://github.com/contentful-labs/worklog/commit/d517e27bdbd24163b63a876603cbb72d7556a4bf))
+
 ## [1.2.1](https://github.com/contentful-labs/worklog/compare/v1.2.0...v1.2.1) (2026-03-02)
 
 
