@@ -94,6 +94,10 @@ Generate a promotion case document with these sections:
 Write in third person (as if presenting the case to a committee). Be specific and evidence-based throughout. The goal is an honest, compelling case — not cheerleading.
 </instructions>
 
+<writing_style>
+{{writing_style}}
+</writing_style>
+
 <output_format>
 Output as clean markdown with `areas/work` frontmatter tag. No preamble or explanation — just the promotion case document.
 </output_format>

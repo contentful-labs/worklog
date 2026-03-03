@@ -73,6 +73,10 @@ Generate a self-review draft with these sections:
 Write in first person. Be specific — generic statements weaken self-reviews. Every claim should have evidence from the brag book or impact log. Be honest about growth areas — reviewers respect self-awareness.
 </instructions>
 
+<writing_style>
+{{writing_style}}
+</writing_style>
+
 <output_format>
 CRITICAL: Output ONLY the markdown document. No analysis, no thinking, no commentary, no code blocks. Start directly with the YAML frontmatter.
 

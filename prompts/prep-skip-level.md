@@ -57,6 +57,10 @@ Generate a skip-level meeting prep document with these sections:
 Write at the right altitude — skip-levels don't want task-level details. They want to see strategic thinking, self-awareness, and impact beyond immediate team scope. First person, concise bullets.
 </instructions>
 
+<writing_style>
+{{writing_style}}
+</writing_style>
+
 <output_format>
 Output as clean markdown with `areas/work` frontmatter tag. No preamble or explanation — just the prep document.
 </output_format>

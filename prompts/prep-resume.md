@@ -60,6 +60,10 @@ Rules:
 7. **No coaching/analysis sections**: Output ONLY the grouped bullet list. No gap analysis, no development suggestions, no career framework mapping.
 </instructions>
 
+<writing_style>
+{{writing_style}}
+</writing_style>
+
 <output_format>
 Output as clean markdown with `areas/work` frontmatter tag. Structure:
 
