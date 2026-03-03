@@ -846,6 +846,12 @@ IMPORTANT — proactive research expectations:
 3. Use fetchJiraTicket for the most significant tickets this week — especially P0/P1 focus items and anything mentioned in coaching.
 4. When Confluence pages appear in the work log, use fetchConfluencePage to understand what the engineer contributed.
 5. Your coaching and brag book quality directly depends on how well you understand the engineer's actual work — surface-level summaries from ticket titles are not enough.
+
+CRITICAL — ticket status freshness:
+6. ALWAYS use fetchJiraTicket to get the latest status before writing about ANY ticket in the brag book or coaching notes. The work log snapshot may be stale — tickets change status after the data was fetched.
+7. Check ticket comments — they often contain important context: decisions made, blockers raised, scope changes, reviewer feedback, or follow-up actions that the ticket title/description alone won't capture.
+8. If a ticket's current status contradicts what the work log shows (e.g., work log says "In Progress" but ticket is now "Done" or "Won't Do"), use the CURRENT status and adjust your narrative accordingly.
+9. Do NOT describe a ticket as "in progress" or "blocked" if it has since been resolved. Do NOT claim completion if the ticket was reopened or reverted.
 </available_research_tools>`,
     );
   }
