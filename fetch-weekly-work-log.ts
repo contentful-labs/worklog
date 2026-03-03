@@ -189,6 +189,7 @@ import {
   getTeamForDate,
   formatTeamTimelineForPrompt,
   getCurrentTeam,
+  discoverWeeklyNotes,
 } from "./lib/obsidian-readers";
 
 // Resolve prompt template relative to this script, not hardcoded path
@@ -817,11 +818,37 @@ async function generateBragBookEntry(
   const teamForWeek = weekInfo ? getTeamForDate(weekInfo.startDate) : getCurrentTeam();
   const currentTeamLabel = teamForWeek?.team ?? "Unknown Team";
   const currentRole = `${config.profile.jobTitle} / ${config.profile.level} (${config.profile.company} - ${currentTeamLabel})`;
-  const promptTemplate = fillTemplate(rawPromptTemplate, {
+  let promptTemplate = fillTemplate(rawPromptTemplate, {
     ...buildConfigContext(),
     current_team: currentTeamLabel,
     current_role: currentRole,
   });
+
+  // For OpenAI path: replace bash-based research tool descriptions with AI SDK tool names
+  const provider = config.ai.provider ?? "openai";
+  if (provider === "openai") {
+    promptTemplate = promptTemplate.replace(
+      /<available_research_tools>[\s\S]*?<\/available_research_tools>/,
+      `<available_research_tools>
+You have tool-calling access to research the engineer's work. Use these tools proactively to write richer, more insightful brag book entries and coaching notes.
+
+Available tools:
+- fetchJiraTicket({ ticketKey }) — Fetch full details of a Jira ticket (e.g. "TEAM-1234")
+- fetchConfluencePage({ pageIdOrUrl }) — Fetch a Confluence page by ID or URL
+- searchConfluence({ query }) — Search Confluence for pages matching a query
+- searchJira({ query }) — Search Jira for tickets matching a query
+- readVaultNote({ noteName }) — Read an Obsidian vault note by name (without .md extension)
+- searchVault({ keyword }) — Search the vault for markdown files containing a keyword
+
+IMPORTANT — proactive research expectations:
+1. When vault_research_notes excerpts are provided, use readVaultNote to read the FULL notes for any that relate to this week's key work themes, coaching, or focus areas. Excerpts are truncated — the full notes contain context you need.
+2. Use searchVault with keywords related to this week's major themes (project names, technologies, team names) to find notes the engineer wrote that weren't auto-discovered.
+3. Use fetchJiraTicket for the most significant tickets this week — especially P0/P1 focus items and anything mentioned in coaching.
+4. When Confluence pages appear in the work log, use fetchConfluencePage to understand what the engineer contributed.
+5. Your coaching and brag book quality directly depends on how well you understand the engineer's actual work — surface-level summaries from ticket titles are not enough.
+</available_research_tools>`,
+    );
+  }
   const memoryContent = await readMemory();
   const profileContent = await readProfile();
   const workContextContent = await readWorkContext();
@@ -831,6 +858,27 @@ async function generateBragBookEntry(
   const focusDocContent = await readFocusDoc();
   const focusHistoryContent = await readArchivedFocusDocs();
   const careerContext = await readCareerContext();
+
+  // Discover work-relevant vault notes modified during the week
+  const vaultNotes = weekInfo
+    ? await discoverWeeklyNotes(weekInfo.startDate, weekInfo.endDate)
+    : [];
+
+  let vaultNotesSection = "";
+  if (vaultNotes.length > 0) {
+    const notesBody = vaultNotes
+      .map(n => `### ${n.title}\n${n.excerpt}`)
+      .join("\n\n");
+    vaultNotesSection = `
+---
+
+<vault_research_notes>
+These are work-related notes from the engineer's vault that were created or updated this week.
+They provide additional context about research, meetings, and work that may not appear in Jira/GitHub/Confluence.
+
+${notesBody}
+</vault_research_notes>`;
+  }
 
   const pendingFocusItems = getPendingFocusItems(focusTrackingContent);
   const reviewInfo = parseReviewCycle(workContextContent);
@@ -919,6 +967,7 @@ ${careerContext}
 </career_context>
 ${reviewProximitySection}
 ${pendingFocusSection}
+${vaultNotesSection}
 ---
 ${(() => {
   const teamEntry = weekInfo ? getTeamForDate(weekInfo.startDate) : undefined;

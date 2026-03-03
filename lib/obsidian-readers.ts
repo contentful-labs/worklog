@@ -1,4 +1,4 @@
-import { readdir } from "node:fs/promises";
+import { readdir, stat } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { requireConfig, TEAM_TIMELINE_PATH as CONFIG_TEAM_TIMELINE_PATH } from "./config";
 import type { WorklogConfig } from "./config";
@@ -133,6 +133,86 @@ export async function readCareerContext(): Promise<string> {
     }
   }
   return parts.length > 0 ? parts.join("\n\n---\n\n") : "No career context available.";
+}
+
+// --- Vault note discovery ---
+
+const FIXED_FILES = new Set([
+  "memory.md",
+  "my-profile.md",
+  "work-context.md",
+  "impact-log.md",
+  "coach-persona.md",
+  "focus-tracking.md",
+  "My Focus.md",
+]);
+
+const GENERATED_PATTERNS = [/^\d{4}-W\d{2} (Brag Book|Work Log)\.md$/, /^My Focus \(\d{4}-\d{2}-\d{2}\)\.md$/];
+
+const WORK_KEYWORDS = [
+  "workflow", "action", "agent", "hiring", "support", "spike", "rfc",
+  "retro", "standup", "sprint", "epic", "design", "review", "oncall",
+  "incident", "migration", "release", "deploy", "architecture", "proposal",
+  "strategy", "roadmap", "okr", "kpi", "meeting", "sync", "planning",
+  "onboarding", "offboarding", "handover", "runbook", "postmortem",
+];
+
+export async function discoverWeeklyNotes(
+  startDate: Date,
+  endDate: Date,
+): Promise<Array<{ title: string; excerpt: string }>> {
+  const config = requireConfig();
+  const vault = config.vault;
+
+  // Build work-relevance matchers from config
+  const prefixes = config.profile.ticketPrefixes.map(p => p.toLowerCase());
+  const configTerms = [
+    config.profile.company,
+    config.profile.team,
+    config.profile.teamDomain,
+  ]
+    .filter(Boolean)
+    .map(t => t.toLowerCase());
+
+  const files = await readdir(vault);
+  const startMs = startDate.getTime();
+  const endMs = endDate.getTime();
+
+  const candidates: Array<{ title: string; excerpt: string; mtime: number }> = [];
+
+  for (const file of files) {
+    if (!file.endsWith(".md")) continue;
+    if (FIXED_FILES.has(file)) continue;
+    if (GENERATED_PATTERNS.some(p => p.test(file))) continue;
+
+    const filePath = `${vault}/${file}`;
+    const info = await stat(filePath);
+    if (!info.isFile()) continue;
+
+    const mtime = info.mtimeMs;
+    if (mtime < startMs || mtime > endMs) continue;
+
+    // Check work-relevance
+    const lower = file.toLowerCase();
+    const isRelevant =
+      prefixes.some(p => lower.includes(p)) ||
+      configTerms.some(t => lower.includes(t)) ||
+      WORK_KEYWORDS.some(kw => lower.includes(kw));
+
+    if (!isRelevant) continue;
+
+    // Read first ~30 lines as excerpt
+    const content = await Bun.file(filePath).text();
+    const lines = content.split("\n").slice(0, 30);
+    const excerpt = lines.join("\n").trim();
+    const title = file.replace(/\.md$/, "");
+
+    candidates.push({ title, excerpt, mtime });
+  }
+
+  // Sort by mtime descending (most recently modified first), cap at 25
+  candidates.sort((a, b) => b.mtime - a.mtime);
+  return candidates.slice(0, 25).map(({ title, excerpt }) => ({ title, excerpt }));
 }
 
 let _teamTimeline: TeamTimeline | undefined;

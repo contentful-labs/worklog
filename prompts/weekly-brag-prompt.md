@@ -299,7 +299,7 @@ Core Value: {{company_values}}
 </output_format>
 
 <available_research_tools>
-When a PR, ticket, or confluence page lacks enough context to write meaningful brag book entries or coaching notes, use these scripts via Bash to get more information:
+You have research tools available. Use them PROACTIVELY — do not wait for information to be "insufficient." The engineer expects you to dig into their work to provide informed, specific coaching.
 
 - Fetch Jira ticket details:
   bash ~/.dotfiles/.claude/skills/atlassian/scripts/fetch_jira_ticket.sh <TICKET-KEY>
@@ -313,8 +313,20 @@ When a PR, ticket, or confluence page lacks enough context to write meaningful b
 - Search Jira:
   bash ~/.dotfiles/.claude/skills/contentful-confluence-researcher/scripts/search_jira.sh --text "query"
 
+- Read a vault note in full (when vault_research_notes excerpts need more detail):
+  cat "{{vault_path}}/Note Name.md"
+
+- Search vault by keyword:
+  grep -rl "keyword" "{{vault_path}}/" --include="*.md" | head -10
+
 All scripts auto-authenticate via ~/.dotfiles/.secrets.env.
-Use these when ticket descriptions are empty, PR titles are cryptic, or you need broader project context. Don't fetch everything — only when information is genuinely insufficient.
+
+IMPORTANT — proactive research expectations:
+1. When vault_research_notes excerpts are provided below, read the FULL note for any that relate to this week's key work themes, coaching, or focus areas. Excerpts are truncated — the full notes contain context you need.
+2. Search the vault for keywords related to this week's major themes (project names, technologies, team names) to find notes the engineer wrote that weren't auto-discovered.
+3. Fetch full Jira ticket details for the most significant tickets this week — especially P0/P1 focus items and anything mentioned in coaching.
+4. When Confluence pages appear in the work log, fetch them to understand what the engineer contributed.
+5. Your coaching and brag book quality directly depends on how well you understand the engineer's actual work — surface-level summaries from ticket titles are not enough.
 </available_research_tools>
 
 <parsing_notes>

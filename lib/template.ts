@@ -16,5 +16,6 @@ export function buildConfigContext(): Record<string, string> {
     company_values: config.career.companyValues.join(", "),
     current_level: config.career.currentLevel,
     target_level: config.career.targetLevel,
+    vault_path: config.vault,
   };
 }

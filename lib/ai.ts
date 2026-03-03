@@ -1,5 +1,8 @@
+import { streamText, stepCountIs } from "ai";
+import { createOpenAI } from "@ai-sdk/openai";
 import { loadConfig } from "./config";
 import { resolveOpenAIAuth, refreshCodexToken, type OpenAIAuthResolution } from "./openai-auth";
+import { buildResearchTools } from "./ai-tools";
 
 export interface AIQueryOptions {
   prompt: string;
@@ -10,8 +13,7 @@ export interface AIQueryOptions {
  * AI query function. Dispatches to the configured provider at runtime.
  *
  * Anthropic → Claude Agent SDK (works with Max subscription or API key)
- * OpenAI subscription → Responses API (/v1/responses)
- * OpenAI API key → Chat Completions API (/v1/chat/completions)
+ * OpenAI → Vercel AI SDK + Responses API (works with API key or Codex subscription)
  *
  * Returns the final text output with preamble stripped and code block unwrapped.
  */
@@ -39,8 +41,8 @@ async function queryAnthropic(prompt: string): Promise<string> {
   for await (const message of query({
     prompt,
     options: {
-      allowedTools: [],
-      maxTurns: 1,
+      allowedTools: ["Bash", "Read", "Glob", "Grep"],
+      maxTurns: 6,
       cwd: process.cwd(),
     },
   })) {
@@ -91,101 +93,35 @@ async function queryOpenAI(modelOverride: string | undefined, prompt: string): P
   const auth = resolveOpenAIAuthOrThrow();
   const model = modelOverride || "gpt-5";
 
+  let provider;
   if (auth.source === "codex-subscription") {
-    return queryViaResponses(auth, model, prompt);
-  }
-  return queryViaChatCompletions(auth, model, prompt);
-}
-
-/** Responses API — works with ChatGPT subscription tokens */
-async function queryViaResponses(
-  auth: Extract<OpenAIAuthResolution, { source: "codex-subscription" }>,
-  model: string,
-  prompt: string
-): Promise<string> {
-  // Always refresh token first — cached access_token is often expired
-  const freshToken = await refreshCodexToken() ?? auth.apiKey;
-
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-    Authorization: `Bearer ${freshToken}`,
-  };
-  if (auth.accountId) {
-    headers["ChatGPT-Account-Id"] = auth.accountId;
+    const freshToken = (await refreshCodexToken()) ?? auth.apiKey;
+    provider = createOpenAI({
+      baseURL: "https://chatgpt.com/backend-api/codex",
+      apiKey: freshToken,
+      headers: auth.accountId
+        ? { "ChatGPT-Account-Id": auth.accountId }
+        : {},
+    });
+  } else {
+    provider = createOpenAI({ apiKey: auth.apiKey });
   }
 
-  const res = await fetch("https://chatgpt.com/backend-api/codex/responses", {
-    method: "POST",
-    headers,
-    body: JSON.stringify({
-      model,
-      input: [
-        {
-          type: "message",
-          role: "developer",
-          content: [{ type: "input_text", text: "You are a helpful assistant. Follow the user's instructions precisely." }],
-        },
-        {
-          type: "message",
-          role: "user",
-          content: [{ type: "input_text", text: prompt }],
-        },
-      ],
-    }),
-  });
-
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`OpenAI Responses API error ${res.status}: ${body}`);
-  }
-
-  const data = await res.json();
-
-  // Extract text from output items
-  let text = "";
-  for (const item of data.output ?? []) {
-    if (item.type === "message") {
-      for (const block of item.content ?? []) {
-        if (block.type === "output_text") {
-          text += block.text;
-        }
-      }
-    }
-  }
-  return text;
-}
-
-/** Chat Completions API — works with standard API keys */
-async function queryViaChatCompletions(
-  auth: Extract<OpenAIAuthResolution, { source: "env" }>,
-  model: string,
-  prompt: string
-): Promise<string> {
-  const res = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${auth.apiKey}`,
+  const result = streamText({
+    model: provider.responses(model),
+    prompt,
+    tools: buildResearchTools(loadConfig()?.vault),
+    stopWhen: stepCountIs(6),
+    providerOptions: {
+      openai: {
+        instructions:
+          "You are a helpful assistant. Follow the user's instructions precisely.",
+        store: false,
+      },
     },
-    body: JSON.stringify({
-      model,
-      messages: [
-        {
-          role: "system",
-          content: "You are a helpful assistant. Follow the user's instructions precisely.",
-        },
-        { role: "user", content: prompt },
-      ],
-    }),
   });
 
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`OpenAI API error ${res.status}: ${body}`);
-  }
-
-  const data = await res.json();
-  return data.choices?.[0]?.message?.content ?? "";
+  return await result.text;
 }
 
 // --- Post-processing ---
