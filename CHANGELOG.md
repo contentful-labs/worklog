@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.0](https://github.com/contentful-labs/worklog/compare/v1.2.3...v1.3.0) (2026-03-03)
+
+
+### Features
+
+* [] proactive research tools and vault note discovery ([ec25330](https://github.com/contentful-labs/worklog/commit/ec25330eea3c3de8737e3bcea091fb24242a31dd))
+
 ## [1.2.3](https://github.com/contentful-labs/worklog/compare/v1.2.2...v1.2.3) (2026-03-02)
 
 
