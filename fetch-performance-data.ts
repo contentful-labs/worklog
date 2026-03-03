@@ -5,7 +5,7 @@ import { requireConfig } from "./lib/config";
 const config = requireConfig();
 const EMAIL = config.atlassian.email;
 const BASE_URL = config.atlassian.url;
-const START_DATE = "2025-03-01";
+const START_DATE = process.env.PERF_REVIEW_START_DATE || "2025-01-01";
 
 const API_TOKEN = process.env.ATLASSIAN_API_TOKEN;
 if (!API_TOKEN) {
@@ -218,7 +218,7 @@ function generateMarkdown(issues: JiraIssue[], pages: ConfluencePage[], prs: Git
 
   lines.push("# Performance Review Data");
   lines.push(`Generated: ${new Date().toISOString()}`);
-  lines.push(`Period: March 2025 - January 2026`);
+  lines.push(`Period: ${START_DATE} to ${new Date().toISOString().split("T")[0]}`);
   lines.push(`User: ${EMAIL}`);
   lines.push("");
 

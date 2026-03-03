@@ -42,8 +42,8 @@ Generate resume bullet points from the brag book entries and impact log.
 
 Rules:
 1. **Format**: Action verb + what you did + quantified result/scope
-   - Good: "Led migration of automation execution pipeline to event-driven architecture, reducing p99 latency by 40% across 2M daily executions"
-   - Good: "Designed and shipped workflow collaboration features used by 500+ enterprise teams, driving 15% increase in team plan upgrades"
+   - Good: "Led migration of payment processing pipeline to event-driven architecture, reducing p99 latency by 40% across 2M daily transactions"
+   - Good: "Designed and shipped real-time collaboration features used by 500+ enterprise teams, driving 15% increase in team plan upgrades"
    - Bad: "Worked on automation features" (no specifics)
    - Bad: "Helped improve performance" (passive, vague)
 
