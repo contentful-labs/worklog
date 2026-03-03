@@ -16,7 +16,7 @@ import {
   TEAM_TIMELINE_PATH,
 } from "../lib/config";
 import { resolveOpenAIAuth } from "../lib/openai-auth";
-import type { TeamTimeline } from "../lib/obsidian-readers";
+import type { TeamTimeline } from "../lib/vault-readers";
 
 function cancelGuard(value: unknown): void {
   if (p.isCancel(value)) {

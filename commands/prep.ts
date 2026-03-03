@@ -14,7 +14,7 @@ import {
   getExpectedBragBookWeeks,
   getMissingBragBookWeeks,
   formatTeamTimelineForPrompt,
-} from "../lib/obsidian-readers";
+} from "../lib/vault-readers";
 
 const PREP_TYPES = ["1on1", "skip-level", "self-review", "promotion", "resume"] as const;
 type PrepType = (typeof PREP_TYPES)[number];

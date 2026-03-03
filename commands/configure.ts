@@ -8,7 +8,7 @@ import {
   TEAM_TIMELINE_PATH,
 } from "../lib/config";
 import type { WorklogConfig } from "../lib/config";
-import type { TeamTimeline } from "../lib/obsidian-readers";
+import type { TeamTimeline } from "../lib/vault-readers";
 import {
   promptVault,
   promptAI,

@@ -190,7 +190,7 @@ import {
   formatTeamTimelineForPrompt,
   getCurrentTeam,
   discoverWeeklyNotes,
-} from "./lib/obsidian-readers";
+} from "./lib/vault-readers";
 
 // Resolve prompt template relative to this script, not hardcoded path
 const PROMPT_TEMPLATE_PATH = new URL("./prompts/weekly-brag-prompt.md", import.meta.url).pathname;
@@ -837,7 +837,7 @@ Available tools:
 - fetchConfluencePage({ pageIdOrUrl }) — Fetch a Confluence page by ID or URL
 - searchConfluence({ query }) — Search Confluence for pages matching a query
 - searchJira({ query }) — Search Jira for tickets matching a query
-- readVaultNote({ noteName }) — Read an Obsidian vault note by name (without .md extension)
+- readVaultNote({ noteName }) — Read a vault note by name (without .md extension)
 - searchVault({ keyword }) — Search the vault for markdown files containing a keyword
 
 IMPORTANT — proactive research expectations:

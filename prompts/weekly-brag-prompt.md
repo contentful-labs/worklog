@@ -162,7 +162,7 @@ You will receive these documents as context:
 </career_awareness>
 
 <linking_convention>
-This brag book lives in an Obsidian vault alongside other vault documents. Use `[[wikilinks]]` whenever referencing another vault document:
+This brag book lives in a vault that uses wikilink syntax and YAML frontmatter. Use `[[wikilinks]]` whenever referencing another vault document:
 
 - `[[memory]]` — the memory file where small contributions accumulate
 - `[[impact-log]]` — the significant achievements timeline

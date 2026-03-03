@@ -79,7 +79,7 @@ export function buildResearchTools(vaultPath?: string) {
 
     readVaultNote: tool({
       description:
-        "Read a note from the Obsidian vault by name (without .md extension)",
+        "Read a note from the vault by name (without .md extension)",
       inputSchema: z.object({
         noteName: z.string().describe("Note name without .md extension"),
       }),
@@ -96,7 +96,7 @@ export function buildResearchTools(vaultPath?: string) {
 
     searchVault: tool({
       description:
-        "Search the Obsidian vault for markdown files containing a keyword",
+        "Search the vault for markdown files containing a keyword",
       inputSchema: z.object({
         keyword: z.string().describe("Keyword to search for"),
       }),

@@ -141,7 +141,7 @@ All data stays local. Nothing leaves your machine except API calls to OpenAI to 
 ### Prerequisites
 
 - [Bun](https://bun.sh) v1.x+
-- A markdown vault (any folder -- [Obsidian](https://obsidian.md) recommended but not required)
+- A markdown vault (any folder with `.md` files — [Obsidian](https://obsidian.md) works great but is not required)
 
 ### Authentication
 
@@ -243,7 +243,7 @@ After setup, your vault contains:
 │   ├── config.ts              # Config schema, load/save, validation
 │   ├── template.ts            # Prompt template filling ({{placeholders}})
 │   ├── ai.ts                  # AI query layer (OpenAI Agents SDK)
-│   ├── obsidian-readers.ts    # Vault file readers (brag books, context docs)
+│   ├── vault-readers.ts       # Vault file readers (brag books, context docs)
 │   └── openai-auth.ts         # OpenAI auth resolution (subscription + API key)
 └── prompts/
     ├── weekly-brag-prompt.md          # Brag book generation prompt
