@@ -13,6 +13,7 @@
   "include": [
     "*.ts",
     "lib/**/*.ts",
-    "commands/**/*.ts"
+    "commands/**/*.ts",
+    "vitest.config.ts"
   ]
 }
