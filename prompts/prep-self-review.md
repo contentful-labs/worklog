@@ -70,6 +70,10 @@ Question: "In 3-4 bullet points, list what are the key development areas or oppo
 Write in first person. Every claim needs evidence from brag books or impact log. Be calibrated — a 3 (Solid) is a good rating meaning you're doing your job well. Don't inflate.
 </instructions>
 
+<writing_style>
+{{writing_style}}
+</writing_style>
+
 <output_format>
 CRITICAL: Output ONLY the markdown document. No analysis, no thinking, no commentary, no code blocks, no meta-commentary. Start directly with the YAML frontmatter.
 

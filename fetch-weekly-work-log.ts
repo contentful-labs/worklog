@@ -190,7 +190,7 @@ import {
   formatTeamTimelineForPrompt,
   getCurrentTeam,
   discoverWeeklyNotes,
-} from "./lib/obsidian-readers";
+} from "./lib/vault-readers";
 
 // Resolve prompt template relative to this script, not hardcoded path
 const PROMPT_TEMPLATE_PATH = new URL("./prompts/weekly-brag-prompt.md", import.meta.url).pathname;
@@ -837,7 +837,7 @@ Available tools:
 - fetchConfluencePage({ pageIdOrUrl }) — Fetch a Confluence page by ID or URL
 - searchConfluence({ query }) — Search Confluence for pages matching a query
 - searchJira({ query }) — Search Jira for tickets matching a query
-- readVaultNote({ noteName }) — Read an Obsidian vault note by name (without .md extension)
+- readVaultNote({ noteName }) — Read a vault note by name (without .md extension)
 - searchVault({ keyword }) — Search the vault for markdown files containing a keyword
 
 IMPORTANT — proactive research expectations:
@@ -846,6 +846,12 @@ IMPORTANT — proactive research expectations:
 3. Use fetchJiraTicket for the most significant tickets this week — especially P0/P1 focus items and anything mentioned in coaching.
 4. When Confluence pages appear in the work log, use fetchConfluencePage to understand what the engineer contributed.
 5. Your coaching and brag book quality directly depends on how well you understand the engineer's actual work — surface-level summaries from ticket titles are not enough.
+
+CRITICAL — ticket status freshness:
+6. ALWAYS use fetchJiraTicket to get the latest status before writing about ANY ticket in the brag book or coaching notes. The work log snapshot may be stale — tickets change status after the data was fetched.
+7. Check ticket comments — they often contain important context: decisions made, blockers raised, scope changes, reviewer feedback, or follow-up actions that the ticket title/description alone won't capture.
+8. If a ticket's current status contradicts what the work log shows (e.g., work log says "In Progress" but ticket is now "Done" or "Won't Do"), use the CURRENT status and adjust your narrative accordingly.
+9. Do NOT describe a ticket as "in progress" or "blocked" if it has since been resolved. Do NOT claim completion if the ticket was reopened or reverted.
 </available_research_tools>`,
     );
   }

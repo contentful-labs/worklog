@@ -258,7 +258,7 @@ export function formatTeamTimelineForPrompt(): string {
   ].join("\n");
 }
 
-export async function getBragBooks(count: number, beforeFilename?: string): Promise<string> {
+export async function getBragBooks(count: number, beforeFilename?: string, afterFilename?: string): Promise<string> {
   const vault = getVault();
   const files = await readdir(vault);
   const bragFiles = files
@@ -266,9 +266,13 @@ export async function getBragBooks(count: number, beforeFilename?: string): Prom
     .sort()
     .reverse();
 
-  const filtered = beforeFilename
+  let filtered = beforeFilename
     ? bragFiles.filter(f => f < beforeFilename)
     : bragFiles;
+
+  if (afterFilename) {
+    filtered = filtered.filter(f => f >= afterFilename);
+  }
 
   const selected = filtered.slice(0, count);
 
@@ -283,20 +287,25 @@ export async function getBragBooks(count: number, beforeFilename?: string): Prom
   return contents.join("\n\n---\n\n");
 }
 
-export async function getRecentBragBooks(weeks: number, untilDate?: string): Promise<string> {
-  if (!untilDate) return getBragBooks(weeks);
+export async function getRecentBragBooks(weeks: number, untilDate?: string, sinceDate?: string): Promise<string> {
+  // Compute upper bound filename
+  let beforeFilename: string | undefined;
+  if (untilDate) {
+    const untilWeekId = weekIdForDate(new Date(untilDate));
+    // beforeFilename is exclusive, so use \xff suffix to include untilWeekId
+    beforeFilename = `${untilWeekId} Brag Book.md\xff`;
+  }
 
-  // Convert untilDate to a week ID to use as upper bound
-  const until = new Date(untilDate);
-  const untilWn = getWeekNumber(until);
-  const utc = new Date(Date.UTC(until.getFullYear(), until.getMonth(), until.getDate()));
-  const dayNum = utc.getUTCDay() || 7;
-  utc.setUTCDate(utc.getUTCDate() + 4 - dayNum);
-  const isoYear = utc.getUTCFullYear();
-  const untilWeekId = weekId(untilWn, isoYear);
-  // beforeFilename is exclusive, so use the next week's filename to include untilWeekId
-  const nextWeekFilename = `${untilWeekId} Brag Book.md\xff`;
-  return getBragBooks(weeks, nextWeekFilename);
+  // Compute lower bound filename
+  let afterFilename: string | undefined;
+  if (sinceDate) {
+    const sinceWeekId = weekIdForDate(new Date(sinceDate));
+    afterFilename = `${sinceWeekId} Brag Book.md`;
+  }
+
+  if (!beforeFilename && !afterFilename) return getBragBooks(weeks);
+
+  return getBragBooks(weeks, beforeFilename, afterFilename);
 }
 
 // ISO week number for a date
@@ -312,24 +321,47 @@ export function weekId(week: number, year: number): string {
   return `${year}-W${String(week).padStart(2, "0")}`;
 }
 
-// Returns list of YYYY-WXX week IDs covering the last N weeks from today
-export function getExpectedBragBookWeeks(weeks: number): string[] {
-  const now = new Date();
+// Helper: compute ISO week ID for a given date
+function weekIdForDate(d: Date): string {
+  const wn = getWeekNumber(d);
+  const utc = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
+  const dayNum = utc.getUTCDay() || 7;
+  utc.setUTCDate(utc.getUTCDate() + 4 - dayNum);
+  const isoYear = utc.getUTCFullYear();
+  return weekId(wn, isoYear);
+}
+
+// Returns list of YYYY-WXX week IDs covering the requested range.
+// - Walks back from untilDate (or today) for `weeks` iterations.
+// - Stops early if sinceDate is provided and we've passed its ISO week.
+// - When no explicit untilDate, excludes the current (incomplete) week.
+export function getExpectedBragBookWeeks(
+  weeks: number,
+  sinceDate?: string,
+  untilDate?: string,
+): string[] {
+  const end = untilDate ? new Date(untilDate) : new Date();
   const result: string[] = [];
 
+  const currentWeekId = weekIdForDate(new Date());
+  const sinceWeekId = sinceDate ? weekIdForDate(new Date(sinceDate)) : undefined;
+
   for (let i = 0; i < weeks; i++) {
-    const d = new Date(now);
+    const d = new Date(end);
     d.setDate(d.getDate() - i * 7);
-    const wn = getWeekNumber(d);
-    // Use ISO week year (may differ from calendar year at year boundaries)
-    const utc = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
-    const dayNum = utc.getUTCDay() || 7;
-    utc.setUTCDate(utc.getUTCDate() + 4 - dayNum);
-    const isoYear = utc.getUTCFullYear();
-    result.push(weekId(wn, isoYear));
+    const wid = weekIdForDate(d);
+
+    // Stop if we've gone past the since boundary
+    if (sinceWeekId && wid < sinceWeekId) break;
+
+    // Skip current incomplete week when no explicit --until
+    if (!untilDate && wid === currentWeekId) continue;
+
+    result.push(wid);
   }
 
-  return result.reverse();
+  // Deduplicate (edge case: short ranges can overlap same week) and sort
+  return [...new Set(result)].sort();
 }
 
 // Returns which of the requested week IDs don't have a brag book file

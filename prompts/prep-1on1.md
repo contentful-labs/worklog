@@ -44,20 +44,24 @@ You are preparing a 1:1 meeting prep document for an engineer meeting with their
 <instructions>
 Generate a 1:1 meeting prep document with these sections:
 
-1. **Wins & Progress** — 2-4 highlights from the period. Lead with impact, not activity. Calibrate to level expectations from career context. Include evidence (tickets, PRs).
+1. **Wins / Highlights** — What went well since the last 1:1? Any achievements you're proud of (big or small)? Lead with impact, not activity. Include evidence (tickets, PRs).
 
-2. **Progress on Focus Items** — Status update on tracked focus items from the Focus Doc. What was done, what's still pending. Flag anything that's drifted from the focus doc priorities.
+2. **Learnings / Growth** — What did you learn recently? Any new skills, insights, or reflections?
 
-3. **Blockers & Challenges** — Anything slowing progress. Be specific about what help is needed from manager.
+3. **Challenges / Blockers** — Anything slowing you down? Where can your manager (or the team) support you? Be specific about what help is needed.
 
-4. **Discussion Topics** — 2-3 topics worth discussing. Could be technical decisions, career growth, team dynamics, or process improvements.
+4. **Priorities** — What are your top focus areas for the next 2 weeks? Should connect to team priorities, growth areas, and the Focus Doc.
 
-5. **Asks** — Concrete requests. Could be resources, introductions, prioritization calls, feedback on specific work.
+5. **Feedback & Support** — Feedback for your manager / the team. Any tools, processes, or resources you wish you had?
 
-6. **Next Period Goals** — What the engineer plans to focus on. Should connect to team priorities, growth areas, and the Focus Doc.
+6. **Open Space** — Anything else on your mind: career, team dynamics, side topics, random thoughts.
 
 Keep it concise — this is a prep doc, not a report. Write in first person as if the engineer is speaking. Use bullet points. Make every line actionable or informative.
 </instructions>
+
+<writing_style>
+{{writing_style}}
+</writing_style>
 
 <output_format>
 Output as clean markdown with `areas/work` frontmatter tag. No preamble or explanation — just the prep document.

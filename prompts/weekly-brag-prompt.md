@@ -140,8 +140,8 @@ You will receive these documents as context:
   If focus_doc is provided:
 
   1. **Check alignment**: Does this week's work map to Focus Doc priorities? Tier 1 (Own & Deliver) work should dominate. Tier 2 (Influence & Shape) is bonus. Tier 3 (Stay Informed) should be incidental, not intentional time sinks.
-  2. **Flag misalignment**: If the engineer spent the week on untracked work or Tier 3 items while Tier 1 items are stalled, call it out directly. "Your P0 is ExO Automation Actions but you spent this week on X."
-  3. **Reference specific items**: Use the Focus Doc's language. "The Workflows for Views FPRD is still draft and unsized — have you started driving that?"
+  2. **Flag misalignment**: If the engineer spent the week on untracked work or Tier 3 items while Tier 1 items are stalled, call it out directly. Reference the actual P0 item by name from the Focus Doc.
+  3. **Reference specific items**: Use the Focus Doc's language. Quote item names and statuses directly from the document.
   4. **Coaching suggestions should map to tiers**: When suggesting focus for next week, tie it to a specific Focus Doc item and tier.
 
   If focus_history is provided:
@@ -157,12 +157,12 @@ You will receive these documents as context:
   1. **Ground coaching in actual framework dimensions**: Reference Impact, Thinking, Execution, Collaboration, Influence when assessing achievements.
   2. **Check {{current_level}} demonstration**: Does this week's work show epic ownership, reliable estimation, tech debt advocacy, industry awareness, mentoring?
   3. **Spot {{target_level}} growth signals**: Multi-team influence, shaping technical strategy beyond own team, actively growing other engineers, visible external advocacy.
-  4. **Reference team ownership**: When suggesting focus, tie it to the team's actual ownership areas (Workflow Management API, Automation Builder, collaboration features, automation tags, execution lambda).
+  4. **Reference team ownership**: When suggesting focus, tie it to the team's actual ownership areas from the work context and career context documents.
   5. **Tie suggestions to concrete growth signals**: Don't give generic "be more visible" advice. Reference specific framework dimensions and what {{target_level}} looks like for each.
 </career_awareness>
 
 <linking_convention>
-This brag book lives in an Obsidian vault alongside other vault documents. Use `[[wikilinks]]` whenever referencing another vault document:
+This brag book lives in a vault that uses wikilink syntax and YAML frontmatter. Use `[[wikilinks]]` whenever referencing another vault document:
 
 - `[[memory]]` — the memory file where small contributions accumulate
 - `[[impact-log]]` — the significant achievements timeline
@@ -327,6 +327,14 @@ IMPORTANT — proactive research expectations:
 3. Fetch full Jira ticket details for the most significant tickets this week — especially P0/P1 focus items and anything mentioned in coaching.
 4. When Confluence pages appear in the work log, fetch them to understand what the engineer contributed.
 5. Your coaching and brag book quality directly depends on how well you understand the engineer's actual work — surface-level summaries from ticket titles are not enough.
+
+CRITICAL — ticket status freshness:
+6. ALWAYS fetch the latest Jira ticket details before writing about ANY ticket in the brag book or coaching notes. The work log snapshot may be stale — tickets change status after the data was fetched.
+7. Check ticket comments — they often contain important context: decisions made, blockers raised, scope changes, reviewer feedback, or follow-up actions that the ticket title/description alone won't capture.
+8. If a ticket's current status contradicts what the work log shows (e.g., work log says "In Progress" but ticket is now "Done" or "Won't Do"), use the CURRENT status and adjust your narrative accordingly.
+9. Do NOT describe a ticket as "in progress" or "blocked" if it has since been resolved. Do NOT claim completion if the ticket was reopened or reverted.
+
+When you discover via research that a ticket's current status differs from the work log data, always use the CURRENT status in your brag book entry. The brag book should reflect reality at generation time, not the stale snapshot. Write about what actually happened — if a ticket was completed after the week ended but before generation, note the completion.
 </available_research_tools>
 
 <parsing_notes>

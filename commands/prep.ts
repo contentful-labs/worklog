@@ -14,7 +14,7 @@ import {
   getExpectedBragBookWeeks,
   getMissingBragBookWeeks,
   formatTeamTimelineForPrompt,
-} from "../lib/obsidian-readers";
+} from "../lib/vault-readers";
 
 const PREP_TYPES = ["1on1", "skip-level", "self-review", "promotion", "resume"] as const;
 type PrepType = (typeof PREP_TYPES)[number];
@@ -43,13 +43,14 @@ const PROMPT_FILE: Record<PrepType, string> = {
   "resume": "prep-resume.md",
 };
 
-function parseArgs(): { type: PrepType; weeks: number; sinceDate?: string; untilDate?: string; extended: boolean } {
+function parseArgs(): { type: PrepType; weeks: number; sinceDate?: string; untilDate?: string; extended: boolean; richText: boolean } {
   const args = process.argv.slice(2);
 
-  if (args.length === 0 || args[0] === "--help" || args[0] === "-h") {
+  if (args.length === 0 || args.includes("--help") || args.includes("-h")) {
     p.intro("prep");
     p.note(
-      `Usage: prep <type> [--weeks N] [--since YYYY-MM-DD] [--until YYYY-MM-DD] [--extended]\n\nTypes:\n  1on1          1:1 meeting prep (default: 4 weeks)\n  skip-level    Skip-level meeting prep (default: 4 weeks)\n  self-review   Self-review for perf cycle (default: 12 weeks)\n  promotion     Promotion case assembly (default: 26 weeks)\n  resume        Resume bullet points (default: 26 weeks)\n\nOptions:\n  --weeks N          Number of weeks of brag books to include\n  --since YYYY-MM-DD Include brag books from this date (mutually exclusive with --weeks)\n  --until YYYY-MM-DD Include brag books up to this date (default: today)\n  --extended         Extended output (self-review: full 6-section format instead of concise)`,
+      `Usage: prep <type> [--weeks N] [--since YYYY-MM-DD] [--until YYYY-MM-DD] [--extended]\n\nTypes:\n  1on1          1:1 meeting prep (default: 4 weeks)\n  skip-level    Skip-level meeting prep (default: 4 weeks)\n  self-review   Self-review for perf cycle (default: 12 weeks)\n  promotion     Promotion case assembly (default: 26 weeks)\n  resume        Resume bullet points (default: 26 weeks)\n\nOptions:\n  --weeks N          Number of weeks of brag books to include\n  --since YYYY-MM-DD Include brag books from this date (mutually exclusive with --weeks)\n  --until YYYY-MM-DD Include brag books up to this date (default: today)\n  --extended         Extended output (self-review: full 6-section format instead of concise)
+  --rt               Generate rich text (.docx) copy for Google Docs`,
       "Help"
     );
     process.exit(0);
@@ -105,8 +106,9 @@ function parseArgs(): { type: PrepType; weeks: number; sinceDate?: string; until
   }
 
   const extended = args.includes("--extended");
+  const richText = args.includes("--rt");
 
-  return { type, weeks, sinceDate, untilDate, extended };
+  return { type, weeks, sinceDate, untilDate, extended, richText };
 }
 
 function getDateRange(weeks: number, sinceDate?: string, untilDate?: string): string {
@@ -116,21 +118,59 @@ function getDateRange(weeks: number, sinceDate?: string, untilDate?: string): st
   return `${start.toISOString().split("T")[0]} to ${end.toISOString().split("T")[0]}`;
 }
 
+async function generateBragBookForWeek(weekIdStr: string): Promise<void> {
+  const scriptPath = new URL("../fetch-weekly-work-log.ts", import.meta.url).pathname;
+  p.log.info(`Generating brag book for ${weekIdStr}...`);
+  const proc = Bun.spawn([process.execPath, scriptPath, "--week", weekIdStr, "--no-prompt"], {
+    stdout: "inherit",
+    stderr: "inherit",
+  });
+  const exitCode = await proc.exited;
+  if (exitCode !== 0) {
+    p.log.warn(`Brag book generation for ${weekIdStr} exited with code ${exitCode}`);
+  }
+}
+
 export async function runPrep(): Promise<void> {
-  const { type, weeks, sinceDate, untilDate, extended } = parseArgs();
+  const { type, weeks, sinceDate, untilDate, extended, richText } = parseArgs();
 
   p.intro(`prep — ${OUTPUT_PREFIX[type]}${extended ? " (extended)" : ""}`);
   p.log.info(`Reading ${weeks} weeks of brag books + context`);
 
   // Check for missing brag books in the requested range
-  const expectedWeeks = getExpectedBragBookWeeks(weeks);
+  const expectedWeeks = getExpectedBragBookWeeks(weeks, sinceDate, untilDate);
   const missingWeeks = await getMissingBragBookWeeks(expectedWeeks);
 
+  const skippedWeeks: string[] = [];
+
   if (missingWeeks.length > 0) {
-    const missing = missingWeeks.map(w => `  - ${w}`).join("\n");
-    p.log.error(`Missing ${missingWeeks.length} brag book(s) in the requested ${weeks}-week range:\n${missing}`);
-    p.log.info(`Run: worklog --weeks ${weeks} --no-prompt`);
-    process.exit(1);
+    p.log.warn(`Missing ${missingWeeks.length} brag book(s) in the requested range`);
+
+    for (const weekIdStr of missingWeeks) {
+      const action = await p.select({
+        message: `Week ${weekIdStr} has no brag book`,
+        options: [
+          { value: "generate", label: "Generate it now" },
+          { value: "skip", label: "Skip this week" },
+          { value: "cancel", label: "Cancel prep" },
+        ],
+      });
+
+      if (p.isCancel(action) || action === "cancel") {
+        p.cancel("Prep cancelled.");
+        process.exit(0);
+      }
+
+      if (action === "generate") {
+        await generateBragBookForWeek(weekIdStr);
+      } else {
+        skippedWeeks.push(weekIdStr);
+      }
+    }
+
+    if (skippedWeeks.length > 0) {
+      p.log.info(`Skipped: ${skippedWeeks.join(", ")}`);
+    }
   }
 
   const s = p.spinner();
@@ -147,7 +187,7 @@ export async function runPrep(): Promise<void> {
     focusTracking,
     memory,
   ] = await Promise.all([
-    getRecentBragBooks(weeks, untilDate),
+    getRecentBragBooks(weeks, untilDate, sinceDate),
     readProfile(),
     readWorkContext(),
     readCareerContext(),
@@ -170,6 +210,8 @@ export async function runPrep(): Promise<void> {
 
   const dateRange = getDateRange(weeks, sinceDate, untilDate);
   const teamTimeline = formatTeamTimelineForPrompt();
+  const writingStylePath = new URL("../prompts/_writing-style.md", import.meta.url).pathname;
+  const writingStyle = await Bun.file(writingStylePath).text();
 
   // Fill template — config-driven placeholders + runtime context
   const prompt = fillTemplate(rawTemplate, {
@@ -184,6 +226,7 @@ export async function runPrep(): Promise<void> {
     focus_tracking: focusTracking,
     memory,
     team_timeline: teamTimeline,
+    writing_style: writingStyle,
   });
 
   // Generate via AI
@@ -203,6 +246,16 @@ export async function runPrep(): Promise<void> {
 
   await Bun.write(outputPath, result);
   p.log.success(`Written to: ${outputPath}`);
+
+  if (richText) {
+    const { markdownToDocx } = await import("../lib/markdown-to-docx");
+    const docxBuffer = await markdownToDocx(result);
+    const docxFilename = `${OUTPUT_PREFIX[type]} ${today}.docx`;
+    const docxPath = `${getVault()}/${docxFilename}`;
+    await Bun.write(docxPath, docxBuffer);
+    p.log.success(`Rich text: ${docxPath}`);
+  }
+
   p.outro("Done!");
 
   if (!extended) {
