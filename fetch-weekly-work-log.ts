@@ -9,6 +9,30 @@ import { aiQuery } from "./lib/ai";
 import { fillTemplate, buildConfigContext } from "./lib/template";
 import { runInit } from "./commands/init";
 import { runConfigure } from "./commands/configure";
+import {
+  getVault,
+  getMemoryPath,
+  getProfilePath,
+  getWorkContextPath,
+  getImpactLogPath,
+  getFocusTrackingPath,
+  readMemory,
+  readProfile,
+  readWorkContext,
+  readImpactLog,
+  readCoachPersona,
+  readFocusTracking,
+  readFocusDoc,
+  readArchivedFocusDocs,
+  readCareerContext,
+  getBragBooks,
+  getWeekNumber,
+  weekId,
+  getTeamForDate,
+  formatTeamTimelineForPrompt,
+  getCurrentTeam,
+  discoverWeeklyNotes,
+} from "./lib/vault-readers";
 
 // --- Timing & Progress helpers ---
 
@@ -35,8 +59,6 @@ interface TimingRecord {
   total: number;
   counts: { jira: number; confluence: number; prs: number; reviews: number };
 }
-
-// STATS_PATH imported from config module
 
 async function loadStats(): Promise<TimingRecord[]> {
   if (!existsSync(STATS_PATH)) return [];
@@ -167,36 +189,8 @@ async function printReport(timings: WeekTiming[], results: WeekResult[]): Promis
 
   p.note(lines.join("\n"), "Summary");
 }
-import {
-  getVault,
-  getMemoryPath,
-  getProfilePath,
-  getWorkContextPath,
-  getImpactLogPath,
-  getFocusTrackingPath,
-  readMemory,
-  readProfile,
-  readWorkContext,
-  readImpactLog,
-  readCoachPersona,
-  readFocusTracking,
-  readFocusDoc,
-  readArchivedFocusDocs,
-  readCareerContext,
-  getBragBooks,
-  getWeekNumber as sharedGetWeekNumber,
-  weekId as sharedWeekId,
-  getTeamForDate,
-  formatTeamTimelineForPrompt,
-  getCurrentTeam,
-  discoverWeeklyNotes,
-} from "./lib/vault-readers";
 
-// Resolve prompt template relative to this script, not hardcoded path
 const PROMPT_TEMPLATE_PATH = new URL("./prompts/weekly-brag-prompt.md", import.meta.url).pathname;
-
-const weekId = sharedWeekId;
-const getWeekNumber = sharedGetWeekNumber;
 
 // Get start of ISO week (Monday)
 function getWeekStart(weekNumber: number, year: number): Date {
@@ -552,6 +546,7 @@ interface GitHubPR {
   closed_at?: string;
   html_url: string;
   repository_url: string;
+  user?: { login: string };
 }
 
 async function getGitHubUsername(config: WorklogConfig): Promise<string> {
@@ -1306,9 +1301,9 @@ interface PRReview {
   pr_html_url: string;
 }
 
-async function searchConfluence(config: WorklogConfig, cql: string, expand: string, status?: string): Promise<Record<string, any>[]> {
+async function searchConfluence<T = Record<string, unknown>>(config: WorklogConfig, cql: string, expand: string, status?: string): Promise<T[]> {
   const { atlassian: headers } = getHeaders(config);
-  const results: Record<string, any>[] = [];
+  const results: T[] = [];
   let start = 0;
   while (true) {
     let url = `${config.atlassian.url}/wiki/rest/api/content/search?cql=${encodeURIComponent(cql)}&expand=${encodeURIComponent(expand)}&start=${start}&limit=50`;
@@ -1363,7 +1358,7 @@ async function fetchDataForWeek(
 
   // Fetch Confluence pages — Query 1: contributor pages (includes drafts)
   const contributorCql = `contributor = "${accountId}" AND type = page AND lastModified >= "${startDate}" AND lastModified <= "${endDate}"`;
-  const contributedPages = await searchConfluence(config, contributorCql, "space,history,history.lastUpdated,history.createdBy", "any") as ConfluencePage[];
+  const contributedPages = await searchConfluence<ConfluencePage>(config, contributorCql, "space,history,history.lastUpdated,history.createdBy", "any");
 
   const pageMap = new Map<string, ConfluencePage>();
   for (const page of contributedPages) {
@@ -1381,7 +1376,7 @@ async function fetchDataForWeek(
 
   // Fetch Confluence pages — Query 2: pages user commented on
   const commentCql = `type = comment AND creator = "${accountId}" AND created >= "${startDate}" AND created <= "${endDate}"`;
-  const comments = await searchConfluence(config, commentCql, "container") as ConfluenceComment[];
+  const comments = await searchConfluence<ConfluenceComment>(config, commentCql, "container");
 
   for (const comment of comments) {
     const container = comment.container;
@@ -1441,7 +1436,7 @@ async function fetchDataForWeek(
       const reviewsRes = await fetch(`https://api.github.com/repos/${repoPath}/pulls/${pr.number}/reviews`, { headers: githubHeaders });
       if (!reviewsRes.ok) continue;
       const prReviews = await reviewsRes.json();
-      const userReviews = prReviews.filter((r: any) => r.user?.login === githubUsername);
+      const userReviews = prReviews.filter((r: { user?: { login: string }; state: string; submitted_at: string; html_url: string }) => r.user?.login === githubUsername);
       if (userReviews.length === 0) continue;
 
       const latestReview = userReviews[userReviews.length - 1];
@@ -1450,13 +1445,13 @@ async function fetchDataForWeek(
       let commentCount = 0;
       if (commentsRes.ok) {
         const prComments = await commentsRes.json();
-        commentCount = prComments.filter((c: any) => c.user?.login === githubUsername).length;
+        commentCount = prComments.filter((c: { user?: { login: string } }) => c.user?.login === githubUsername).length;
       }
 
       reviews.push({
         pr_number: pr.number,
         pr_title: pr.title,
-        pr_author: (pr as any).user?.login || "unknown",
+        pr_author: pr.user?.login || "unknown",
         repo: repoPath,
         state: latestReview.state,
         submitted_at: latestReview.submitted_at,
