@@ -1,42 +1,41 @@
 import { tool } from "ai";
 import { z } from "zod";
-import { homedir } from "node:os";
 import { join } from "node:path";
+import type { WorklogConfig } from "./config";
 
-const SCRIPTS = {
-  fetchJiraTicket: join(
-    homedir(),
-    ".dotfiles/.claude/skills/atlassian/scripts/fetch_jira_ticket.sh"
-  ),
-  fetchConfluencePage: join(
-    homedir(),
-    ".dotfiles/.claude/skills/atlassian/scripts/fetch_confluence_page.sh"
-  ),
-  searchConfluence: join(
-    homedir(),
-    ".dotfiles/.claude/skills/contentful-confluence-researcher/scripts/search_confluence.sh"
-  ),
-  searchJira: join(
-    homedir(),
-    ".dotfiles/.claude/skills/contentful-confluence-researcher/scripts/search_jira.sh"
-  ),
-} as const;
+function buildAtlassianAuth(
+  config: WorklogConfig
+): { baseUrl: string; headers: Record<string, string> } | null {
+  const apiToken = process.env.ATLASSIAN_API_TOKEN?.trim();
+  if (!apiToken) return null;
 
-async function runScript(script: string, args: string[]): Promise<string> {
-  const proc = Bun.spawn(["bash", script, ...args], {
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const stdout = await new Response(proc.stdout).text();
-  const stderr = await new Response(proc.stderr).text();
-  const exitCode = await proc.exited;
-  if (exitCode !== 0) {
-    return `Error (exit ${exitCode}): ${stderr || stdout}`;
-  }
-  return stdout;
+  const auth = Buffer.from(`${config.atlassian.email}:${apiToken}`).toString(
+    "base64"
+  );
+  return {
+    baseUrl: config.atlassian.url,
+    headers: {
+      Authorization: `Basic ${auth}`,
+      Accept: "application/json",
+      "Content-Type": "application/json",
+    },
+  };
 }
 
-export function buildResearchTools(vaultPath?: string) {
+/** Extract numeric page ID from a Confluence URL or pass through a bare ID. */
+function extractConfluencePageId(input: string): string {
+  // Full URL: .../pages/12345/... or .../pageId=12345
+  const urlMatch = input.match(/(?:pages\/|pageId=)(\d+)/);
+  if (urlMatch) return urlMatch[1];
+  // Bare numeric ID
+  if (/^\d+$/.test(input.trim())) return input.trim();
+  return input;
+}
+
+export function buildResearchTools(config?: WorklogConfig | null) {
+  const atlassian = config ? buildAtlassianAuth(config) : null;
+  const vaultPath = config?.vault;
+
   return {
     fetchJiraTicket: tool({
       description:
@@ -44,8 +43,16 @@ export function buildResearchTools(vaultPath?: string) {
       inputSchema: z.object({
         ticketKey: z.string().describe("Jira ticket key, e.g. TEAM-1234"),
       }),
-      execute: async ({ ticketKey }) =>
-        runScript(SCRIPTS.fetchJiraTicket, [ticketKey]),
+      execute: async ({ ticketKey }) => {
+        if (!atlassian)
+          return "Error: Atlassian auth not configured (set ATLASSIAN_API_TOKEN)";
+        const url = `${atlassian.baseUrl}/rest/api/3/issue/${encodeURIComponent(ticketKey)}?fields=summary,status,description,comment`;
+        const res = await fetch(url, { headers: atlassian.headers });
+        if (!res.ok)
+          return `Error fetching ${ticketKey}: ${res.status} ${res.statusText}`;
+        const data = await res.json();
+        return JSON.stringify(data, null, 2);
+      },
     }),
 
     fetchConfluencePage: tool({
@@ -55,8 +62,17 @@ export function buildResearchTools(vaultPath?: string) {
           .string()
           .describe("Confluence page ID or full URL"),
       }),
-      execute: async ({ pageIdOrUrl }) =>
-        runScript(SCRIPTS.fetchConfluencePage, [pageIdOrUrl]),
+      execute: async ({ pageIdOrUrl }) => {
+        if (!atlassian)
+          return "Error: Atlassian auth not configured (set ATLASSIAN_API_TOKEN)";
+        const pageId = extractConfluencePageId(pageIdOrUrl);
+        const url = `${atlassian.baseUrl}/wiki/rest/api/content/${encodeURIComponent(pageId)}?expand=body.storage,space,history`;
+        const res = await fetch(url, { headers: atlassian.headers });
+        if (!res.ok)
+          return `Error fetching page ${pageId}: ${res.status} ${res.statusText}`;
+        const data = await res.json();
+        return JSON.stringify(data, null, 2);
+      },
     }),
 
     searchConfluence: tool({
@@ -64,8 +80,17 @@ export function buildResearchTools(vaultPath?: string) {
       inputSchema: z.object({
         query: z.string().describe("Search query text"),
       }),
-      execute: async ({ query }) =>
-        runScript(SCRIPTS.searchConfluence, ["--text", query]),
+      execute: async ({ query }) => {
+        if (!atlassian)
+          return "Error: Atlassian auth not configured (set ATLASSIAN_API_TOKEN)";
+        const cql = `text~"${query}"`;
+        const url = `${atlassian.baseUrl}/wiki/rest/api/content/search?cql=${encodeURIComponent(cql)}&limit=10`;
+        const res = await fetch(url, { headers: atlassian.headers });
+        if (!res.ok)
+          return `Error searching Confluence: ${res.status} ${res.statusText}`;
+        const data = await res.json();
+        return JSON.stringify(data, null, 2);
+      },
     }),
 
     searchJira: tool({
@@ -73,8 +98,24 @@ export function buildResearchTools(vaultPath?: string) {
       inputSchema: z.object({
         query: z.string().describe("Search query text"),
       }),
-      execute: async ({ query }) =>
-        runScript(SCRIPTS.searchJira, ["--text", query]),
+      execute: async ({ query }) => {
+        if (!atlassian)
+          return "Error: Atlassian auth not configured (set ATLASSIAN_API_TOKEN)";
+        const url = `${atlassian.baseUrl}/rest/api/3/search/jql`;
+        const res = await fetch(url, {
+          method: "POST",
+          headers: atlassian.headers,
+          body: JSON.stringify({
+            jql: `text ~ "${query}"`,
+            maxResults: 10,
+            fields: ["summary", "status", "assignee"],
+          }),
+        });
+        if (!res.ok)
+          return `Error searching Jira: ${res.status} ${res.statusText}`;
+        const data = await res.json();
+        return JSON.stringify(data, null, 2);
+      },
     }),
 
     readVaultNote: tool({
