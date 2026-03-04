@@ -1,6 +1,8 @@
 #!/usr/bin/env bun
 
 import { requireConfig } from "./lib/config";
+import type { JiraIssue, ConfluencePage, GitHubPR } from "./lib/types";
+import { extractText, formatDate } from "./lib/utils";
 
 const config = requireConfig();
 const EMAIL = config.atlassian.email;
@@ -42,47 +44,6 @@ async function getAccountId(): Promise<string> {
   return data.accountId;
 }
 
-interface JiraIssue {
-  key: string;
-  fields: {
-    summary: string;
-    status: { name: string };
-    created: string;
-    updated: string;
-    resolutiondate?: string;
-    description?: { content?: Array<{ content?: Array<{ text?: string }> }> };
-    priority?: { name: string };
-    labels?: string[];
-    components?: Array<{ name: string }>;
-    timetracking?: { timeSpent?: string };
-    comment?: { comments?: Array<{ body?: { content?: Array<{ content?: Array<{ text?: string }> }> }; author?: { displayName?: string }; created?: string }> };
-  };
-}
-
-interface ConfluencePage {
-  id: string;
-  title: string;
-  space?: { name: string; key: string };
-  _links?: { webui?: string };
-  history?: { createdDate?: string; lastUpdated?: { when?: string } };
-}
-
-interface GitHubPR {
-  number: number;
-  title: string;
-  state: string;
-  created_at: string;
-  updated_at: string;
-  merged_at?: string;
-  closed_at?: string;
-  html_url: string;
-  repository_url: string;
-  additions?: number;
-  deletions?: number;
-  changed_files?: number;
-  comments?: number;
-  review_comments?: number;
-}
 
 async function fetchJiraIssues(): Promise<JiraIssue[]> {
   const jql = `(assignee = "${EMAIL}" OR reporter = "${EMAIL}") AND updated >= "${START_DATE}" ORDER BY updated DESC`;
@@ -194,24 +155,6 @@ async function fetchGitHubPRs(username: string): Promise<GitHubPR[]> {
   return allPRs;
 }
 
-function extractText(adfContent: JiraIssue["fields"]["description"]): string {
-  if (!adfContent?.content) return "";
-
-  const texts: string[] = [];
-  for (const block of adfContent.content) {
-    if (block.content) {
-      for (const inline of block.content) {
-        if (inline.text) texts.push(inline.text);
-      }
-    }
-  }
-  return texts.join(" ").slice(0, 500) + (texts.join(" ").length > 500 ? "..." : "");
-}
-
-function formatDate(iso: string | undefined): string {
-  if (!iso) return "N/A";
-  return new Date(iso).toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" });
-}
 
 function generateMarkdown(issues: JiraIssue[], pages: ConfluencePage[], prs: GitHubPR[]): string {
   const lines: string[] = [];
@@ -252,7 +195,7 @@ function generateMarkdown(issues: JiraIssue[], pages: ConfluencePage[], prs: Git
       lines.push(`- **Components:** ${f.components.map(c => c.name).join(", ")}`);
     }
 
-    const desc = extractText(f.description);
+    const desc = extractText(f.description, 500);
     if (desc) {
       lines.push(`- **Description:** ${desc}`);
     }
