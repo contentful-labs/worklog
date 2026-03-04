@@ -55,7 +55,6 @@ function paths(): Paths {
   return _paths;
 }
 
-// Getter exports for backward compatibility
 export const getVault = () => paths().vault;
 export const getMemoryPath = () => paths().MEMORY_PATH;
 export const getProfilePath = () => paths().PROFILE_PATH;
@@ -66,8 +65,6 @@ export const getFocusTrackingPath = () => paths().FOCUS_TRACKING_PATH;
 export const getFocusDocPath = () => paths().FOCUS_DOC_PATH;
 export const getTeamTimelinePath = () => paths().TEAM_TIMELINE_PATH;
 export const getCareerNotes = () => paths().CAREER_NOTES;
-
-export { CONFIG_TEAM_TIMELINE_PATH as TEAM_TIMELINE_PATH };
 
 async function readFileOrDefault(path: string, fallback: string): Promise<string> {
   if (!existsSync(path)) return fallback;

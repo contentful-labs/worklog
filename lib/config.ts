@@ -10,7 +10,6 @@ export const CONFIG_DIR = join(
 );
 
 const CONFIG_FILE = join(CONFIG_DIR, "config.json");
-const LEGACY_CONFIG_PATH = join(homedir(), ".dotfiles", ".worklog.json");
 
 // --- Schema ---
 
@@ -107,30 +106,6 @@ export function saveConfig(config: WorklogConfig): void {
   }
   require("fs").writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2) + "\n");
   _config = config;
-}
-
-/** Reset cached config (useful after save or for testing) */
-export function resetConfigCache(): void {
-  _config = undefined;
-}
-
-// --- Legacy migration ---
-
-interface LegacyConfig {
-  githubOrgs: string[];
-}
-
-/**
- * Detect legacy `.worklog.json` in dotfiles root.
- * Returns the legacy githubOrgs if found, null otherwise.
- */
-export function detectLegacyConfig(): LegacyConfig | null {
-  if (!existsSync(LEGACY_CONFIG_PATH)) return null;
-  try {
-    return JSON.parse(require("fs").readFileSync(LEGACY_CONFIG_PATH, "utf-8"));
-  } catch {
-    return null;
-  }
 }
 
 // --- Validation helpers ---
