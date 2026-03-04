@@ -111,7 +111,7 @@ function parseArgs(): { type: PrepType; weeks: number; sinceDate?: string; until
   return { type, weeks, sinceDate, untilDate, extended, richText };
 }
 
-function getDateRange(weeks: number, sinceDate?: string, untilDate?: string): string {
+export function getDateRange(weeks: number, sinceDate?: string, untilDate?: string): string {
   const end = untilDate ? new Date(untilDate) : new Date();
   const start = sinceDate ? new Date(sinceDate) : new Date(end);
   if (!sinceDate) start.setDate(start.getDate() - weeks * 7);
@@ -187,7 +187,7 @@ export async function runPrep(): Promise<void> {
     focusTracking,
     memory,
   ] = await Promise.all([
-    getRecentBragBooks(weeks, untilDate, sinceDate),
+    getRecentBragBooks(weeks, sinceDate, untilDate),
     readProfile(),
     readWorkContext(),
     readCareerContext(),

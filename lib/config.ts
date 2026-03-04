@@ -2,7 +2,6 @@ import { existsSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-// --- XDG config directory ---
 
 export const CONFIG_DIR = join(
   process.env.XDG_CONFIG_HOME || join(homedir(), ".config"),
@@ -11,7 +10,6 @@ export const CONFIG_DIR = join(
 
 const CONFIG_FILE = join(CONFIG_DIR, "config.json");
 
-// --- Schema ---
 
 export interface WorklogConfig {
   version: 1;
@@ -64,12 +62,10 @@ export interface WorklogConfig {
   };
 }
 
-// --- Stats path (colocated with config) ---
 
 export const STATS_PATH = join(CONFIG_DIR, "worklog-stats.json");
 export const TEAM_TIMELINE_PATH = join(CONFIG_DIR, "team-timeline.json");
 
-// --- Load / Save / Validate ---
 
 let _config: WorklogConfig | undefined;
 
@@ -108,7 +104,6 @@ export function saveConfig(config: WorklogConfig): void {
   _config = config;
 }
 
-// --- Validation helpers ---
 
 export function validateAtlassianUrl(url: string): string | null {
   try {
@@ -162,7 +157,6 @@ export function parseReviewCycleDates(
     .filter((e): e is { type: string; date: string } => e !== null);
 }
 
-// --- Config path getter (for display) ---
 
 export function getConfigPath(): string {
   return CONFIG_FILE;
