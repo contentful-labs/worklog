@@ -33,6 +33,8 @@ import {
   getCurrentTeam,
   discoverWeeklyNotes,
 } from "./lib/vault-readers";
+import type { JiraIssue, ConfluencePage, ConfluenceTag, ConfluenceComment, GitHubPR } from "./lib/types";
+import { extractText, formatDate } from "./lib/utils";
 
 // --- Timing & Progress helpers ---
 
@@ -254,8 +256,8 @@ function parseWorklogArgs(): WorklogArgs {
       process.exit(1);
     }
     const weekNum = parseInt(val.split("-W")[1], 10);
-    if (weekNum < 1 || weekNum > 52) {
-      p.log.error("--week number must be between 1 and 52");
+    if (weekNum < 1 || weekNum > 53) {
+      p.log.error("--week number must be between 1 and 53");
       process.exit(1);
     }
     specificWeek = val;
@@ -365,7 +367,7 @@ async function getWeeksToGenerate(weeksBack?: number, specificWeek?: string, for
     startYear = currentYear;
     if (startWeek < 1) {
       startYear--;
-      startWeek = 52 + startWeek;
+      startWeek = getWeekNumber(new Date(Date.UTC(startYear, 11, 28))) + startWeek;
     }
 
     if (existingWeeks.size > 0) {
@@ -398,7 +400,8 @@ async function getWeeksToGenerate(weeksBack?: number, specificWeek?: string, for
     }
 
     week++;
-    if (week > 52) {
+    const maxWeek = getWeekNumber(new Date(Date.UTC(year, 11, 28)));
+    if (week > maxWeek) {
       week = 1;
       year++;
     }
@@ -498,56 +501,6 @@ async function getAccountId(config: WorklogConfig): Promise<string> {
   return data.accountId;
 }
 
-interface JiraIssue {
-  key: string;
-  fields: {
-    summary: string;
-    status: { name: string };
-    created: string;
-    updated: string;
-    resolutiondate?: string;
-    description?: { content?: Array<{ content?: Array<{ text?: string }> }> };
-    priority?: { name: string };
-    labels?: string[];
-    components?: Array<{ name: string }>;
-    timetracking?: { timeSpent?: string };
-    comment?: { comments?: Array<{ body?: { content?: Array<{ content?: Array<{ text?: string }> }> }; author?: { displayName?: string }; created?: string }> };
-  };
-}
-
-type ConfluenceTag = "Created" | "Contributed" | "Commented" | "Draft";
-
-interface ConfluencePage {
-  id: string;
-  title: string;
-  status?: string;
-  space?: { name: string; key: string };
-  _links?: { webui?: string };
-  history?: { createdDate?: string; lastUpdated?: { when?: string }; createdBy?: { accountId?: string } };
-  _tags?: ConfluenceTag[];
-}
-
-interface ConfluenceComment {
-  container?: {
-    id: string;
-    title: string;
-    space?: { name: string; key: string };
-    _links?: { webui?: string };
-  };
-}
-
-interface GitHubPR {
-  number: number;
-  title: string;
-  state: string;
-  created_at: string;
-  updated_at: string;
-  merged_at?: string;
-  closed_at?: string;
-  html_url: string;
-  repository_url: string;
-  user?: { login: string };
-}
 
 async function getGitHubUsername(config: WorklogConfig): Promise<string> {
   const { github: githubHeaders } = getHeaders(config);
@@ -559,24 +512,6 @@ async function getGitHubUsername(config: WorklogConfig): Promise<string> {
   return data.login;
 }
 
-function extractText(adfContent: JiraIssue["fields"]["description"]): string {
-  if (!adfContent?.content) return "";
-
-  const texts: string[] = [];
-  for (const block of adfContent.content) {
-    if (block.content) {
-      for (const inline of block.content) {
-        if (inline.text) texts.push(inline.text);
-      }
-    }
-  }
-  return texts.join(" ").slice(0, 300) + (texts.join(" ").length > 300 ? "..." : "");
-}
-
-function formatDate(iso: string | undefined): string {
-  if (!iso) return "N/A";
-  return new Date(iso).toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" });
-}
 
 function generateMarkdown(
   issues: JiraIssue[],
@@ -1277,8 +1212,6 @@ Contributions here are waiting to accumulate into something brag-worthy.
 
   // Add new items (append to table)
   if (itemsToAdd.length > 0) {
-    // Find the table and append rows
-    const tableEndRegex = /(\|.*\|)\s*$/;
     for (const row of itemsToAdd) {
       if (row.includes("|")) {
         memoryContent = memoryContent.trimEnd() + "\n" + row;

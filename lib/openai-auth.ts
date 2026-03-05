@@ -7,6 +7,20 @@ export type OpenAIAuthResolution =
   | { apiKey: string; source: "codex-subscription"; accountId: string }
   | { apiKey?: undefined; source: "none"; reason: string };
 
+interface CodexAuthFile {
+  tokens?: {
+    access_token?: unknown;
+    account_id?: unknown;
+    refresh_token?: unknown;
+  };
+}
+
+interface CodexTokenResponse {
+  access_token?: string;
+  refresh_token?: string;
+  expires_in?: number;
+}
+
 const CODEX_AUTH_PATH = join(homedir(), ".codex", "auth.json");
 const CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 const CODEX_TOKEN_URL = "https://auth.openai.com/oauth/token";
@@ -18,13 +32,11 @@ const CODEX_TOKEN_URL = "https://auth.openai.com/oauth/token";
  * 3. None → source: "none" with instructions
  */
 export function resolveOpenAIAuth(): OpenAIAuthResolution {
-  // 1. Environment variable
   const envKey = process.env.OPENAI_API_KEY?.trim();
   if (envKey) {
     return { apiKey: envKey, source: "env" };
   }
 
-  // 2. Codex subscription token
   if (!existsSync(CODEX_AUTH_PATH)) {
     return {
       source: "none",
@@ -43,7 +55,7 @@ export function resolveOpenAIAuth(): OpenAIAuthResolution {
     return { source: "none", reason: `${CODEX_AUTH_PATH} has unexpected format` };
   }
 
-  const tokens = (parsed as { tokens?: { access_token?: unknown; account_id?: unknown; refresh_token?: unknown } }).tokens;
+  const { tokens } = parsed as CodexAuthFile;
   const accessToken =
     typeof tokens?.access_token === "string" ? tokens.access_token.trim() : "";
   const accountId =
@@ -61,7 +73,6 @@ export function resolveOpenAIAuth(): OpenAIAuthResolution {
 
 /**
  * Refresh the codex subscription access token using the refresh token.
- * Updates ~/.codex/auth.json with new tokens.
  * Returns the new access token, or null on failure.
  */
 export async function refreshCodexToken(): Promise<string | null> {
@@ -90,15 +101,9 @@ export async function refreshCodexToken(): Promise<string | null> {
 
   if (!res.ok) return null;
 
-  const data = await res.json() as {
-    access_token?: string;
-    refresh_token?: string;
-    expires_in?: number;
-  };
-
+  const data = await res.json() as CodexTokenResponse;
   if (!data.access_token || !data.refresh_token) return null;
 
-  // Update auth.json with fresh tokens
   const updated = {
     ...parsed,
     tokens: {

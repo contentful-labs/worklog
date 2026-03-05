@@ -17,7 +17,6 @@ export interface TeamTimeline {
   transitionNotes: string[];
 }
 
-// --- Lazy config-derived paths ---
 
 interface Paths {
   vault: string;
@@ -132,7 +131,6 @@ export async function readCareerContext(): Promise<string> {
   return parts.length > 0 ? parts.join("\n\n---\n\n") : "No career context available.";
 }
 
-// --- Vault note discovery ---
 
 const FIXED_FILES = new Set([
   "memory.md",
@@ -284,7 +282,7 @@ export async function getBragBooks(count: number, beforeFilename?: string, after
   return contents.join("\n\n---\n\n");
 }
 
-export async function getRecentBragBooks(weeks: number, untilDate?: string, sinceDate?: string): Promise<string> {
+export async function getRecentBragBooks(weeks: number, sinceDate?: string, untilDate?: string): Promise<string> {
   // Compute upper bound filename
   let beforeFilename: string | undefined;
   if (untilDate) {

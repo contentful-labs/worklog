@@ -32,8 +32,6 @@ export async function aiQuery(options: AIQueryOptions): Promise<string> {
   return postProcess(raw);
 }
 
-// --- Anthropic path (via Claude Agent SDK — works with Max subscription) ---
-
 async function queryAnthropic(prompt: string): Promise<string> {
   const { query } = await import("@anthropic-ai/claude-agent-sdk");
 
@@ -63,27 +61,17 @@ async function queryAnthropic(prompt: string): Promise<string> {
   return result;
 }
 
-// --- OpenAI path ---
-
 function resolveOpenAIAuthOrThrow(): Exclude<OpenAIAuthResolution, { source: "none" }> {
   const auth = resolveOpenAIAuth();
   if (auth.source === "none") {
+    const details = auth.reason ? `\nDetails: ${auth.reason}` : "";
     throw new Error(
-      [
-        "OpenAI credentials not found.",
-        "",
-        "Option 1 — ChatGPT subscription (recommended):",
-        "  npx codex@latest login",
-        "  Tokens cache at ~/.codex/auth.json",
-        "",
-        "Option 2 — API key:",
-        '  export OPENAI_API_KEY="sk-..."',
-        "  Get one at https://platform.openai.com/api-keys",
-        "",
-        auth.reason ? `Details: ${auth.reason}` : "",
-      ]
-        .filter(Boolean)
-        .join("\n")
+      `OpenAI credentials not found.\n\n` +
+      `Option 1 — ChatGPT subscription (recommended):\n` +
+      `  npx codex@latest login\n\n` +
+      `Option 2 — API key:\n` +
+      `  export OPENAI_API_KEY="sk-..."\n` +
+      `  Get one at https://platform.openai.com/api-keys${details}`
     );
   }
   return auth;
@@ -110,7 +98,7 @@ async function queryOpenAI(modelOverride: string | undefined, prompt: string): P
   const result = streamText({
     model: provider.responses(model),
     prompt,
-    tools: buildResearchTools(loadConfig()?.vault),
+    tools: buildResearchTools(loadConfig()),
     stopWhen: stepCountIs(6),
     providerOptions: {
       openai: {
@@ -123,8 +111,6 @@ async function queryOpenAI(modelOverride: string | undefined, prompt: string): P
 
   return await result.text;
 }
-
-// --- Post-processing ---
 
 function postProcess(raw: string): string {
   let result = raw;
