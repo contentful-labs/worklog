@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { getDateRange } from "../prep";
+import { getDateRange } from "../../lib/sdk/prep";
 
 describe("getDateRange", () => {
   it("returns range for basic weeks count", () => {

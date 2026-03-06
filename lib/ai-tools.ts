@@ -1,7 +1,12 @@
 import { tool } from "ai";
 import { z } from "zod";
 import { join } from "node:path";
+import { readFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import type { WorklogConfig } from "./config";
+
+const execFileAsync = promisify(execFile);
 
 function buildAtlassianAuth(
   config: WorklogConfig
@@ -128,7 +133,7 @@ export function buildResearchTools(config?: WorklogConfig | null) {
         if (!vaultPath) return "Error: no vault path configured";
         const filePath = join(vaultPath, `${noteName}.md`);
         try {
-          return await Bun.file(filePath).text();
+          return await readFile(filePath, "utf-8");
         } catch {
           return `Error: could not read ${filePath}`;
         }
@@ -143,14 +148,15 @@ export function buildResearchTools(config?: WorklogConfig | null) {
       }),
       execute: async ({ keyword }) => {
         if (!vaultPath) return "Error: no vault path configured";
-        const proc = Bun.spawn(
-          ["grep", "-rl", keyword, vaultPath, "--include=*.md"],
-          { stdout: "pipe", stderr: "pipe" }
-        );
-        const stdout = await new Response(proc.stdout).text();
-        await proc.exited;
-        const lines = stdout.trim().split("\n").filter(Boolean);
-        return lines.slice(0, 10).join("\n") || "No matches found";
+        try {
+          const { stdout } = await execFileAsync(
+            "grep", ["-rl", keyword, vaultPath, "--include=*.md"],
+          );
+          const lines = stdout.trim().split("\n").filter(Boolean);
+          return lines.slice(0, 10).join("\n") || "No matches found";
+        } catch {
+          return "No matches found";
+        }
       },
     }),
   };
