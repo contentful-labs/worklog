@@ -303,61 +303,9 @@ export async function getRecentBragBooks(weeks: number, sinceDate?: string, unti
   return getBragBooks(weeks, beforeFilename, afterFilename);
 }
 
-// ISO week number for a date
-export function getWeekNumber(date: Date): number {
-  const d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
-  const dayNum = d.getUTCDay() || 7;
-  d.setUTCDate(d.getUTCDate() + 4 - dayNum);
-  const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
-  return Math.ceil((((d.getTime() - yearStart.getTime()) / 86400000) + 1) / 7);
-}
-
-export function weekId(week: number, year: number): string {
-  return `${year}-W${String(week).padStart(2, "0")}`;
-}
-
-// Helper: compute ISO week ID for a given date
-function weekIdForDate(d: Date): string {
-  const wn = getWeekNumber(d);
-  const utc = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
-  const dayNum = utc.getUTCDay() || 7;
-  utc.setUTCDate(utc.getUTCDate() + 4 - dayNum);
-  const isoYear = utc.getUTCFullYear();
-  return weekId(wn, isoYear);
-}
-
-// Returns list of YYYY-WXX week IDs covering the requested range.
-// - Walks back from untilDate (or today) for `weeks` iterations.
-// - Stops early if sinceDate is provided and we've passed its ISO week.
-// - When no explicit untilDate, excludes the current (incomplete) week.
-export function getExpectedBragBookWeeks(
-  weeks: number,
-  sinceDate?: string,
-  untilDate?: string,
-): string[] {
-  const end = untilDate ? new Date(untilDate) : new Date();
-  const result: string[] = [];
-
-  const currentWeekId = weekIdForDate(new Date());
-  const sinceWeekId = sinceDate ? weekIdForDate(new Date(sinceDate)) : undefined;
-
-  for (let i = 0; i < weeks; i++) {
-    const d = new Date(end);
-    d.setDate(d.getDate() - i * 7);
-    const wid = weekIdForDate(d);
-
-    // Stop if we've gone past the since boundary
-    if (sinceWeekId && wid < sinceWeekId) break;
-
-    // Skip current incomplete week when no explicit --until
-    if (!untilDate && wid === currentWeekId) continue;
-
-    result.push(wid);
-  }
-
-  // Deduplicate (edge case: short ranges can overlap same week) and sort
-  return [...new Set(result)].sort();
-}
+// Re-export week utilities from SDK
+export { getWeekNumber, weekId, getExpectedBragBookWeeks } from "./sdk/week-utils";
+import { weekIdForDate } from "./sdk/week-utils";
 
 // Returns which of the requested week IDs don't have a brag book file
 export async function getMissingBragBookWeeks(weekIds: string[]): Promise<string[]> {

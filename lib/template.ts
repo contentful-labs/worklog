@@ -1,4 +1,5 @@
 import { requireConfig } from "./config";
+import { buildConfigContext as sdkBuildConfigContext } from "./sdk/template";
 
 export function fillTemplate(
   template: string,
@@ -11,11 +12,5 @@ export function fillTemplate(
 }
 
 export function buildConfigContext(): Record<string, string> {
-  const config = requireConfig();
-  return {
-    company_values: config.career.companyValues.join(", "),
-    current_level: config.career.currentLevel,
-    target_level: config.career.targetLevel,
-    vault_path: config.vault,
-  };
+  return sdkBuildConfigContext(requireConfig());
 }
