@@ -138,38 +138,7 @@ All data stays local. Nothing leaves your machine except API calls to OpenAI to 
 
 ## Setup
 
-### Prerequisites
-
-- [Bun](https://bun.sh) v1.x+
-- A markdown vault (any folder with `.md` files — [Obsidian](https://obsidian.md) works great but is not required)
-
-### Authentication
-
-worklog supports two ways to authenticate with OpenAI:
-
-**ChatGPT subscription (recommended)**
-
-Use your existing ChatGPT Plus, Business, or Pro plan. No separate API billing.
-
-```bash
-npx codex@latest login    # opens browser — sign in with your ChatGPT account
-worklog init               # select "ChatGPT subscription"
-```
-
-Tokens cache locally at `~/.codex/auth.json` and refresh automatically.
-
-**API key**
-
-For direct API billing through the OpenAI Platform.
-
-```bash
-export OPENAI_API_KEY="sk-..."
-worklog init               # select "API key"
-```
-
-Get an API key at https://platform.openai.com/api-keys
-
-### Environment variables
+Requires [Bun](https://bun.sh) v1.x+ and a markdown vault (any folder -- [Obsidian](https://obsidian.md) works great but isn't required).
 
 | Variable | Required for | How to get it |
 |----------|-------------|---------------|
@@ -177,29 +146,7 @@ Get an API key at https://platform.openai.com/api-keys
 | `GITHUB_TOKEN` | GitHub PR data | [GitHub tokens](https://github.com/settings/tokens) |
 | `OPENAI_API_KEY` | AI (only for API key auth) | [OpenAI dashboard](https://platform.openai.com/api-keys) |
 
-### First-time setup
-
-```bash
-worklog init
-```
-
-This walks you through vault location, API connections, authentication, profile, and career setup.
-
-After init, three markdown files appear in your vault:
-
-- `my-profile.md` -- your background, skills, growth areas
-- `work-context.md` -- company values, review cycle, org context
-- `coach-persona.md` -- how coaching feedback is delivered
-
-These are plain markdown -- edit them anytime to refine the AI's context.
-
-## Configuration
-
-Config is stored at `~/.config/worklog/config.json` (XDG standard).
-
-Adjacent files:
-- `~/.config/worklog/team-timeline.json` -- team history
-- `~/.config/worklog/worklog-stats.json` -- run timing statistics
+See [docs/setup.md](docs/setup.md) for authentication options (ChatGPT subscription vs API key), first-time setup walkthrough, and configuration details.
 
 ## Vault structure
 
@@ -224,96 +171,9 @@ After setup, your vault contains:
 - Add career framework docs via `worklog configure career`
 - Change auth method or model via `worklog configure ai`
 
----
-
-## Developer guide
-
-### Project structure
-
-```
-.
-├── fetch-weekly-work-log.ts   # Main entry point (worklog CLI)
-├── generate-prep-doc.ts       # Thin wrapper → commands/prep.ts
-├── package.json
-├── commands/
-│   ├── init.ts                # worklog init -- guided setup
-│   ├── configure.ts           # worklog configure -- update settings
-│   └── prep.ts                # worklog prep -- prep doc generation
-├── lib/
-│   ├── config.ts              # Config schema, load/save, validation
-│   ├── template.ts            # Prompt template filling ({{placeholders}})
-│   ├── ai.ts                  # AI query layer (OpenAI Agents SDK)
-│   ├── vault-readers.ts       # Vault file readers (brag books, context docs)
-│   └── openai-auth.ts         # OpenAI auth resolution (subscription + API key)
-└── prompts/
-    ├── weekly-brag-prompt.md          # Brag book generation prompt
-    ├── prep-1on1.md                   # 1:1 prep prompt
-    ├── prep-self-review.md            # Self-review prompt (concise)
-    ├── prep-self-review-extended.md   # Self-review prompt (full)
-    ├── prep-promotion.md              # Promotion case prompt
-    ├── prep-skip-level.md             # Skip-level prep prompt
-    ├── prep-resume.md                 # Resume bullets prompt
-    └── coach-persona.md               # Default coach persona
-```
-
-### Key concepts
-
-**Template system**: Prompt files use `{{placeholder}}` syntax. At runtime, `lib/template.ts` fills these from config values (career level, company values, etc.) and runtime context (brag book content, date ranges). This keeps prompts shareable -- no personal data in the repo.
-
-**Config-driven personalization**: All user-specific values live in `~/.config/worklog/config.json`, created by `worklog init`. The config schema is defined in `lib/config.ts`.
-
-**Vault docs**: The AI reads context from markdown files in the user's vault (profile, work context, coach persona). These are seeded at init but owned by the user -- they can edit them freely.
-
-### Running locally
-
-```bash
-bun install
-bun run fetch-weekly-work-log.ts          # or: worklog (if alias is set)
-bun run fetch-weekly-work-log.ts prep self-review --weeks 4
-```
-
-### Adding a new prep type
-
-1. Create a prompt template in `prompts/prep-<type>.md` using `{{placeholder}}` syntax
-2. Add the type to `PREP_TYPES`, `DEFAULT_WEEKS`, `OUTPUT_PREFIX`, and `PROMPT_FILE` in `commands/prep.ts`
-3. That's it -- the prep command auto-discovers types from those maps
-
-### Adding new config-driven placeholders
-
-1. Add the field to the `WorklogConfig` interface in `lib/config.ts`
-2. Add it to `buildConfigContext()` in `lib/template.ts`
-3. Use `{{your_placeholder}}` in prompt templates
-4. Add prompting for the new field in `commands/init.ts`
-
-### Adding a new data source
-
-The fetch pipeline in `fetch-weekly-work-log.ts` is organized by source (Jira, Confluence, GitHub). To add a new source:
-
-1. Add a fetch function following the pattern of `fetchJiraIssues()`, `fetchConfluencePages()`, etc.
-2. Add the results to `fetchDataForWeek()`
-3. Add a markdown section in `generateMarkdown()`
-4. Update the prompt template if the AI needs to understand the new data
-
-### Code style
-
-- TypeScript with strict types
-- ESM imports
-- Bun runtime (not Node)
-- `@clack/prompts` for interactive CLI UI
-- No build step -- runs directly via `bun`
-
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
-
-### Quick contribution checklist
-
-- [ ] Fork the repo and create a feature branch
-- [ ] Run `bun install` to set up dependencies
-- [ ] Make your changes
-- [ ] Ensure no personal data in prompt templates (use `{{placeholders}}`)
-- [ ] Test manually with `bun run fetch-weekly-work-log.ts`
-- [ ] Open a PR with a clear description of what and why
+See [CONTRIBUTING.md](CONTRIBUTING.md) for project structure, key concepts, and development guidelines.
 
 ## License
 
