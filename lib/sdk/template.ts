@@ -1,6 +1,14 @@
 import type { WorklogConfig } from "./types";
 
-export { fillTemplate } from "../template";
+export function fillTemplate(
+  template: string,
+  context: Record<string, string>,
+): string {
+  let result = template;
+  for (const [key, value] of Object.entries(context))
+    result = result.replaceAll(`{{${key}}}`, value);
+  return result;
+}
 
 export function buildConfigContext(config: WorklogConfig): Record<string, string> {
   return {
