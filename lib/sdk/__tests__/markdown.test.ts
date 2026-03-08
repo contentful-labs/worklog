@@ -1,8 +1,8 @@
 import { describe, it, expect } from "vitest";
 import { generateMarkdown } from "../markdown";
 import type { WorklogConfig } from "../types";
-import type { JiraIssue, ConfluencePage, GitHubPR } from "../../types";
-import type { PRReview, WeekInfo } from "../data-fetch";
+import type { JiraIssue, GitHubPR } from "../../types";
+import type { WeekInfo } from "../data-fetch";
 
 const config: WorklogConfig = {
   version: 1,

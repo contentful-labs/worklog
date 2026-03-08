@@ -48,10 +48,10 @@ export function parseBragBookResult(raw: string): BragBookResult {
   let itemsToAdd: string[] = [];
   let itemsToRemove: string[] = [];
   let impactLogEntry: BragBookResult["impactLogEntry"] = null;
-  let workContextUpdates: BragBookResult["workContextUpdates"] = [];
+  const workContextUpdates: BragBookResult["workContextUpdates"] = [];
   let profileUpdate: BragBookResult["profileUpdate"] = null;
   let focusItems: string[] = [];
-  let focusUpdates: BragBookResult["focusUpdates"] = [];
+  const focusUpdates: BragBookResult["focusUpdates"] = [];
 
   const memoryStartIdx = raw.indexOf(memoryMarkerStart);
   const memoryEndIdx = raw.indexOf(memoryMarkerEnd);

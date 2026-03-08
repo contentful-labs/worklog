@@ -15,7 +15,6 @@ import {
   readArchivedFocusDocs,
   readCareerContext,
   getBragBooks,
-  getRecentBragBooks,
   getMissingBragBookWeeks,
   discoverWeeklyNotes,
   readTeamTimeline,

@@ -241,7 +241,7 @@ function parseWorklogArgs(): WorklogArgs {
   const weeksIdx = args.indexOf("--weeks");
   if (weeksIdx !== -1 && args[weeksIdx + 1]) {
     weeksBack = parseInt(args[weeksIdx + 1], 10);
-    if (isNaN(weeksBack) || weeksBack < 1) {
+    if (Number.isNaN(weeksBack) || weeksBack < 1) {
       p.log.error("--weeks must be a positive number");
       process.exit(1);
     }
@@ -267,7 +267,7 @@ function parseWorklogArgs(): WorklogArgs {
   const sinceIdx = args.indexOf("--since");
   if (sinceIdx !== -1 && args[sinceIdx + 1]) {
     const val = args[sinceIdx + 1];
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(val) || isNaN(new Date(val).getTime())) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(val) || Number.isNaN(new Date(val).getTime())) {
       p.log.error("--since must be a valid YYYY-MM-DD date (e.g. 2025-10-01)");
       process.exit(1);
     }
@@ -948,7 +948,7 @@ Write the brag book entry as markdown. Output ONLY the markdown content, no expl
 
   log(`AI query — provider: ${provider}, model: ${config.ai.model ?? "default"}, prompt: ${fullPrompt.length} chars`);
 
-  let result = await aiQuery({
+  const result = await aiQuery({
     prompt: fullPrompt,
     config,
     log,
@@ -969,10 +969,10 @@ Write the brag book entry as markdown. Output ONLY the markdown content, no expl
   let itemsToAdd: string[] = [];
   let itemsToRemove: string[] = [];
   let impactLogEntry: BragBookResult["impactLogEntry"] = null;
-  let workContextUpdates: BragBookResult["workContextUpdates"] = [];
+  const workContextUpdates: BragBookResult["workContextUpdates"] = [];
   let profileUpdate: BragBookResult["profileUpdate"] = null;
   let focusItems: string[] = [];
-  let focusUpdates: BragBookResult["focusUpdates"] = [];
+  const focusUpdates: BragBookResult["focusUpdates"] = [];
 
   const memoryStartIdx = result.indexOf(memoryMarkerStart);
   const memoryEndIdx = result.indexOf(memoryMarkerEnd);
@@ -1072,8 +1072,8 @@ Write the brag book entry as markdown. Output ONLY the markdown content, no expl
     // Extract "Focus for Next Week" items
     const focusMatch = coachingSection.match(/### Focus for Next Week[\s\S]*?(?=###|$)/);
     if (focusMatch) {
-      const focusLines = focusMatch[0].split("\n").filter(line => line.match(/^[\-\d]/));
-      focusItems = focusLines.map(line => line.replace(/^[\-\d\.\)]\s*/, "").trim()).filter(Boolean);
+      const focusLines = focusMatch[0].split("\n").filter(line => line.match(/^[-\d]/));
+      focusItems = focusLines.map(line => line.replace(/^[-\d.)]\s*/, "").trim()).filter(Boolean);
     }
   }
 

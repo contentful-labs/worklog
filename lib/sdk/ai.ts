@@ -1,5 +1,5 @@
 import { streamText, stepCountIs } from "ai";
-import { createOpenAI } from "@ai-sdk/openai";
+import { createOpenAI, type OpenAIProvider } from "@ai-sdk/openai";
 import { resolveOpenAIAuth, refreshCodexToken, type OpenAIAuthResolution } from "../openai-auth";
 import { buildResearchTools } from "../ai-tools";
 import type { WorklogConfig } from "./types";
@@ -89,7 +89,7 @@ async function queryOpenAI(config: WorklogConfig, modelOverride: string | undefi
   const auth = resolveOpenAIAuthOrThrow();
   const model = modelOverride || "gpt-5";
 
-  let openaiProvider;
+  let openaiProvider: OpenAIProvider;
   if (auth.source === "codex-subscription") {
     const freshToken = (await refreshCodexToken()) ?? auth.apiKey;
     openaiProvider = createOpenAI({

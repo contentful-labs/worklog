@@ -8,7 +8,6 @@ import {
   searchConfluence,
   fetchDataForWeek,
   type FetchCredentials,
-  type FetchHeaders,
   type WeekInfo,
 } from "../data-fetch";
 import type { WorklogConfig } from "../types";
