@@ -694,7 +694,8 @@ interface ReviewInfo {
 }
 
 function parseReviewCycle(workContext: string): ReviewInfo | null {
-  const reviewSectionMatch = workContext.match(/## Review Cycle[\s\S]*?(?=##|$)/);
+  const reviewSectionMatch = workContext.match(/## Review Cycle\n([^#]|#(?!#))*/);
+
   if (!reviewSectionMatch) return null;
 
   const section = reviewSectionMatch[0];
