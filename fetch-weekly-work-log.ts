@@ -33,6 +33,7 @@ import { getWeekNumber, weekId } from "./lib/sdk/week-utils";
 import { updateMemory, updateImpactLog, updateWorkContext, updateProfile, updateFocusTracking } from "./lib/sdk/vault-updates";
 import type { JiraIssue, ConfluencePage, ConfluenceTag, ConfluenceComment, GitHubPR } from "./lib/types";
 import { extractText, formatDate } from "./lib/utils";
+import { createLogger, type Logger } from "./lib/sdk/logger";
 
 // --- Timing & Progress helpers ---
 
@@ -217,6 +218,7 @@ interface WorklogArgs {
   sinceDate?: string;
   noPrompt: boolean;
   force: boolean;
+  verbose: boolean;
   prompt?: string;
   contextFile?: string;
 }
@@ -229,7 +231,7 @@ function parseWorklogArgs(): WorklogArgs {
   if (args.includes("--help") || args.includes("-h")) {
     p.intro("worklog");
     p.note(
-      `Usage: worklog [command] [options]\n\nSubcommands:\n  init              Guided first-run setup\n  configure [sect]  Update configuration (vault, ai, atlassian, github, profile, career, team-history, coaching)\n  config            Alias for configure\n\nOptions:\n  --weeks N         Generate missing weeks going back N weeks (default: gap-fill from earliest)\n  --week YYYY-WNN   Force-(re)generate a specific week (e.g. 2026-W06)\n  --since YYYY-MM-DD Generate weeks from this date to now (e.g. 2025-10-01)\n  --prompt "text"   Shared context applied to all weeks (e.g. "I was on-call this sprint")\n  --context-file P  JSON file mapping week IDs to per-week context (e.g. {"2025-W14": "on parental leave"})\n  --force           Regenerate weeks even if brag book already exists\n  --no-prompt       Skip per-week additional context prompts`,
+      `Usage: worklog [command] [options]\n\nSubcommands:\n  init              Guided first-run setup\n  configure [sect]  Update configuration (vault, ai, atlassian, github, profile, career, team-history, coaching)\n  config            Alias for configure\n\nOptions:\n  --weeks N         Generate missing weeks going back N weeks (default: gap-fill from earliest)\n  --week YYYY-WNN   Force-(re)generate a specific week (e.g. 2026-W06)\n  --since YYYY-MM-DD Generate weeks from this date to now (e.g. 2025-10-01)\n  --prompt "text"   Shared context applied to all weeks (e.g. "I was on-call this sprint")\n  --context-file P  JSON file mapping week IDs to per-week context (e.g. {"2025-W14": "on parental leave"})\n  --force           Regenerate weeks even if brag book already exists\n  --no-prompt       Skip per-week additional context prompts\n  --verbose, -v     Show detailed logs of API calls, vault reads, and AI queries`,
       "Help"
     );
     process.exit(0);
@@ -296,8 +298,9 @@ function parseWorklogArgs(): WorklogArgs {
 
   const noPrompt = args.includes("--no-prompt");
   const force = args.includes("--force");
+  const verbose = args.includes("--verbose") || args.includes("-v");
 
-  return { weeksBack, specificWeek, sinceDate, noPrompt, force, prompt, contextFile };
+  return { weeksBack, specificWeek, sinceDate, noPrompt, force, verbose, prompt, contextFile };
 }
 
 interface WeekInfo {
@@ -743,6 +746,7 @@ async function generateBragBookEntry(
   paths: VaultPaths,
   timeline: TeamTimeline,
   weekInfo?: WeekInfo,
+  log: Logger = () => {},
 ): Promise<BragBookResult> {
   const rawPromptTemplate = await Bun.file(PROMPT_TEMPLATE_PATH).text();
   // Resolve {{current_team}} — use week-specific team if generating for a specific week, else current
@@ -786,6 +790,7 @@ CRITICAL — ticket status freshness:
 </available_research_tools>`,
     );
   }
+  log("Loading vault context files...");
   const memoryContent = await readMemory(paths);
   const profileContent = await readProfile(paths);
   const workContextContent = await readWorkContext(paths);
@@ -795,11 +800,14 @@ CRITICAL — ticket status freshness:
   const focusDocContent = await readFocusDoc(paths);
   const focusHistoryContent = await readArchivedFocusDocs(paths);
   const careerContext = await readCareerContext(paths);
+  log(`Vault files loaded — memory: ${memoryContent.length} chars, profile: ${profileContent.length} chars, workContext: ${workContextContent.length} chars, impactLog: ${impactLogContent.length} chars`);
 
   // Discover work-relevant vault notes modified during the week
   const vaultNotes = weekInfo
     ? await discoverWeeklyNotes(config, paths, weekInfo.startDate, weekInfo.endDate)
     : [];
+
+  log(`Discovered ${vaultNotes.length} weekly vault notes`);
 
   let vaultNotesSection = "";
   if (vaultNotes.length > 0) {
@@ -818,7 +826,11 @@ ${notesBody}
   }
 
   const pendingFocusItems = getPendingFocusItems(focusTrackingContent);
+  log(`Pending focus items from previous weeks: ${pendingFocusItems.length}`);
   const reviewInfo = parseReviewCycle(workContextContent);
+  if (reviewInfo) {
+    log(`Review cycle: ${reviewInfo.urgency} — ${reviewInfo.nextReview} in ${reviewInfo.weeksRemaining} weeks (${reviewInfo.date})`);
+  }
 
   let reviewProximitySection = "";
   if (reviewInfo) {
@@ -934,10 +946,14 @@ ${workLogContent}
 
 Write the brag book entry as markdown. Output ONLY the markdown content, no explanations.`;
 
+  log(`AI query — provider: ${provider}, model: ${config.ai.model ?? "default"}, prompt: ${fullPrompt.length} chars`);
+
   let result = await aiQuery({
     prompt: fullPrompt,
     config,
+    log,
   });
+  log(`AI response: ${result.length} chars`);
 
   // Parse out the memory update section
   const memoryMarkerStart = "<!-- MEMORY_UPDATE -->";
@@ -1131,7 +1147,8 @@ async function fetchDataForWeek(
   accountId: string,
   githubUsername: string,
   weekInfo: WeekInfo,
-  config: WorklogConfig
+  config: WorklogConfig,
+  log: Logger = () => {},
 ): Promise<{ issues: JiraIssue[]; pages: ConfluencePage[]; prs: GitHubPR[]; reviews: PRReview[]; teamSprintItems: JiraIssue[] }> {
   const startDate = weekInfo.startDate.toISOString().split("T")[0];
   const endDate = weekInfo.endDate.toISOString().split("T")[0];
@@ -1143,6 +1160,8 @@ async function fetchDataForWeek(
   const orgFilter = config.githubOrgs.map(o => `org:${o}`).join(" ");
   const ghQuery = `type:pr author:${githubUsername} ${orgFilter} created:${startDate}..${endDate}`;
   const reviewQuery = `type:pr reviewed-by:${githubUsername} ${orgFilter} updated:${startDate}..${endDate}`;
+
+  log(`Jira JQL: ${jql}`);
 
   // Fetch Jira issues for this week
   let issues: JiraIssue[] = [];
@@ -1164,10 +1183,13 @@ async function fetchDataForWeek(
     if (!data.nextPageToken) break;
     nextPageToken = data.nextPageToken;
   }
+  log(`Jira: found ${issues.length} issues`);
 
   // Fetch Confluence pages — Query 1: contributor pages (includes drafts)
   const contributorCql = `contributor = "${accountId}" AND type = page AND lastModified >= "${startDate}" AND lastModified <= "${endDate}"`;
+  log(`Confluence contributor CQL: ${contributorCql}`);
   const contributedPages = await searchConfluence<ConfluencePage>(config, contributorCql, "space,history,history.lastUpdated,history.createdBy", "any");
+  log(`Confluence: found ${contributedPages.length} contributed pages`);
 
   const pageMap = new Map<string, ConfluencePage>();
   for (const page of contributedPages) {
@@ -1185,7 +1207,9 @@ async function fetchDataForWeek(
 
   // Fetch Confluence pages — Query 2: pages user commented on
   const commentCql = `type = comment AND creator = "${accountId}" AND created >= "${startDate}" AND created <= "${endDate}"`;
+  log(`Confluence comment CQL: ${commentCql}`);
   const comments = await searchConfluence<ConfluenceComment>(config, commentCql, "container");
+  log(`Confluence: found ${comments.length} comments`);
 
   for (const comment of comments) {
     const container = comment.container;
@@ -1207,8 +1231,10 @@ async function fetchDataForWeek(
   }
 
   const pages = Array.from(pageMap.values());
+  log(`Confluence: ${pages.length} total pages (deduplicated)`);
 
   // Fetch GitHub PRs for this week
+  log(`GitHub PRs query: ${ghQuery}`);
   let prs: GitHubPR[] = [];
   let ghPage = 1;
   while (true) {
@@ -1221,7 +1247,10 @@ async function fetchDataForWeek(
     ghPage++;
   }
 
+  log(`GitHub: found ${prs.length} PRs authored`);
+
   // Fetch GitHub PR Reviews
+  log(`GitHub reviews query: ${reviewQuery}`);
   const reviews: PRReview[] = [];
   const authoredUrls = new Set(prs.map(p => p.html_url));
 
@@ -1273,11 +1302,14 @@ async function fetchDataForWeek(
     }
   }
 
+  log(`GitHub: found ${reviews.length} PR reviews`);
+
   // Fetch team sprint/backlog items (for focus context — not limited to user)
   let teamSprintItems: JiraIssue[] = [];
   if (config.profile.ticketPrefixes.length > 0) {
     const projects = config.profile.ticketPrefixes.join(", ");
     const sprintJql = `project in (${projects}) AND sprint in openSprints() AND NOT (assignee = "${email}" OR reporter = "${email}") ORDER BY rank ASC`;
+    log(`Team sprint JQL: ${sprintJql}`);
 
     try {
       let sprintPageToken: string | undefined = undefined;
@@ -1299,6 +1331,7 @@ async function fetchDataForWeek(
     } catch {
       // non-fatal — team sprint data is supplementary
     }
+    log(`Team sprint: found ${teamSprintItems.length} items`);
   }
 
   return { issues, pages, prs, reviews, teamSprintItems };
@@ -1324,7 +1357,8 @@ async function main() {
       return;
     }
 
-    const { weeksBack, specificWeek, sinceDate, noPrompt, force, prompt: sharedPrompt, contextFile } = parseWorklogArgs();
+    const { weeksBack, specificWeek, sinceDate, noPrompt, force, verbose, prompt: sharedPrompt, contextFile } = parseWorklogArgs();
+    const log = createLogger(verbose);
 
     p.intro("worklog");
 
@@ -1381,11 +1415,13 @@ async function main() {
     const s = p.spinner();
 
     s.start("Getting account IDs...");
+    log("Authenticating with Atlassian and GitHub...");
     const [accountId, githubUsername] = await Promise.all([
       getAccountId(config),
       getGitHubUsername(config),
     ]);
     s.stop("Account IDs ready");
+    log(`Atlassian accountId: ${accountId}, GitHub username: ${githubUsername}`);
 
     const timings: WeekTiming[] = [];
     const results: WeekResult[] = [];
@@ -1407,7 +1443,7 @@ async function main() {
       // --- Fetch data ---
       const fetchStart = performance.now();
       s.start("Fetching data...");
-      const { issues, pages, prs, reviews, teamSprintItems } = await fetchDataForWeek(accountId, githubUsername, weekInfo, config);
+      const { issues, pages, prs, reviews, teamSprintItems } = await fetchDataForWeek(accountId, githubUsername, weekInfo, config, log);
       const fetchMs = Math.round(performance.now() - fetchStart);
       s.stop(`Fetched in ${formatDuration(fetchMs)} (${issues.length} jira, ${pages.length} confluence, ${prs.length} PRs, ${reviews.length} reviews)`);
 
@@ -1416,6 +1452,7 @@ async function main() {
       // Save work log at vault root
       const workLogPath = `${paths.vault}/${weekInfo.filename}`;
       await Bun.write(workLogPath, markdown);
+      log(`Work log written: ${workLogPath} (${markdown.length} chars)`);
 
       // Get previous brag books for context
       const previousBragBooks = await getPreviousBragBooks(paths, weekInfo.weekNumber, weekInfo.year);
@@ -1432,18 +1469,20 @@ async function main() {
         profileUpdate,
         focusItems,
         focusUpdates,
-      } = await generateBragBookEntry(markdown, previousBragBooks, config, paths, timeline, weekInfo);
+      } = await generateBragBookEntry(markdown, previousBragBooks, config, paths, timeline, weekInfo, log);
       const bragMs = Math.round(performance.now() - bragStart);
       s.stop(`Brag book generated in ${formatDuration(bragMs)}`);
 
       const bragBookPath = `${paths.vault}/${wid} Brag Book.md`;
       await Bun.write(bragBookPath, bragBookContent);
+      log(`Brag book written: ${bragBookPath} (${bragBookContent.length} chars)`);
       lastBragBookPath = bragBookPath;
       lastBragBookContent = bragBookContent;
 
       // --- Context updates ---
       const ctxStart = performance.now();
       s.start("Updating context...");
+      log(`Context updates — memory: +${itemsToAdd.length}/-${itemsToRemove.length}, impact: ${impactLogEntry ? "yes" : "no"}, workContext: ${workContextUpdates.length}, profile: ${profileUpdate ? "yes" : "no"}, focus: ${focusItems.length} items/${focusUpdates.length} updates`);
 
       if (itemsToAdd.length > 0 || itemsToRemove.length > 0) {
         await updateMemory(paths.memory, itemsToAdd, itemsToRemove);

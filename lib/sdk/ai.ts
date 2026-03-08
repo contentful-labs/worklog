@@ -3,11 +3,13 @@ import { createOpenAI } from "@ai-sdk/openai";
 import { resolveOpenAIAuth, refreshCodexToken, type OpenAIAuthResolution } from "../openai-auth";
 import { buildResearchTools } from "../ai-tools";
 import type { WorklogConfig } from "./types";
+import type { Logger } from "./logger";
 
 export interface AIQueryOptions {
   prompt: string;
   model?: string;
   config: WorklogConfig;
+  log?: Logger;
 }
 
 /**
@@ -19,17 +21,22 @@ export interface AIQueryOptions {
  * Returns the final text output with preamble stripped and code block unwrapped.
  */
 export async function aiQuery(options: AIQueryOptions): Promise<string> {
-  const { config, prompt, model: modelOverride } = options;
+  const { config, prompt, model: modelOverride, log = () => {} } = options;
   const provider = config.ai.provider ?? "openai";
   const model = modelOverride ?? config.ai.model;
 
+  log(`AI provider: ${provider}, model: ${model ?? "default"}, auth: ${provider === "anthropic" ? "claude-agent-sdk" : resolveOpenAIAuth().source}`);
+
   let raw: string;
   if (provider === "anthropic") {
+    log("Querying Anthropic via Claude Agent SDK...");
     raw = await queryAnthropic(prompt);
   } else {
+    log(`Querying OpenAI via Vercel AI SDK (model: ${model || "gpt-5"})...`);
     raw = await queryOpenAI(config, model, prompt);
   }
 
+  log(`Raw AI response: ${raw.length} chars`);
   return postProcess(raw);
 }
 
