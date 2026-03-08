@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.4.0](https://github.com/contentful-labs/worklog/compare/v1.3.0...v1.4.0) (2026-03-08)
+
+
+### Features
+
+* add --rt docx output and interactive missing week handling ([96d60d6](https://github.com/contentful-labs/worklog/commit/96d60d633a5d0bd7a92f7ac2d874611e017ce4de))
+* add anti-AI-slop writing style guide to prep prompts ([241a776](https://github.com/contentful-labs/worklog/commit/241a7761c082fdb60efaa2fe93013ba86c10dfeb))
+* beta distribution readiness ([130071a](https://github.com/contentful-labs/worklog/commit/130071acaa65d35248889a689800f4b57a887206))
+* enforce ticket status freshness in brag book generation ([90c47c3](https://github.com/contentful-labs/worklog/commit/90c47c3fdb7dd9b900af8f1cb6e33da7bd27e853))
+* prep DOCX output, humanized writing, vault cleanup ([cc6dc11](https://github.com/contentful-labs/worklog/commit/cc6dc1153ff11a07627407e1518ea9d6bf3d415c))
+
+
+### Bug Fixes
+
+* prevent ReDoS in review cycle regex ([2e5dd2c](https://github.com/contentful-labs/worklog/commit/2e5dd2c1262ed1d53585ea3d915d727825815b22))
+
 ## [1.3.0](https://github.com/contentful-labs/worklog/compare/v1.2.3...v1.3.0) (2026-03-03)
 
 
