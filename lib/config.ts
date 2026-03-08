@@ -125,7 +125,7 @@ export function validateEmail(email: string): string | null {
 }
 
 export function validateISODate(date: string): string | null {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || isNaN(new Date(date).getTime())) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || Number.isNaN(new Date(date).getTime())) {
     return "Must be YYYY-MM-DD format";
   }
   return null;

@@ -49,7 +49,7 @@ async function pickSection(): Promise<Section> {
   return choice as Section;
 }
 
-async function offerDocRegeneration(
+async function _offerDocRegeneration(
   config: WorklogConfig,
   docName: string,
   generator: (config: WorklogConfig) => string

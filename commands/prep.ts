@@ -20,7 +20,7 @@ import { fillTemplate, buildConfigContext } from "../lib/sdk/template";
 
 import {
   PREP_TYPES, DEFAULT_WEEKS, OUTPUT_PREFIX, PROMPT_FILE,
-  getDateRange, getPromptFile, ensureFrontmatter, buildOutputFilename,
+  getDateRange, 
   type PrepType,
 } from "../lib/sdk/prep";
 
@@ -55,7 +55,7 @@ function parseArgs(): { type: PrepType; weeks: number; sinceDate?: string; until
   let sinceDate: string | undefined;
   if (sinceIdx !== -1 && args[sinceIdx + 1]) {
     const val = args[sinceIdx + 1];
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(val) || isNaN(new Date(val).getTime())) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(val) || Number.isNaN(new Date(val).getTime())) {
       p.log.error("--since must be a valid YYYY-MM-DD date (e.g. 2025-10-01)");
       process.exit(1);
     }
@@ -65,7 +65,7 @@ function parseArgs(): { type: PrepType; weeks: number; sinceDate?: string; until
   let untilDate: string | undefined;
   if (untilIdx !== -1 && args[untilIdx + 1]) {
     const val = args[untilIdx + 1];
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(val) || isNaN(new Date(val).getTime())) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(val) || Number.isNaN(new Date(val).getTime())) {
       p.log.error("--until must be a valid YYYY-MM-DD date (e.g. 2026-02-17)");
       process.exit(1);
     }
@@ -80,7 +80,7 @@ function parseArgs(): { type: PrepType; weeks: number; sinceDate?: string; until
     weeks = Math.ceil((endMs - sinceMs) / (7 * 24 * 60 * 60 * 1000));
   } else if (weeksIdx !== -1 && args[weeksIdx + 1]) {
     weeks = parseInt(args[weeksIdx + 1], 10);
-    if (isNaN(weeks) || weeks < 1) {
+    if (Number.isNaN(weeks) || weeks < 1) {
       p.log.error("--weeks must be a positive number");
       process.exit(1);
     }

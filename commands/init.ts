@@ -344,7 +344,7 @@ export async function promptAtlassian(
   const emailStr = (email as string).trim();
 
   // Verify connectivity
-  let check = await checkAtlassianConnection(urlStr, emailStr);
+  const check = await checkAtlassianConnection(urlStr, emailStr);
   if (check.ok) {
     p.log.success(`Connected as ${check.accountId}`);
   } else if (check.error?.includes("not set")) {
