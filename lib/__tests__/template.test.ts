@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { fillTemplate } from "../template";
+import { fillTemplate } from "../sdk/template";
 
 describe("fillTemplate", () => {
   it("replaces a single placeholder", () => {

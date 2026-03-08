@@ -1,8 +1,7 @@
 import * as p from "@clack/prompts";
-import { aiQuery } from "../lib/ai";
-import { fillTemplate, buildConfigContext } from "../lib/template";
+import { requireConfig, TEAM_TIMELINE_PATH } from "../lib/config";
 import {
-  getVault,
+  buildVaultPaths,
   readMemory,
   readProfile,
   readWorkContext,
@@ -11,37 +10,19 @@ import {
   readFocusDoc,
   readCareerContext,
   getRecentBragBooks,
-  getExpectedBragBookWeeks,
   getMissingBragBookWeeks,
+  readTeamTimeline,
   formatTeamTimelineForPrompt,
-} from "../lib/vault-readers";
+} from "../lib/sdk/vault";
+import { getExpectedBragBookWeeks } from "../lib/sdk/week-utils";
+import { aiQuery } from "../lib/sdk/ai";
+import { fillTemplate, buildConfigContext } from "../lib/sdk/template";
 
-const PREP_TYPES = ["1on1", "skip-level", "self-review", "promotion", "resume"] as const;
-type PrepType = (typeof PREP_TYPES)[number];
-
-const DEFAULT_WEEKS: Record<PrepType, number> = {
-  "1on1": 4,
-  "skip-level": 4,
-  "self-review": 12,
-  "promotion": 26,
-  "resume": 26,
-};
-
-const OUTPUT_PREFIX: Record<PrepType, string> = {
-  "1on1": "1on1 Prep",
-  "skip-level": "Skip Level Prep",
-  "self-review": "Self Review",
-  "promotion": "Promotion Case",
-  "resume": "Resume Bullets",
-};
-
-const PROMPT_FILE: Record<PrepType, string> = {
-  "1on1": "prep-1on1.md",
-  "skip-level": "prep-skip-level.md",
-  "self-review": "prep-self-review.md",
-  "promotion": "prep-promotion.md",
-  "resume": "prep-resume.md",
-};
+import {
+  PREP_TYPES, DEFAULT_WEEKS, OUTPUT_PREFIX, PROMPT_FILE,
+  getDateRange, getPromptFile, ensureFrontmatter, buildOutputFilename,
+  type PrepType,
+} from "../lib/sdk/prep";
 
 function parseArgs(): { type: PrepType; weeks: number; sinceDate?: string; untilDate?: string; extended: boolean; richText: boolean } {
   const args = process.argv.slice(2);
@@ -111,13 +92,6 @@ function parseArgs(): { type: PrepType; weeks: number; sinceDate?: string; until
   return { type, weeks, sinceDate, untilDate, extended, richText };
 }
 
-export function getDateRange(weeks: number, sinceDate?: string, untilDate?: string): string {
-  const end = untilDate ? new Date(untilDate) : new Date();
-  const start = sinceDate ? new Date(sinceDate) : new Date(end);
-  if (!sinceDate) start.setDate(start.getDate() - weeks * 7);
-  return `${start.toISOString().split("T")[0]} to ${end.toISOString().split("T")[0]}`;
-}
-
 async function generateBragBookForWeek(weekIdStr: string): Promise<void> {
   const scriptPath = new URL("../fetch-weekly-work-log.ts", import.meta.url).pathname;
   p.log.info(`Generating brag book for ${weekIdStr}...`);
@@ -133,13 +107,15 @@ async function generateBragBookForWeek(weekIdStr: string): Promise<void> {
 
 export async function runPrep(): Promise<void> {
   const { type, weeks, sinceDate, untilDate, extended, richText } = parseArgs();
+  const config = requireConfig();
+  const paths = buildVaultPaths(config, TEAM_TIMELINE_PATH);
 
   p.intro(`prep — ${OUTPUT_PREFIX[type]}${extended ? " (extended)" : ""}`);
   p.log.info(`Reading ${weeks} weeks of brag books + context`);
 
   // Check for missing brag books in the requested range
   const expectedWeeks = getExpectedBragBookWeeks(weeks, sinceDate, untilDate);
-  const missingWeeks = await getMissingBragBookWeeks(expectedWeeks);
+  const missingWeeks = await getMissingBragBookWeeks(paths, expectedWeeks);
 
   const skippedWeeks: string[] = [];
 
@@ -187,14 +163,14 @@ export async function runPrep(): Promise<void> {
     focusTracking,
     memory,
   ] = await Promise.all([
-    getRecentBragBooks(weeks, sinceDate, untilDate),
-    readProfile(),
-    readWorkContext(),
-    readCareerContext(),
-    readFocusDoc(),
-    readImpactLog(),
-    readFocusTracking(),
-    readMemory(),
+    getRecentBragBooks(paths, weeks, sinceDate, untilDate),
+    readProfile(paths),
+    readWorkContext(paths),
+    readCareerContext(paths),
+    readFocusDoc(paths),
+    readImpactLog(paths),
+    readFocusTracking(paths),
+    readMemory(paths),
   ]);
   s.stop("Context loaded");
 
@@ -209,13 +185,14 @@ export async function runPrep(): Promise<void> {
   const rawTemplate = await Bun.file(promptPath).text();
 
   const dateRange = getDateRange(weeks, sinceDate, untilDate);
-  const teamTimeline = formatTeamTimelineForPrompt();
+  const timeline = readTeamTimeline(paths);
+  const teamTimeline = formatTeamTimelineForPrompt(timeline);
   const writingStylePath = new URL("../prompts/_writing-style.md", import.meta.url).pathname;
   const writingStyle = await Bun.file(writingStylePath).text();
 
   // Fill template — config-driven placeholders + runtime context
   const prompt = fillTemplate(rawTemplate, {
-    ...buildConfigContext(),
+    ...buildConfigContext(config),
     date_range: dateRange,
     profile,
     work_context: workContext,
@@ -231,7 +208,7 @@ export async function runPrep(): Promise<void> {
 
   // Generate via AI
   s.start("Generating...");
-  let result = await aiQuery({ prompt });
+  let result = await aiQuery({ prompt, config });
   s.stop("Generated");
 
   // Ensure frontmatter tag
@@ -242,7 +219,7 @@ export async function runPrep(): Promise<void> {
   // Write to vault
   const today = new Date().toISOString().split("T")[0];
   const filename = `${OUTPUT_PREFIX[type]} ${today}.md`;
-  const outputPath = `${getVault()}/${filename}`;
+  const outputPath = `${paths.vault}/${filename}`;
 
   await Bun.write(outputPath, result);
   p.log.success(`Written to: ${outputPath}`);
@@ -251,7 +228,7 @@ export async function runPrep(): Promise<void> {
     const { markdownToDocx } = await import("../lib/markdown-to-docx");
     const docxBuffer = await markdownToDocx(result);
     const docxFilename = `${OUTPUT_PREFIX[type]} ${today}.docx`;
-    const docxPath = `${getVault()}/${docxFilename}`;
+    const docxPath = `${paths.vault}/${docxFilename}`;
     await Bun.write(docxPath, docxBuffer);
     p.log.success(`Rich text: ${docxPath}`);
   }

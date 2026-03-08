@@ -3,19 +3,14 @@
 import { readdir, unlink } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import * as p from "@clack/prompts";
-import { requireConfig, STATS_PATH } from "./lib/config";
+import { requireConfig, STATS_PATH, TEAM_TIMELINE_PATH } from "./lib/config";
 import type { WorklogConfig } from "./lib/config";
-import { aiQuery } from "./lib/ai";
-import { fillTemplate, buildConfigContext } from "./lib/template";
+import { aiQuery } from "./lib/sdk/ai";
+import { fillTemplate, buildConfigContext } from "./lib/sdk/template";
 import { runInit } from "./commands/init";
 import { runConfigure } from "./commands/configure";
 import {
-  getVault,
-  getMemoryPath,
-  getProfilePath,
-  getWorkContextPath,
-  getImpactLogPath,
-  getFocusTrackingPath,
+  buildVaultPaths,
   readMemory,
   readProfile,
   readWorkContext,
@@ -26,13 +21,16 @@ import {
   readArchivedFocusDocs,
   readCareerContext,
   getBragBooks,
-  getWeekNumber,
-  weekId,
+  readTeamTimeline,
   getTeamForDate,
   formatTeamTimelineForPrompt,
   getCurrentTeam,
   discoverWeeklyNotes,
-} from "./lib/vault-readers";
+  type VaultPaths,
+  type TeamTimeline,
+} from "./lib/sdk/vault";
+import { getWeekNumber, weekId } from "./lib/sdk/week-utils";
+import { updateMemory, updateImpactLog, updateWorkContext, updateProfile, updateFocusTracking } from "./lib/sdk/vault-updates";
 import type { JiraIssue, ConfluencePage, ConfluenceTag, ConfluenceComment, GitHubPR } from "./lib/types";
 import { extractText, formatDate } from "./lib/utils";
 
@@ -310,7 +308,7 @@ interface WeekInfo {
   filename: string;
 }
 
-async function getWeeksToGenerate(weeksBack?: number, specificWeek?: string, force?: boolean, sinceDate?: string): Promise<WeekInfo[]> {
+async function getWeeksToGenerate(vaultDir: string, weeksBack?: number, specificWeek?: string, force?: boolean, sinceDate?: string): Promise<WeekInfo[]> {
   if (specificWeek) {
     const [yearStr, weekStr] = specificWeek.split("-W");
     const year = parseInt(yearStr, 10);
@@ -332,7 +330,7 @@ async function getWeeksToGenerate(weeksBack?: number, specificWeek?: string, for
   // Scan vault root for existing YYYY-WXX Brag Book.md files
   const existingWeeks = new Set<string>();
 
-  const files = await readdir(getVault());
+  const files = await readdir(vaultDir);
   for (const file of files) {
     const match = file.match(/^(\d{4})-W(\d{2}) Brag Book\.md$/);
     if (match) {
@@ -442,9 +440,9 @@ async function promptForContext(weekNumber: number, year: number, contextFilePat
   return (result || "").trim();
 }
 
-async function getPreviousBragBooks(currentWeek: number, currentYear: number): Promise<string> {
+async function getPreviousBragBooks(paths: VaultPaths, currentWeek: number, currentYear: number): Promise<string> {
   const currentFilename = `${weekId(currentWeek, currentYear)} Brag Book.md`;
-  return getBragBooks(2, currentFilename);
+  return getBragBooks(paths, 2, currentFilename);
 }
 
 function getEnvTokens(): { apiToken: string; githubToken: string } {
@@ -696,7 +694,8 @@ interface ReviewInfo {
 }
 
 function parseReviewCycle(workContext: string): ReviewInfo | null {
-  const reviewSectionMatch = workContext.match(/## Review Cycle[\s\S]*?(?=##|$)/);
+  const reviewSectionMatch = workContext.match(/## Review Cycle\n([^#]|#(?!#))*/);
+
   if (!reviewSectionMatch) return null;
 
   const section = reviewSectionMatch[0];
@@ -740,16 +739,18 @@ function parseReviewCycle(workContext: string): ReviewInfo | null {
 async function generateBragBookEntry(
   workLogContent: string,
   previousBragBooks: string,
-  weekInfo?: WeekInfo
+  config: WorklogConfig,
+  paths: VaultPaths,
+  timeline: TeamTimeline,
+  weekInfo?: WeekInfo,
 ): Promise<BragBookResult> {
-  const config = requireConfig();
   const rawPromptTemplate = await Bun.file(PROMPT_TEMPLATE_PATH).text();
   // Resolve {{current_team}} — use week-specific team if generating for a specific week, else current
-  const teamForWeek = weekInfo ? getTeamForDate(weekInfo.startDate) : getCurrentTeam();
+  const teamForWeek = weekInfo ? getTeamForDate(timeline, weekInfo.startDate) : getCurrentTeam(timeline);
   const currentTeamLabel = teamForWeek?.team ?? "Unknown Team";
   const currentRole = `${config.profile.jobTitle} / ${config.profile.level} (${config.profile.company} - ${currentTeamLabel})`;
   let promptTemplate = fillTemplate(rawPromptTemplate, {
-    ...buildConfigContext(),
+    ...buildConfigContext(config),
     current_team: currentTeamLabel,
     current_role: currentRole,
   });
@@ -785,19 +786,19 @@ CRITICAL — ticket status freshness:
 </available_research_tools>`,
     );
   }
-  const memoryContent = await readMemory();
-  const profileContent = await readProfile();
-  const workContextContent = await readWorkContext();
-  const impactLogContent = await readImpactLog();
-  const coachPersona = await readCoachPersona();
-  const focusTrackingContent = await readFocusTracking();
-  const focusDocContent = await readFocusDoc();
-  const focusHistoryContent = await readArchivedFocusDocs();
-  const careerContext = await readCareerContext();
+  const memoryContent = await readMemory(paths);
+  const profileContent = await readProfile(paths);
+  const workContextContent = await readWorkContext(paths);
+  const impactLogContent = await readImpactLog(paths);
+  const coachPersona = await readCoachPersona(paths);
+  const focusTrackingContent = await readFocusTracking(paths);
+  const focusDocContent = await readFocusDoc(paths);
+  const focusHistoryContent = await readArchivedFocusDocs(paths);
+  const careerContext = await readCareerContext(paths);
 
   // Discover work-relevant vault notes modified during the week
   const vaultNotes = weekInfo
-    ? await discoverWeeklyNotes(weekInfo.startDate, weekInfo.endDate)
+    ? await discoverWeeklyNotes(config, paths, weekInfo.startDate, weekInfo.endDate)
     : [];
 
   let vaultNotesSection = "";
@@ -906,7 +907,7 @@ ${pendingFocusSection}
 ${vaultNotesSection}
 ---
 ${(() => {
-  const teamEntry = weekInfo ? getTeamForDate(weekInfo.startDate) : undefined;
+  const teamEntry = weekInfo ? getTeamForDate(timeline, weekInfo.startDate) : undefined;
   const teamLabel = teamEntry
     ? `${teamEntry.team}${teamEntry.domain ? ` (${teamEntry.domain})` : ""}`
     : "Unknown";
@@ -919,7 +920,7 @@ This may be a historical regeneration. The work log data below is from that spec
 Team assignment at that time: ${teamLabel}${teamEntry?.notes ? `\nNote: ${teamEntry.notes}` : ""}
 
 Full team timeline:
-${formatTeamTimelineForPrompt()}
+${formatTeamTimelineForPrompt(timeline)}
 
 Do NOT reference the current date, current team assignment, or any context files that reflect a different time period. Generate the brag book AS IF you are writing it during that week.
 </generation_context>
@@ -935,6 +936,7 @@ Write the brag book entry as markdown. Output ONLY the markdown content, no expl
 
   let result = await aiQuery({
     prompt: fullPrompt,
+    config,
   });
 
   // Parse out the memory update section
@@ -1095,132 +1097,6 @@ Write the brag book entry as markdown. Output ONLY the markdown content, no expl
   return { bragBookContent, itemsToAdd, itemsToRemove, impactLogEntry, workContextUpdates, profileUpdate, focusItems, focusUpdates };
 }
 
-async function updateImpactLog(entry: BragBookResult["impactLogEntry"]): Promise<void> {
-  if (!entry) return;
-
-  let content = await Bun.file(getImpactLogPath()).text();
-
-  // Find the table in Impact Timeline section and append row
-  const tableMatch = content.match(/## Impact Timeline[\s\S]*?\|[-\s|]+\|/);
-  if (tableMatch) {
-    const insertPoint = content.indexOf(tableMatch[0]) + tableMatch[0].length;
-    const newRow = `\n| ${entry.date} | ${entry.achievement} | ${entry.scope} | ${entry.coreValue} | ${entry.evidence} |`;
-    content = content.slice(0, insertPoint) + newRow + content.slice(insertPoint);
-  }
-
-  // Update gap analysis
-  content = content.replace(/\*\*Last significant impact:\*\*.*/, `**Last significant impact:** ${entry.date}`);
-  content = content.replace(/\*\*Current gap:\*\*.*/, `**Current gap:** None - recent entry added`);
-
-  await Bun.write(getImpactLogPath(), content);
-}
-
-async function updateWorkContext(updates: BragBookResult["workContextUpdates"]): Promise<void> {
-  if (updates.length === 0) return;
-
-  let content = await Bun.file(getWorkContextPath()).text();
-
-  // Find Organizational Notes section and add entries
-  const orgNotesIdx = content.indexOf("## Organizational Notes");
-  if (orgNotesIdx !== -1) {
-    const insertPoint = content.indexOf("\n", orgNotesIdx + 25) + 1;
-    const newEntries = updates.map(u => `- **${u.category}:** ${u.info} _(${u.source})_`).join("\n");
-    content = content.slice(0, insertPoint) + "\n" + newEntries + "\n" + content.slice(insertPoint);
-  }
-
-  // Update timestamp
-  content = content.replace(/\*Last updated:.*\*/, `*Last updated: ${new Date().toISOString().split("T")[0]}*`);
-
-  await Bun.write(getWorkContextPath(), content);
-}
-
-async function updateProfile(update: BragBookResult["profileUpdate"]): Promise<void> {
-  if (!update) return;
-
-  let content = await Bun.file(getProfilePath()).text();
-
-  // Find Key Strengths section and add achievement
-  const strengthsIdx = content.indexOf("## Key Strengths");
-  if (strengthsIdx !== -1) {
-    const nextSectionIdx = content.indexOf("\n##", strengthsIdx + 1);
-    const insertPoint = nextSectionIdx !== -1 ? nextSectionIdx : content.length;
-    const newEntry = `- ${update.bulletPoint}\n`;
-    content = content.slice(0, insertPoint) + newEntry + content.slice(insertPoint);
-  }
-
-  await Bun.write(getProfilePath(), content);
-}
-
-async function updateFocusTracking(
-  focusItems: string[],
-  focusUpdates: BragBookResult["focusUpdates"],
-  weekInfo: WeekInfo
-): Promise<void> {
-  let content: string;
-  const weekLabel = `${weekInfo.year}-W${String(weekInfo.weekNumber).padStart(2, "0")}`;
-
-  if (existsSync(getFocusTrackingPath())) {
-    content = await Bun.file(getFocusTrackingPath()).text();
-  } else {
-    content = `# Focus Tracking
-
-Tracks focus items from coaching sessions. Pending items are reviewed in subsequent weeks.
-
-| Week | Focus Item | Status | Notes |
-|------|------------|--------|-------|
-`;
-  }
-
-  // Update status of existing items
-  for (const update of focusUpdates) {
-    const escapedItem = update.item.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const regex = new RegExp(`\\|\\s*${update.week}\\s*\\|\\s*${escapedItem}\\s*\\|\\s*pending\\s*\\|`, "i");
-    content = content.replace(regex, `| ${update.week} | ${update.item} | ${update.status} | ${update.notes} |`);
-  }
-
-  // Add new focus items
-  for (const item of focusItems) {
-    if (item && !content.includes(item)) {
-      content = content.trimEnd() + `\n| ${weekLabel} | ${item} | pending | |`;
-    }
-  }
-
-  await Bun.write(getFocusTrackingPath(), content);
-}
-
-async function updateMemory(itemsToAdd: string[], itemsToRemove: string[]): Promise<void> {
-  let memoryContent: string;
-
-  if (existsSync(getMemoryPath())) {
-    memoryContent = await Bun.file(getMemoryPath()).text();
-  } else {
-    memoryContent = `# Memory - Small Contributions Awaiting Significance
-
-Contributions here are waiting to accumulate into something brag-worthy.
-
-| Date | Item | Category | Notes |
-|------|------|----------|-------|
-`;
-  }
-
-  // Remove graduated items
-  for (const item of itemsToRemove) {
-    // Try to find and remove lines containing the item description
-    const lines = memoryContent.split("\n");
-    memoryContent = lines.filter(line => !line.includes(item.split("(now part of")[0].trim())).join("\n");
-  }
-
-  // Add new items (append to table)
-  if (itemsToAdd.length > 0) {
-    for (const row of itemsToAdd) {
-      if (row.includes("|")) {
-        memoryContent = memoryContent.trimEnd() + "\n" + row;
-      }
-    }
-  }
-
-  await Bun.write(getMemoryPath(), memoryContent);
-}
 
 interface PRReview {
   pr_number: number;
@@ -1452,7 +1328,11 @@ async function main() {
 
     p.intro("worklog");
 
-    const weeksToGenerate = await getWeeksToGenerate(weeksBack, specificWeek, force, sinceDate);
+    const config = requireConfig();
+    const paths = buildVaultPaths(config, TEAM_TIMELINE_PATH);
+    const timeline = readTeamTimeline(paths);
+
+    const weeksToGenerate = await getWeeksToGenerate(paths.vault, weeksBack, specificWeek, force, sinceDate);
 
     if (weeksToGenerate.length === 0) {
       p.log.info("No missing weeks to generate.");
@@ -1500,8 +1380,6 @@ async function main() {
 
     const s = p.spinner();
 
-    const config = requireConfig();
-
     s.start("Getting account IDs...");
     const [accountId, githubUsername] = await Promise.all([
       getAccountId(config),
@@ -1536,11 +1414,11 @@ async function main() {
       const markdown = generateMarkdown(issues, pages, prs, reviews, teamSprintItems, weekInfo, additionalContext, config);
 
       // Save work log at vault root
-      const workLogPath = `${getVault()}/${weekInfo.filename}`;
+      const workLogPath = `${paths.vault}/${weekInfo.filename}`;
       await Bun.write(workLogPath, markdown);
 
       // Get previous brag books for context
-      const previousBragBooks = await getPreviousBragBooks(weekInfo.weekNumber, weekInfo.year);
+      const previousBragBooks = await getPreviousBragBooks(paths, weekInfo.weekNumber, weekInfo.year);
 
       // --- Generate brag book ---
       const bragStart = performance.now();
@@ -1554,11 +1432,11 @@ async function main() {
         profileUpdate,
         focusItems,
         focusUpdates,
-      } = await generateBragBookEntry(markdown, previousBragBooks, weekInfo);
+      } = await generateBragBookEntry(markdown, previousBragBooks, config, paths, timeline, weekInfo);
       const bragMs = Math.round(performance.now() - bragStart);
       s.stop(`Brag book generated in ${formatDuration(bragMs)}`);
 
-      const bragBookPath = `${getVault()}/${wid} Brag Book.md`;
+      const bragBookPath = `${paths.vault}/${wid} Brag Book.md`;
       await Bun.write(bragBookPath, bragBookContent);
       lastBragBookPath = bragBookPath;
       lastBragBookContent = bragBookContent;
@@ -1568,19 +1446,20 @@ async function main() {
       s.start("Updating context...");
 
       if (itemsToAdd.length > 0 || itemsToRemove.length > 0) {
-        await updateMemory(itemsToAdd, itemsToRemove);
+        await updateMemory(paths.memory, itemsToAdd, itemsToRemove);
       }
       if (impactLogEntry) {
-        await updateImpactLog(impactLogEntry);
+        await updateImpactLog(paths.impactLog, impactLogEntry);
       }
       if (workContextUpdates.length > 0) {
-        await updateWorkContext(workContextUpdates);
+        await updateWorkContext(paths.workContext, workContextUpdates);
       }
       if (profileUpdate) {
-        await updateProfile(profileUpdate);
+        await updateProfile(paths.profile, profileUpdate);
       }
       if (focusItems.length > 0 || focusUpdates.length > 0) {
-        await updateFocusTracking(focusItems, focusUpdates, weekInfo);
+        const weekLabel = `${weekInfo.year}-W${String(weekInfo.weekNumber).padStart(2, "0")}`;
+        await updateFocusTracking(paths.focusTracking, focusItems, focusUpdates, weekLabel);
       }
 
       const ctxMs = Math.round(performance.now() - ctxStart);

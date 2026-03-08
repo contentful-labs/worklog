@@ -1,32 +1,33 @@
 import { streamText, stepCountIs } from "ai";
 import { createOpenAI } from "@ai-sdk/openai";
-import { loadConfig } from "./config";
-import { resolveOpenAIAuth, refreshCodexToken, type OpenAIAuthResolution } from "./openai-auth";
-import { buildResearchTools } from "./ai-tools";
+import { resolveOpenAIAuth, refreshCodexToken, type OpenAIAuthResolution } from "../openai-auth";
+import { buildResearchTools } from "../ai-tools";
+import type { WorklogConfig } from "./types";
 
 export interface AIQueryOptions {
   prompt: string;
   model?: string;
+  config: WorklogConfig;
 }
 
 /**
- * AI query function. Dispatches to the configured provider at runtime.
+ * AI query function parameterized by config.
  *
- * Anthropic → Claude Agent SDK (works with Max subscription or API key)
- * OpenAI → Vercel AI SDK + Responses API (works with API key or Codex subscription)
+ * Anthropic → Claude Agent SDK
+ * OpenAI → Vercel AI SDK + Responses API
  *
  * Returns the final text output with preamble stripped and code block unwrapped.
  */
 export async function aiQuery(options: AIQueryOptions): Promise<string> {
-  const config = loadConfig();
-  const provider = config?.ai.provider ?? "openai";
-  const model = options.model ?? config?.ai.model;
+  const { config, prompt, model: modelOverride } = options;
+  const provider = config.ai.provider ?? "openai";
+  const model = modelOverride ?? config.ai.model;
 
   let raw: string;
   if (provider === "anthropic") {
-    raw = await queryAnthropic(options.prompt);
+    raw = await queryAnthropic(prompt);
   } else {
-    raw = await queryOpenAI(model, options.prompt);
+    raw = await queryOpenAI(config, model, prompt);
   }
 
   return postProcess(raw);
@@ -77,14 +78,14 @@ function resolveOpenAIAuthOrThrow(): Exclude<OpenAIAuthResolution, { source: "no
   return auth;
 }
 
-async function queryOpenAI(modelOverride: string | undefined, prompt: string): Promise<string> {
+async function queryOpenAI(config: WorklogConfig, modelOverride: string | undefined, prompt: string): Promise<string> {
   const auth = resolveOpenAIAuthOrThrow();
   const model = modelOverride || "gpt-5";
 
-  let provider;
+  let openaiProvider;
   if (auth.source === "codex-subscription") {
     const freshToken = (await refreshCodexToken()) ?? auth.apiKey;
-    provider = createOpenAI({
+    openaiProvider = createOpenAI({
       baseURL: "https://chatgpt.com/backend-api/codex",
       apiKey: freshToken,
       headers: auth.accountId
@@ -92,13 +93,13 @@ async function queryOpenAI(modelOverride: string | undefined, prompt: string): P
         : {},
     });
   } else {
-    provider = createOpenAI({ apiKey: auth.apiKey });
+    openaiProvider = createOpenAI({ apiKey: auth.apiKey });
   }
 
   const result = streamText({
-    model: provider.responses(model),
+    model: openaiProvider.responses(model),
     prompt,
-    tools: buildResearchTools(loadConfig()),
+    tools: buildResearchTools(config),
     stopWhen: stepCountIs(6),
     providerOptions: {
       openai: {
@@ -112,7 +113,8 @@ async function queryOpenAI(modelOverride: string | undefined, prompt: string): P
   return await result.text;
 }
 
-function postProcess(raw: string): string {
+/** Strip AI preamble and code block wrapping from raw model output. */
+export function postProcess(raw: string): string {
   let result = raw;
 
   // Strip preamble — model sometimes outputs thinking before the actual document

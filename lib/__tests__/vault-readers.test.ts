@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { getWeekNumber, weekId, getExpectedBragBookWeeks } from "../vault-readers";
+import { getWeekNumber, weekId, getExpectedBragBookWeeks } from "../sdk/week-utils";
 
 describe("getWeekNumber", () => {
   it("returns correct ISO week for a known date", () => {

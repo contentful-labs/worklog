@@ -1,6 +1,9 @@
 import { describe, it, expect, beforeAll, afterAll, afterEach } from "vitest";
 import { http, HttpResponse } from "msw";
 import { setupServer } from "msw/node";
+import { mkdtemp, writeFile, rm, mkdir } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { buildResearchTools } from "../ai-tools";
 import type { WorklogConfig } from "../config";
 
@@ -173,5 +176,46 @@ describe("buildResearchTools — vault tools", () => {
     const tools = buildResearchTools(null);
     const result = await exec(tools.searchVault, { keyword: "test" });
     expect(result).toBe("Error: no vault path configured");
+  });
+
+  describe("with real temp vault", () => {
+    let tmpVault: string;
+    let vaultConfig: WorklogConfig;
+
+    beforeAll(async () => {
+      tmpVault = await mkdtemp(join(tmpdir(), "ai-tools-vault-"));
+      await writeFile(join(tmpVault, "meeting-notes.md"), "# Meeting\nDiscussed sprint goals");
+      await writeFile(join(tmpVault, "recipe.md"), "# Cookies\nFlour and sugar");
+      vaultConfig = { ...mockConfig, vault: tmpVault };
+    });
+
+    afterAll(async () => {
+      await rm(tmpVault, { recursive: true, force: true });
+    });
+
+    it("readVaultNote reads an existing note", async () => {
+      const tools = buildResearchTools(vaultConfig);
+      const result = await exec(tools.readVaultNote, { noteName: "meeting-notes" });
+      expect(result).toContain("Discussed sprint goals");
+    });
+
+    it("readVaultNote returns error for missing note", async () => {
+      const tools = buildResearchTools(vaultConfig);
+      const result = await exec(tools.readVaultNote, { noteName: "nonexistent" });
+      expect(result).toContain("Error: could not read");
+    });
+
+    it("searchVault finds files containing keyword", async () => {
+      const tools = buildResearchTools(vaultConfig);
+      const result = await exec(tools.searchVault, { keyword: "sprint" });
+      expect(result).toContain("meeting-notes.md");
+      expect(result).not.toContain("recipe.md");
+    });
+
+    it("searchVault returns no matches for absent keyword", async () => {
+      const tools = buildResearchTools(vaultConfig);
+      const result = await exec(tools.searchVault, { keyword: "zzz-nonexistent-zzz" });
+      expect(result).toBe("No matches found");
+    });
   });
 });

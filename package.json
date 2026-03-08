@@ -17,6 +17,9 @@
     "LICENSE",
     "README.md"
   ],
+  "exports": {
+    ".": "./lib/sdk/index.ts"
+  },
   "engines": {
     "bun": ">=1.0.0"
   },
