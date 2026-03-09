@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.5.0](https://github.com/contentful-labs/worklog/compare/v1.4.0...v1.5.0) (2026-03-08)
+
+
+### Features
+
+* [] add --verbose/-v flag for detailed runtime logging ([d3884a9](https://github.com/contentful-labs/worklog/commit/d3884a9f932923ae039d0d33c91dd99134deea91))
+* add --verbose/-v flag for detailed runtime logging ([8083d7a](https://github.com/contentful-labs/worklog/commit/8083d7a1257011de9b1054600f98110513677641))
+
+
+### Bug Fixes
+
+* resolve all biome lint warnings ([3c65d42](https://github.com/contentful-labs/worklog/commit/3c65d42ee2235ce231cd72740d0195a1ddbd4a5a))
+
 ## [1.4.0](https://github.com/contentful-labs/worklog/compare/v1.3.0...v1.4.0) (2026-03-08)
 
 
