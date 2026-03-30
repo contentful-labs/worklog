@@ -11,21 +11,23 @@ worklog supports two AI providers. Select one during `worklog init`.
 
 ### Anthropic (Claude) — default
 
-Uses the Claude Agent SDK, which requires [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI.
+Uses the Claude Agent SDK. Two ways to authenticate:
 
-If you already have Claude Code working, worklog piggybacks off your existing authentication — no extra setup needed.
-
-If you don't have Claude Code yet:
+#### API key
 
 ```bash
-npm install -g @anthropic-ai/claude-code
-claude                      # follow the prompts to authenticate
+export ANTHROPIC_API_KEY="sk-ant-..."
+worklog init                # select "Anthropic (Claude)"
 ```
 
-Claude Code supports multiple auth methods (Claude Max subscription, API key, etc.) — any of them will work with worklog.
+Get an API key at https://console.anthropic.com/settings/keys
+
+#### Claude Code CLI
+
+If you already have [Claude Code](https://docs.anthropic.com/en/docs/claude-code) installed and authenticated, worklog piggybacks off your existing session — no extra setup needed.
 
 ```bash
-claude /doctor              # verify everything is working
+claude /doctor              # verify Claude Code is working
 worklog init                # select "Anthropic (Claude)"
 ```
 
@@ -59,7 +61,8 @@ Get an API key at https://platform.openai.com/api-keys
 |----------|-------------|---------------|
 | `ATLASSIAN_API_TOKEN` | Jira/Confluence data | [Atlassian API tokens](https://id.atlassian.com/manage-profile/security/api-tokens) |
 | `GITHUB_TOKEN` | GitHub PR data | [GitHub tokens](https://github.com/settings/tokens) |
-| `OPENAI_API_KEY` | AI — OpenAI (only if not using ChatGPT subscription) | [OpenAI dashboard](https://platform.openai.com/api-keys) |
+| `ANTHROPIC_API_KEY` | AI — Anthropic (if not using Claude Code CLI) | [Anthropic console](https://console.anthropic.com/settings/keys) |
+| `OPENAI_API_KEY` | AI — OpenAI (if not using ChatGPT subscription) | [OpenAI dashboard](https://platform.openai.com/api-keys) |
 
 ## First-time setup
 

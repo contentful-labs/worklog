@@ -141,14 +141,15 @@ All data stays local. Nothing leaves your machine except API calls to OpenAI to 
 Requires [Bun](https://bun.sh) v1.x+ and a markdown vault (any folder -- [Obsidian](https://obsidian.md) works great but isn't required).
 
 AI provider (pick one during `worklog init`):
-- **Anthropic (default)** — requires [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI. If you already have it working, worklog piggybacks off your existing auth.
+- **Anthropic (default)** — `ANTHROPIC_API_KEY` or existing [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI auth.
 - **OpenAI** — ChatGPT subscription (`npx codex@latest login`) or `OPENAI_API_KEY`.
 
 | Variable | Required for | How to get it |
 |----------|-------------|---------------|
 | `ATLASSIAN_API_TOKEN` | Jira/Confluence data | [Atlassian API tokens](https://id.atlassian.com/manage-profile/security/api-tokens) |
 | `GITHUB_TOKEN` | GitHub PR data | [GitHub tokens](https://github.com/settings/tokens) |
-| `OPENAI_API_KEY` | AI — OpenAI (only if not using ChatGPT subscription) | [OpenAI dashboard](https://platform.openai.com/api-keys) |
+| `ANTHROPIC_API_KEY` | AI — Anthropic (if not using Claude Code CLI) | [Anthropic console](https://console.anthropic.com/settings/keys) |
+| `OPENAI_API_KEY` | AI — OpenAI (if not using ChatGPT subscription) | [OpenAI dashboard](https://platform.openai.com/api-keys) |
 
 See [docs/setup.md](docs/setup.md) for detailed AI provider setup, first-time walkthrough, and configuration.
 

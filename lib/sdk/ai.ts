@@ -70,12 +70,11 @@ async function queryAnthropic(prompt: string): Promise<string> {
     const detail = err instanceof Error ? err.message : String(err);
     throw new Error(
       `Anthropic query failed.\n\n` +
-      `worklog uses the Claude Agent SDK, which requires Claude Code CLI.\n\n` +
-      `If you have Claude Code installed:\n` +
-      `  claude /doctor            # check auth is working\n\n` +
-      `If you don't have Claude Code yet:\n` +
-      `  npm install -g @anthropic-ai/claude-code\n` +
-      `  claude                    # follow prompts to authenticate\n\n` +
+      `Set up authentication with one of:\n` +
+      `  1. export ANTHROPIC_API_KEY="sk-ant-..."\n` +
+      `     Get one at https://console.anthropic.com/settings/keys\n` +
+      `  2. Install Claude Code CLI (piggybacks off your existing auth)\n` +
+      `     claude /doctor to verify\n\n` +
       `To switch to OpenAI instead:\n` +
       `  worklog configure ai\n\n` +
       `Details: ${detail}`
