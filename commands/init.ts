@@ -253,7 +253,7 @@ export async function promptAI(
       {
         value: "anthropic" as const,
         label: "Anthropic (Claude)",
-        hint: "works with Claude Max subscription or API key",
+        hint: "requires Claude Code CLI (claude /doctor to verify)",
       },
       {
         value: "openai" as const,
@@ -269,7 +269,7 @@ export async function promptAI(
   const keyStatus = checkAIAuth(selected);
 
   if (selected === "anthropic") {
-    p.log.info("Uses Claude Agent SDK — works with your Claude Max subscription or ANTHROPIC_API_KEY.");
+    p.log.info("Uses Claude Agent SDK — authenticates through your Claude Code CLI. Run `claude /doctor` to verify setup.");
   } else if (!keyStatus.ok) {
     // OpenAI — guide based on what's missing
     const resolved = resolveOpenAIAuth();

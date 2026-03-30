@@ -11,25 +11,12 @@ worklog supports two AI providers. Select one during `worklog init`.
 
 ### Anthropic (Claude) — default
 
-Uses the Claude Agent SDK. Two auth methods:
-
-#### Claude Code CLI (recommended for Claude Max subscribers)
-
-If you have Claude Code installed and authenticated, it works automatically.
+Uses the Claude Agent SDK, which authenticates through your existing Claude Code CLI session (Claude Max subscription, API key, or however you've authenticated Claude Code).
 
 ```bash
-claude /doctor              # verify Claude Code is working
+claude /doctor              # verify Claude Code is installed and working
 worklog init                # select "Anthropic (Claude)"
 ```
-
-#### API key
-
-```bash
-export ANTHROPIC_API_KEY="sk-ant-..."
-worklog init                # select "Anthropic (Claude)"
-```
-
-Get an API key at https://console.anthropic.com/settings/keys
 
 ### OpenAI
 
@@ -61,7 +48,6 @@ Get an API key at https://platform.openai.com/api-keys
 |----------|-------------|---------------|
 | `ATLASSIAN_API_TOKEN` | Jira/Confluence data | [Atlassian API tokens](https://id.atlassian.com/manage-profile/security/api-tokens) |
 | `GITHUB_TOKEN` | GitHub PR data | [GitHub tokens](https://github.com/settings/tokens) |
-| `ANTHROPIC_API_KEY` | AI — Anthropic (only if not using Claude Code CLI) | [Anthropic console](https://console.anthropic.com/settings/keys) |
 | `OPENAI_API_KEY` | AI — OpenAI (only if not using ChatGPT subscription) | [OpenAI dashboard](https://platform.openai.com/api-keys) |
 
 ## First-time setup
