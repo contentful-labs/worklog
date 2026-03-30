@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.6.0](https://github.com/contentful-labs/worklog/compare/v1.5.0...v1.6.0) (2026-03-30)
+
+
+### Features
+
+* add commander to add structured commands ([f979195](https://github.com/contentful-labs/worklog/commit/f97919519fd69ee388acfea0e7f23f9c2f166db4))
+
+
+### Bug Fixes
+
+* [] Anthropic auth error handling and docs ([400f682](https://github.com/contentful-labs/worklog/commit/400f682cf853784448f7f39161b8c9f004ff3c41))
+* clarify Anthropic auth uses Claude Code CLI session ([5331048](https://github.com/contentful-labs/worklog/commit/53310482abff094ee075dc4fe386c13d3eeb8b4c))
+* cover both Claude Code users and new users in auth docs ([158fdf6](https://github.com/contentful-labs/worklog/commit/158fdf6eda790739b62539029b408166adc8c20f))
+* improve Anthropic auth error handling with setup instructions ([7397893](https://github.com/contentful-labs/worklog/commit/739789340accdb5f0baccff764798c4822d890cd))
+* support ANTHROPIC_API_KEY without requiring Claude Code CLI ([444d17c](https://github.com/contentful-labs/worklog/commit/444d17cf6995ceedcd8322e67429e364084dc504))
+
 ## [1.5.0](https://github.com/contentful-labs/worklog/compare/v1.4.0...v1.5.0) (2026-03-08)
 
 
