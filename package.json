@@ -9,8 +9,6 @@
   },
   "files": [
     "fetch-weekly-work-log.ts",
-    "generate-prep-doc.ts",
-    "fetch-performance-data.ts",
     "lib/",
     "commands/",
     "prompts/",
@@ -41,6 +39,7 @@
     "@anthropic-ai/claude-agent-sdk": "^0.2.25",
     "@clack/prompts": "^1.0.1",
     "ai": "^6.0.108",
+    "commander": "^14.0.3",
     "remark-docx": "^0.3.25",
     "remark-frontmatter": "^5.0.0",
     "remark-gfm": "^4.0.1",
