@@ -11,10 +11,21 @@ worklog supports two AI providers. Select one during `worklog init`.
 
 ### Anthropic (Claude) — default
 
-Uses the Claude Agent SDK, which authenticates through your existing Claude Code CLI session (Claude Max subscription, API key, or however you've authenticated Claude Code).
+Uses the Claude Agent SDK, which requires [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI.
+
+If you already have Claude Code working, worklog piggybacks off your existing authentication — no extra setup needed.
+
+If you don't have Claude Code yet:
 
 ```bash
-claude /doctor              # verify Claude Code is installed and working
+npm install -g @anthropic-ai/claude-code
+claude                      # follow the prompts to authenticate
+```
+
+Claude Code supports multiple auth methods (Claude Max subscription, API key, etc.) — any of them will work with worklog.
+
+```bash
+claude /doctor              # verify everything is working
 worklog init                # select "Anthropic (Claude)"
 ```
 

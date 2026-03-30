@@ -253,7 +253,7 @@ export async function promptAI(
       {
         value: "anthropic" as const,
         label: "Anthropic (Claude)",
-        hint: "requires Claude Code CLI (claude /doctor to verify)",
+        hint: "uses Claude Code CLI — piggybacks off your existing auth",
       },
       {
         value: "openai" as const,
@@ -269,7 +269,12 @@ export async function promptAI(
   const keyStatus = checkAIAuth(selected);
 
   if (selected === "anthropic") {
-    p.log.info("Uses Claude Agent SDK — authenticates through your Claude Code CLI. Run `claude /doctor` to verify setup.");
+    p.log.info(
+      "Uses Claude Agent SDK via Claude Code CLI.\n" +
+      "  If you already have Claude Code working, no extra setup needed.\n" +
+      "  If not: npm install -g @anthropic-ai/claude-code && claude\n" +
+      "  Verify: claude /doctor"
+    );
   } else if (!keyStatus.ok) {
     // OpenAI — guide based on what's missing
     const resolved = resolveOpenAIAuth();
