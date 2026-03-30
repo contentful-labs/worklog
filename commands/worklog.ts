@@ -658,7 +658,7 @@ export async function runWorklog(opts: {
 // --- Commander command definition ---
 
 export function makeWorklogCommand(): Command {
-  const cmd = new Command()
+  const cmd = new Command("generate")
     .description("Generate weekly brag book(s)")
     .option("--weeks <n>", "Number of weeks to generate going back from now", (v) => {
       const n = parseInt(v, 10);
