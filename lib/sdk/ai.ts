@@ -44,26 +44,39 @@ async function queryAnthropic(prompt: string): Promise<string> {
   const { query } = await import("@anthropic-ai/claude-agent-sdk");
 
   let result = "";
-  for await (const message of query({
-    prompt,
-    options: {
-      allowedTools: ["Bash", "Read", "Glob", "Grep"],
-      maxTurns: 6,
-      cwd: process.cwd(),
-    },
-  })) {
-    if (message.type === "assistant" && message.message?.content) {
-      const hasToolUse = message.message.content.some(
-        (b: { type: string }) => b.type === "tool_use"
-      );
-      if (!hasToolUse) {
-        for (const block of message.message.content) {
-          if ("text" in block) {
-            result += block.text;
+  try {
+    for await (const message of query({
+      prompt,
+      options: {
+        allowedTools: ["Bash", "Read", "Glob", "Grep"],
+        maxTurns: 6,
+        cwd: process.cwd(),
+      },
+    })) {
+      if (message.type === "assistant" && message.message?.content) {
+        const hasToolUse = message.message.content.some(
+          (b: { type: string }) => b.type === "tool_use"
+        );
+        if (!hasToolUse) {
+          for (const block of message.message.content) {
+            if ("text" in block) {
+              result += block.text;
+            }
           }
         }
       }
     }
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    throw new Error(
+      `Anthropic query failed.\n\n` +
+      `The Claude Agent SDK requires one of:\n` +
+      `  1. Claude Code CLI installed and authenticated (run: claude /doctor)\n` +
+      `  2. ANTHROPIC_API_KEY environment variable set\n\n` +
+      `To switch to OpenAI instead:\n` +
+      `  worklog configure ai\n\n` +
+      `Details: ${detail}`
+    );
   }
 
   return result;

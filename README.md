@@ -144,9 +144,10 @@ Requires [Bun](https://bun.sh) v1.x+ and a markdown vault (any folder -- [Obsidi
 |----------|-------------|---------------|
 | `ATLASSIAN_API_TOKEN` | Jira/Confluence data | [Atlassian API tokens](https://id.atlassian.com/manage-profile/security/api-tokens) |
 | `GITHUB_TOKEN` | GitHub PR data | [GitHub tokens](https://github.com/settings/tokens) |
-| `OPENAI_API_KEY` | AI (only for API key auth) | [OpenAI dashboard](https://platform.openai.com/api-keys) |
+| `ANTHROPIC_API_KEY` | AI — Anthropic (only if not using Claude Code CLI) | [Anthropic console](https://console.anthropic.com/settings/keys) |
+| `OPENAI_API_KEY` | AI — OpenAI (only if not using ChatGPT subscription) | [OpenAI dashboard](https://platform.openai.com/api-keys) |
 
-See [docs/setup.md](docs/setup.md) for authentication options (ChatGPT subscription vs API key), first-time setup walkthrough, and configuration details.
+See [docs/setup.md](docs/setup.md) for AI provider authentication options, first-time setup walkthrough, and configuration details.
 
 ## Vault structure
 
