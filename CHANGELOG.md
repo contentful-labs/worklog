@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.6.1](https://github.com/contentful-labs/worklog/compare/v1.6.0...v1.6.1) (2026-03-30)
+
+
+### Bug Fixes
+
+* add missing command name to makeWorklogCommand ([537f156](https://github.com/contentful-labs/worklog/commit/537f156ecdab08899c73da79c6116b9c960456ef))
+* add missing command name to makeWorklogCommand ([2c6e2bd](https://github.com/contentful-labs/worklog/commit/2c6e2bdb4865d418e14abba7ba2bf6d1540cb9e2))
+
 ## [1.6.0](https://github.com/contentful-labs/worklog/compare/v1.5.0...v1.6.0) (2026-03-30)
 
 
