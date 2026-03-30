@@ -44,26 +44,41 @@ async function queryAnthropic(prompt: string): Promise<string> {
   const { query } = await import("@anthropic-ai/claude-agent-sdk");
 
   let result = "";
-  for await (const message of query({
-    prompt,
-    options: {
-      allowedTools: ["Bash", "Read", "Glob", "Grep"],
-      maxTurns: 6,
-      cwd: process.cwd(),
-    },
-  })) {
-    if (message.type === "assistant" && message.message?.content) {
-      const hasToolUse = message.message.content.some(
-        (b: { type: string }) => b.type === "tool_use"
-      );
-      if (!hasToolUse) {
-        for (const block of message.message.content) {
-          if ("text" in block) {
-            result += block.text;
+  try {
+    for await (const message of query({
+      prompt,
+      options: {
+        allowedTools: ["Bash", "Read", "Glob", "Grep"],
+        maxTurns: 6,
+        cwd: process.cwd(),
+      },
+    })) {
+      if (message.type === "assistant" && message.message?.content) {
+        const hasToolUse = message.message.content.some(
+          (b: { type: string }) => b.type === "tool_use"
+        );
+        if (!hasToolUse) {
+          for (const block of message.message.content) {
+            if ("text" in block) {
+              result += block.text;
+            }
           }
         }
       }
     }
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    throw new Error(
+      `Anthropic query failed.\n\n` +
+      `Set up authentication with one of:\n` +
+      `  1. export ANTHROPIC_API_KEY="sk-ant-..."\n` +
+      `     Get one at https://console.anthropic.com/settings/keys\n` +
+      `  2. Install Claude Code CLI (piggybacks off your existing auth)\n` +
+      `     claude /doctor to verify\n\n` +
+      `To switch to OpenAI instead:\n` +
+      `  worklog configure ai\n\n` +
+      `Details: ${detail}`
+    );
   }
 
   return result;

@@ -119,7 +119,7 @@ function checkAIAuth(provider: "anthropic" | "openai"): {
   reason?: string;
 } {
   if (provider === "anthropic") {
-    // Claude Agent SDK handles auth — Max subscription or API key both work
+    // SDK resolves auth at query time (ANTHROPIC_API_KEY or Claude Code CLI)
     return { ok: true, source: "claude-agent-sdk" };
   }
   // OpenAI — auto-detect subscription vs API key
@@ -253,7 +253,7 @@ export async function promptAI(
       {
         value: "anthropic" as const,
         label: "Anthropic (Claude)",
-        hint: "works with Claude Max subscription or API key",
+        hint: "ANTHROPIC_API_KEY or Claude Code CLI auth",
       },
       {
         value: "openai" as const,
@@ -269,7 +269,11 @@ export async function promptAI(
   const keyStatus = checkAIAuth(selected);
 
   if (selected === "anthropic") {
-    p.log.info("Uses Claude Agent SDK — works with your Claude Max subscription or ANTHROPIC_API_KEY.");
+    p.log.info(
+      "Uses Claude Agent SDK. Authenticates via:\n" +
+      '  1. ANTHROPIC_API_KEY env var (export ANTHROPIC_API_KEY="sk-ant-...")\n' +
+      "  2. Claude Code CLI (if installed, piggybacks off your existing auth)"
+    );
   } else if (!keyStatus.ok) {
     // OpenAI — guide based on what's missing
     const resolved = resolveOpenAIAuth();
