@@ -1413,6 +1413,15 @@ export type VaultRecordKind = "memory" | "impact-log" | "work-context" | "my-pro
 export interface VaultRecordsMigration {
   placeholders: number;
   duplicates: number;
+  /** Entries recovered from a row that several of them had been written into. */
+  unjoined: number;
+  /**
+   * Cell counts of rows that looked joined but could not be split safely.
+   *
+   * Reported rather than guessed at: a row of the wrong width is damage this code does
+   * not recognise, and rewriting it on a hunch is how the damage got there.
+   */
+  unjoinSkipped: number[];
   /**
    * Where the file as it was before this run was kept, or "" when nothing was removed.
    *
@@ -1701,6 +1710,73 @@ async function writeFileAtomic(path: string, content: string): Promise<void> {
   await rename(temp, target);
 }
 
+interface UnjoinedRows {
+  content: string;
+  unjoined: number;
+  unjoinSkipped: number[];
+}
+
+/**
+ * Split the impact rows that several entries were written into.
+ *
+ * The 1.x writer found its insert point with a regex whose separator pattern ran on
+ * past the separator line: `[-\s|]+` matches a newline and a pipe, so the match ended
+ * on the leading pipe of the first data row and every insert landed inside that row.
+ * A file written by it holds one row carrying every entry, newest first, with the cells
+ * themselves intact, and a bare `|` line for each insert after the first.
+ *
+ * A row is only split when its cells divide exactly into whole entries and every cell
+ * that would start one is a date. The cell text is put back exactly as written, so an
+ * escape inside a cell survives the repair.
+ */
+function unjoinImpactRows(content: string, width: number): UnjoinedRows {
+  const eol = detectEol(content);
+  const lines = toLines(content);
+  const scan = maskFenced(lines);
+  const liveEnd = liveRegionEnd(scan);
+
+  const headingIdx = findExactHeading(scan, IMPACT_TIMELINE_HEADING, liveEnd);
+  if (headingIdx === -1) return { content, unjoined: 0, unjoinSkipped: [] };
+
+  const scope = sectionScope(scan, headingIdx, liveEnd);
+  const table = findTableByHeader(scan, headingIdx, scope, IMPACT_HEADER);
+  if (!table) return { content, unjoined: 0, unjoinSkipped: [] };
+
+  const rowEnd = Math.min(table.rowEnd, scope);
+  const repaired: string[] = [];
+  const unjoinSkipped: number[] = [];
+  let unjoined = 0;
+
+  for (let i = table.rowStart; i < rowEnd; i++) {
+    const row = scanRow(lines[i]);
+    const cells = row.values.length;
+    if (cells <= width) {
+      repaired.push(lines[i]);
+      continue;
+    }
+
+    const startsAnEntry = (k: number) => isIsoDate(row.values[k * width] ?? "");
+    const entries = cells / width;
+    if (!Number.isInteger(entries) || !Array.from({ length: entries }, (_, k) => k).every(startsAnEntry)) {
+      unjoinSkipped.push(cells);
+      repaired.push(lines[i]);
+      continue;
+    }
+
+    for (let k = 0; k < entries; k++) {
+      repaired.push(`|${row.raw.slice(k * width, (k + 1) * width).join("|")}|`);
+    }
+    // The row that held them all counts as one of them, so the rest are the recovery.
+    unjoined += entries - 1;
+  }
+
+  if (unjoined === 0) return { content, unjoined: 0, unjoinSkipped };
+
+  const next = [...lines];
+  next.splice(table.rowStart, rowEnd - table.rowStart, ...repaired);
+  return { content: next.join(eol), unjoined, unjoinSkipped };
+}
+
 /**
  * One-off cleanup of the damage the ungated writers did: placeholder rows and repeated
  * records. Keeps a backup, and returns null when there is nothing to change so a second
@@ -1714,13 +1790,30 @@ export async function migrateVaultRecordsFile(
   if (!existsSync(path)) return null;
 
   const content = await readFile(path, "utf-8");
-  const cleaned = cleanVaultRecords(content, kind, now);
 
-  const removedRecords = cleaned.placeholders > 0 || cleaned.duplicates > 0;
-  if (!removedRecords && cleaned.content === content) return null;
+  // Entries first, so the cleanup and the status lines see the rows that were always
+  // meant to be there rather than the one row they were written into.
+  const repaired = kind === "impact-log"
+    ? unjoinImpactRows(content, IMPACT_HEADER.length)
+    : { content, unjoined: 0, unjoinSkipped: [] };
+  const cleaned = cleanVaultRecords(repaired.content, kind, now);
 
-  const backup = removedRecords ? nextBackupPath(path) : "";
-  if (removedRecords) await writeFile(backup, content, "utf-8");
+  const changedRecords = cleaned.placeholders > 0 || cleaned.duplicates > 0 || repaired.unjoined > 0;
+  if (!changedRecords && cleaned.content === content) {
+    // Nothing to write, but a row this could not read is still worth saying out loud,
+    // every run, until somebody fixes it.
+    if (repaired.unjoinSkipped.length === 0) return null;
+    return { placeholders: 0, duplicates: 0, unjoined: 0, unjoinSkipped: repaired.unjoinSkipped, backup: "" };
+  }
+
+  const backup = changedRecords ? nextBackupPath(path) : "";
+  if (changedRecords) await writeFile(backup, content, "utf-8");
   await writeFileAtomic(path, cleaned.content);
-  return { placeholders: cleaned.placeholders, duplicates: cleaned.duplicates, backup };
+  return {
+    placeholders: cleaned.placeholders,
+    duplicates: cleaned.duplicates,
+    unjoined: repaired.unjoined,
+    unjoinSkipped: repaired.unjoinSkipped,
+    backup,
+  };
 }

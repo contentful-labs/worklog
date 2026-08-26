@@ -497,6 +497,12 @@ export async function runWorklog(opts: {
     ["my-profile", paths.profile],
   ] as const) {
     const cleanup = await migrateVaultRecordsFile(recordPath, kind);
+    if (cleanup && cleanup.unjoined > 0) {
+      p.log.info(`Repaired impact log: ${cleanup.unjoined} entries unjoined, backup ${cleanup.backup}`);
+    }
+    for (const cells of cleanup?.unjoinSkipped ?? []) {
+      p.log.warn(`impact-log.md has a row of ${cells} cells that could not be split safely; left as it is`);
+    }
     if (cleanup?.backup) {
       p.log.info(
         `Cleaned ${kind}.md: ${cleanup.placeholders} placeholder rows removed, ` +
