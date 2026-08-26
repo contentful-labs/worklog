@@ -509,7 +509,7 @@ describe("updateProfile record identity", () => {
     expect(await updateProfile(path, {
       achievement: "Test suite cleanup",
       bulletPoint: "  untangles FLAKY test suites   other people avoid",
-    })).toBe("placeholder");
+    })).toBe("unchanged");
     expect(await readFile(path, "utf-8")).toBe(CLEAN_PROFILE);
   });
 
@@ -1509,6 +1509,240 @@ describe("writers require the exact section heading", () => {
     expect(await updateProfile(path, { achievement: "Rollout", bulletPoint: "Runs multi-team rollouts" }))
       .toBe("written");
     expect(await updateProfile(path, { achievement: "Rollout", bulletPoint: "Runs multi-team rollouts" }))
-      .toBe("placeholder");
+      .toBe("unchanged");
+  });
+});
+
+describe("the archive boundary", () => {
+  const ARCHIVED_ONLY_MEMORY = `# Memory
+
+## Previous Team (2025) — ARCHIVED
+
+| Date | Item | Category | Notes |
+|------|------|----------|-------|
+| 2025-05-01 | Wrote the fallback path for the Search Revamp indexer | project | TEAM-0001 |
+`;
+
+  it("refuses to add a row when the only table is archived", async () => {
+    const path = join(tmpDir, "memory.md");
+    await writeFile(path, ARCHIVED_ONLY_MEMORY);
+
+    expect(await updateMemory(path, ["| 2026-03-08 | Cut the index rebuild time | project |  |"], []))
+      .toBe("no-section");
+    expect(await readFile(path, "utf-8")).toBe(ARCHIVED_ONLY_MEMORY);
+  });
+
+  it("refuses to graduate a row out of an archived table", async () => {
+    const path = join(tmpDir, "memory.md");
+    await writeFile(path, ARCHIVED_ONLY_MEMORY);
+
+    expect(await updateMemory(path, [], ["Fallback path work for the Search Revamp indexer (now part of: shipped it)"]))
+      .toBe("no-section");
+    expect(await readFile(path, "utf-8")).toBe(ARCHIVED_ONLY_MEMORY);
+  });
+
+  it("adds to the live table when there is one above the archive", async () => {
+    const path = join(tmpDir, "memory.md");
+    await writeFile(path, TWO_ERA_MEMORY);
+
+    expect(await updateMemory(path, ["| 2026-03-08 | New item | Fix | |"], [])).toBe("written");
+    const content = await readFile(path, "utf-8");
+    expect(content.indexOf("New item")).toBeLessThan(content.indexOf("HISTORICAL"));
+  });
+
+  it("reports an unchanged file when the model repeats itself", async () => {
+    const path = join(tmpDir, "memory.md");
+    await writeFile(path, CLEAN_MEMORY);
+    const rows = ["| 2026-03-01 | Wrote the fallback path for the Search Revamp indexer | project | TEAM-1234 |"];
+
+    expect(await updateMemory(path, rows, [])).toBe("unchanged");
+    expect(await readFile(path, "utf-8")).toBe(CLEAN_MEMORY);
+  });
+});
+
+describe("impact status lines", () => {
+  const WITH_SUMMARY = `# Impact Log
+
+## Summary
+
+**Last significant impact:** 2026-01-01
+**Current gap:** a long time
+
+## Impact Timeline
+
+| Date | Achievement | Scope | Core Value | Evidence |
+|------|-------------|-------|------------|----------|
+| 2026-03-20 | Led the platform migration | org | craft | TEAM-1100 |
+
+**Last significant impact:** 2026-03-20
+**Current gap:** None - recent entry added
+`;
+
+  it("rewrites the timeline's own lines, not a summary section above it", async () => {
+    const path = join(tmpDir, "impact-log.md");
+    await writeFile(path, WITH_SUMMARY);
+
+    await updateImpactLog(path, { ...IMPACT_ENTRY, date: "2026-03-25" });
+
+    const content = await readFile(path, "utf-8");
+    expect(content).toContain("**Last significant impact:** 2026-01-01");
+    expect(content).toContain("**Current gap:** a long time");
+    expect(content).toContain("**Last significant impact:** 2026-03-25");
+  });
+
+  it("does not rewind the latest date when an older week is regenerated", async () => {
+    const path = join(tmpDir, "impact-log.md");
+    await writeFile(path, WITH_SUMMARY);
+
+    // A rerun of an earlier week. The file already knows about a later impact, and
+    // regenerating history must not move the file's idea of "latest" backwards.
+    expect(await updateImpactLog(path, { ...IMPACT_ENTRY, date: "2026-03-05" })).toBe("written");
+
+    const content = await readFile(path, "utf-8");
+    expect(content).toContain("| 2026-03-05 | Led the Search Revamp rollout across three teams |");
+    expect(content).toContain("**Last significant impact:** 2026-03-20");
+    expect(content).not.toContain("**Last significant impact:** 2026-03-05");
+  });
+
+  it("reports an unchanged file when the entry is already recorded", async () => {
+    const path = join(tmpDir, "impact-log.md");
+    await writeFile(path, CLEAN_IMPACT_LOG);
+
+    expect(await updateImpactLog(path, IMPACT_ENTRY)).toBe("written");
+    const written = await readFile(path, "utf-8");
+    expect(await updateImpactLog(path, IMPACT_ENTRY)).toBe("unchanged");
+    expect(await readFile(path, "utf-8")).toBe(written);
+  });
+});
+
+describe("heading level", () => {
+  it("does not write a strength into a subsection named like the section", async () => {
+    const path = join(tmpDir, "my-profile.md");
+    const file = `# My Profile
+
+## Career
+
+### Key Strengths
+
+- Something filed under a subsection
+`;
+    await writeFile(path, file);
+
+    expect(await updateProfile(path, { achievement: "Rollout", bulletPoint: "Runs multi-team rollouts" }))
+      .toBe("no-section");
+    expect(await readFile(path, "utf-8")).toBe(file);
+  });
+
+  it("does not clean a subsection named like the section", async () => {
+    const path = join(tmpDir, "my-profile.md");
+    const file = `# My Profile
+
+## Career
+
+### Key Strengths
+
+- (none)
+- (none)
+`;
+    await writeFile(path, file);
+
+    expect(await migrateVaultRecordsFile(path, "my-profile")).toBeNull();
+    expect(await readFile(path, "utf-8")).toBe(file);
+  });
+
+  it("accepts the heading with the leading spaces GFM allows", async () => {
+    const path = join(tmpDir, "my-profile.md");
+    await writeFile(path, CLEAN_PROFILE.replace("## Key Strengths", "  ## Key Strengths"));
+
+    expect(await updateProfile(path, { achievement: "Rollout", bulletPoint: "Runs multi-team rollouts" }))
+      .toBe("written");
+  });
+});
+
+describe("text the word scan cannot read", () => {
+  it("keeps a parenthesised non-Latin strength on insert and through migration", async () => {
+    const path = join(tmpDir, "my-profile.md");
+    await writeFile(path, CLEAN_PROFILE);
+
+    expect(isPlaceholder("(技術リード)")).toBe(false);
+    expect(await updateProfile(path, { achievement: "Lead", bulletPoint: "(技術リード)" })).toBe("written");
+
+    expect(await migrateVaultRecordsFile(path, "my-profile")).toBeNull();
+    expect(await readFile(path, "utf-8")).toContain("- (技術リード)");
+  });
+
+  it("still treats an empty parenthesis as a placeholder", () => {
+    expect(isPlaceholder("()")).toBe(true);
+    expect(isPlaceholder("(   )")).toBe(true);
+  });
+});
+
+describe("a source arriving at a note that has none", () => {
+  const NO_SOURCE = `# Work Context
+
+## Organizational Notes
+
+- **process:** Release trains ship on Tuesdays
+
+---
+
+*Last updated: 2026-02-01*
+`;
+
+  it("appends the suffix instead of dropping the source", async () => {
+    const path = join(tmpDir, "work-context.md");
+    await writeFile(path, NO_SOURCE);
+
+    expect(await updateWorkContext(path, [
+      { category: "process", info: "Release trains ship on Tuesdays", source: "TEAM-1300" },
+    ], new Date("2026-03-08T00:00:00Z"))).toBe("written");
+
+    expect(await readFile(path, "utf-8"))
+      .toContain("- **process:** Release trains ship on Tuesdays _(TEAM-1300)_");
+  });
+
+  it("keeps a dropped duplicate's source during migration", async () => {
+    const path = join(tmpDir, "work-context.md");
+    await writeFile(path, `# Work Context
+
+## Organizational Notes
+
+- **process:** Release trains ship on Tuesdays
+- **process:** Release trains ship on Tuesdays _(TEAM-1300)_
+
+---
+
+*Last updated: 2026-02-01*
+`);
+
+    expect((await migrateVaultRecordsFile(path, "work-context"))?.duplicates).toBe(1);
+    expect(await readFile(path, "utf-8"))
+      .toContain("- **process:** Release trains ship on Tuesdays _(TEAM-1300)_");
+  });
+});
+
+describe("CRLF through the migration", () => {
+  it("keeps the file's line endings on every line it rewrites", async () => {
+    const path = join(tmpDir, "work-context.md");
+    const file = `# Work Context
+
+## Organizational Notes
+
+- **process:** Release trains ship on Tuesdays _(TEAM-1200)_
+- **process:** Release trains ship on Tuesdays _(TEAM-1201)_
+- **process:** (none) _(unknown)_
+
+---
+
+*Last updated: 2026-02-01*
+`;
+    await writeFile(path, file.split("\n").join("\r\n"));
+
+    const result = await migrateVaultRecordsFile(path, "work-context");
+    expect(result).toMatchObject({ placeholders: 1, duplicates: 1 });
+
+    const content = await readFile(path, "utf-8");
+    expect(content).toContain("_(TEAM-1200, TEAM-1201)_");
+    expect(content.split("\n").every((line) => line === "" || line.endsWith("\r"))).toBe(true);
   });
 });

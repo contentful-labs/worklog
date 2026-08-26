@@ -22,7 +22,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import type { BragBookResult } from "./brag-book";
 
-import { appendToFirstTable, findTable, renderRow, splitRow } from "./markdown-table";
+import { findTable, renderRow, splitRow } from "./markdown-table";
 import { weekIdForDate } from "./week-utils";
 import { LOOKUP_MARGIN, SIMILARITY_THRESHOLD, canonicalText, normalizeText, textSimilarity } from "./text-similarity";
 import {
@@ -95,9 +95,12 @@ export function isPlaceholder(text: string): boolean {
 
   const parenthesised = core.startsWith("(") && core.endsWith(")");
   const inner = parenthesised ? core.slice(1, -1) : core;
+  if (inner.trim().length === 0) return true;
+
+  // Text the ASCII word scan cannot read is still text. "(技術リード)" is a strength,
+  // not a sentinel, and treating an empty word set as empty content deleted it.
   const words = normalizeText(inner);
-  // No words at all: "()" is a sentinel, but a note written in a non-Latin script is not.
-  if (words.length === 0) return parenthesised;
+  if (words.length === 0) return false;
   if (PLACEHOLDER_WORDS.has(words)) return true;
   return parenthesised && PLACEHOLDER_PREFIXES.some((prefix) => words.startsWith(prefix));
 }
@@ -231,15 +234,29 @@ function sectionEnd(lines: readonly string[], headingIdx: number): number {
 }
 
 /**
- * Index of the live heading whose text is exactly `heading`, or -1.
+ * The text of an H2 heading line, or null when the line is not one.
  *
- * Used where landing in the wrong section writes a row into someone else's table:
+ * The level is part of the match: `### Key Strengths` is a subsection of something
+ * else, and writing a strength into it, or deleting one from it, is writing into a
+ * section this code does not own. GFM allows up to three leading spaces.
+ */
+function h2Text(line: string): string | null {
+  let i = 0;
+  while (i < 3 && line[i] === " ") i++;
+  if (line[i] !== "#" || line[i + 1] !== "#" || line[i + 2] !== " ") return null;
+  return canonicalText(line.slice(i + 3));
+}
+
+/**
+ * Index of the live H2 whose text is exactly `heading`, or -1.
+ *
+ * Used where landing in the wrong section writes or deletes someone else's data:
  * `## Impact Timeline Notes` is not the impact timeline.
  */
 function findExactHeading(lines: readonly string[], heading: string, limit: number): number {
-  const target = normalizeText(heading);
+  const target = h2Text(heading) ?? canonicalText(heading);
   for (let i = 0; i < limit; i++) {
-    if (lines[i].startsWith("#") && normalizeText(lines[i]) === target) return i;
+    if (h2Text(lines[i]) === target) return i;
   }
   return -1;
 }
@@ -257,9 +274,20 @@ function sectionScope(lines: readonly string[], headingIdx: number, limit: numbe
   return limit;
 }
 
-/** Rewrite the first live line starting with `prefix`. Returns whether anything changed. */
-function replaceFirstLine(lines: string[], limit: number, prefix: string, replacement: string): boolean {
-  for (let i = 0; i < limit; i++) {
+/**
+ * Rewrite the first line starting with `prefix` between `from` and `to`.
+ *
+ * Both bounds matter: scanning from the top of the file rewrote a status line under a
+ * summary section above the timeline and left the timeline's own line stale.
+ */
+function replaceFirstLine(
+  lines: string[],
+  from: number,
+  to: number,
+  prefix: string,
+  replacement: string,
+): boolean {
+  for (let i = Math.max(from, 0); i < to; i++) {
     if (!lines[i].startsWith(prefix)) continue;
     if (lines[i] === replacement) return false;
     lines[i] = replacement;
@@ -308,31 +336,49 @@ function orgNoteSource(bullet: string): string {
   return start === -1 ? "" : trimmed.slice(start + 2, trimmed.length - 2);
 }
 
-/** Fold a source into the `_(...)_` suffix of an existing note, or null when unchanged. */
+/**
+ * Fold a source into the `_(...)_` suffix of an existing note, or null when unchanged.
+ *
+ * A note written without a suffix gains one rather than losing the source: the whole
+ * point of merging into the note already there is that nothing arrives and vanishes.
+ */
 function mergeNoteSource(bullet: string, source: string): string | null {
+  const value = source.trim();
+  if (value.length === 0 || isPlaceholder(value)) return null;
+
   const trimmed = bullet.trimEnd();
-  if (!trimmed.endsWith(")_")) return null;
-  const start = trimmed.lastIndexOf("_(");
-  if (start === -1) return null;
+  const start = trimmed.endsWith(")_") ? trimmed.lastIndexOf("_(") : -1;
+  if (start === -1) return `${trimmed} _(${value})_`;
 
   const stored = trimmed.slice(start + 2, trimmed.length - 2);
-  const merged = mergeCell(stored, source);
+  const merged = mergeCell(stored, value);
   return merged === stored ? null : `${trimmed.slice(0, start)}_(${merged})_`;
 }
 
-export async function updateMemory(memoryPath: string, itemsToAdd: string[], itemsToRemove: string[]): Promise<void> {
+export async function updateMemory(
+  memoryPath: string,
+  itemsToAdd: string[],
+  itemsToRemove: string[],
+): Promise<VaultWriteResult> {
   const original = existsSync(memoryPath) ? await readFile(memoryPath, "utf-8") : MEMORY_TEMPLATE;
   const eol = detectEol(original);
   const lines = toLines(original);
+  const liveEnd = liveRegionEnd(lines);
 
+  // The live era's table, or nothing. A memory.md whose only table sits under an
+  // archived heading has no live table: appending there would file this week's work
+  // under a team the user left, and a graduation would delete a row from that record.
   const table = findTable(lines);
-  const rows = table ? lines.slice(table.rowStart, table.rowEnd) : [];
+  if (!table || table.rowStart - 1 >= liveEnd) return "no-section";
+
+  const rowEnd = Math.min(table.rowEnd, liveEnd);
+  const rows = lines.slice(table.rowStart, rowEnd);
   const items = rows.map((row) => rowCell(row, MEMORY_ITEM_COLUMN));
 
   // Graduation. The model paraphrases the row it is closing, so matching by
   // `includes()` on its prose almost never landed: 17 hits in 27 weeks. This is a
-  // lookup of a row the model named, so it uses the lower restatement threshold and
-  // takes the single best match.
+  // lookup of a row the model named, so it scores, and it takes the match only when
+  // that match is clearly the best one.
   const graduated = new Set<number>();
   for (const removal of itemsToRemove) {
     const marker = removal.indexOf(GRADUATION_MARKER);
@@ -346,6 +392,7 @@ export async function updateMemory(memoryPath: string, itemsToAdd: string[], ite
   // Rows already in the file, then rows queued by this batch, so a repeat inside one
   // batch is folded into the row queued moments earlier rather than added twice.
   const pending = kept.map((row) => rowCell(row, MEMORY_ITEM_COLUMN));
+  let merges = 0;
 
   for (const row of itemsToAdd) {
     if (!row.includes("|")) continue;
@@ -363,24 +410,48 @@ export async function updateMemory(memoryPath: string, itemsToAdd: string[], ite
     const target = idx < kept.length ? kept : newRows;
     const offset = idx < kept.length ? idx : idx - kept.length;
     const merged = mergeRowCells(target[offset], incoming, [MEMORY_NOTES_COLUMN]);
-    if (merged) target[offset] = merged;
+    if (merged) {
+      target[offset] = merged;
+      merges++;
+    }
   }
 
-  if (table) lines.splice(table.rowStart, table.rowEnd - table.rowStart, ...kept);
-  const next = appendToFirstTable(lines.join("\n"), newRows);
+  if (graduated.size === 0 && newRows.length === 0 && merges === 0) return "unchanged";
 
-  await writeFile(memoryPath, next.split("\n").join(eol), "utf-8");
+  lines.splice(table.rowStart, rows.length, ...kept, ...newRows);
+  await writeFile(memoryPath, lines.join(eol), "utf-8");
+  return "written";
 }
 
 /**
  * What became of an update.
  *
- * "placeholder" is nothing worth recording, or nothing that was not already there,
- * which is normal and quiet. "no-section" is the file not having the live heading to
- * write under, which is worth telling the user about: the entry existed and had
- * nowhere to go.
+ * "placeholder" is the model having nothing worth recording and "unchanged" is
+ * everything it said already being in the file; both are normal and quiet.
+ * "no-section" is the file not having the live heading to write under, which is worth
+ * telling the user about: the update existed and had nowhere to go.
  */
-export type VaultWriteResult = "written" | "placeholder" | "no-section";
+export type VaultWriteResult = "written" | "unchanged" | "placeholder" | "no-section";
+
+/** True for a `YYYY-MM-DD` cell, the only thing worth comparing as a date. */
+function isIsoDate(value: string): boolean {
+  if (value.length !== 10 || value[4] !== "-" || value[7] !== "-") return false;
+  for (const i of [0, 1, 2, 3, 5, 6, 8, 9]) {
+    if (value[i] < "0" || value[i] > "9") return false;
+  }
+  return true;
+}
+
+/** The most recent date in a set of dated rows, or "" when none of them carry one. */
+function latestRowDate(rows: readonly string[]): string {
+  let latest = "";
+  for (const row of rows) {
+    const date = rowCell(row, 0);
+    // ISO dates sort as text, which is the only reason this is a string compare.
+    if (isIsoDate(date) && date > latest) latest = date;
+  }
+  return latest;
+}
 
 /** Record one achievement in the impact timeline. */
 export async function updateImpactLog(
@@ -404,9 +475,6 @@ export async function updateImpactLog(
   const table = findTable(lines, headingIdx);
   if (!table || table.rowStart - 1 >= scope) return "no-section";
 
-  replaceFirstLine(lines, scope, LAST_IMPACT_PREFIX, `${LAST_IMPACT_PREFIX} ${entry.date}`);
-  replaceFirstLine(lines, scope, CURRENT_GAP_PREFIX, `${CURRENT_GAP_PREFIX} None - recent entry added`);
-
   const rowEnd = Math.min(table.rowEnd, scope);
   const rows = lines.slice(table.rowStart, rowEnd);
   const incoming = [entry.date, entry.achievement, entry.scope, entry.coreValue, entry.evidence];
@@ -414,13 +482,34 @@ export async function updateImpactLog(
   const keys = rows.map((row) => `${rowCell(row, 0)} ${rowCell(row, 1)}`);
   const idx = findCanonicalIndex(keys, `${entry.date} ${entry.achievement}`);
 
+  let changed = false;
   if (idx === -1) {
     lines.splice(rowEnd, 0, renderRow(incoming));
+    rows.push(renderRow(incoming));
+    changed = true;
   } else {
     const merged = mergeRowCells(rows[idx], incoming, [IMPACT_SCOPE_COLUMN, IMPACT_VALUE_COLUMN, IMPACT_EVIDENCE_COLUMN]);
-    if (merged) lines[table.rowStart + idx] = merged;
+    if (merged) {
+      lines[table.rowStart + idx] = merged;
+      rows[idx] = merged;
+      changed = true;
+    }
   }
 
+  // The status lines describe the file, not this entry. Regenerating an older week
+  // must not rewind them: the latest impact is whatever the table now says is latest,
+  // and the gap only closes when the entry just written is that latest one.
+  const latest = latestRowDate(rows);
+  if (latest.length > 0) {
+    // Recomputed: inserting the row moved every line below it, including these.
+    const metadataEnd = sectionScope(lines, headingIdx, liveRegionEnd(lines));
+    changed = replaceFirstLine(lines, headingIdx, metadataEnd, LAST_IMPACT_PREFIX, `${LAST_IMPACT_PREFIX} ${latest}`) || changed;
+    if (latest === entry.date) {
+      changed = replaceFirstLine(lines, headingIdx, metadataEnd, CURRENT_GAP_PREFIX, `${CURRENT_GAP_PREFIX} None - recent entry added`) || changed;
+    }
+  }
+
+  if (!changed) return "unchanged";
   await writeFile(impactLogPath, lines.join(eol), "utf-8");
   return "written";
 }
@@ -484,10 +573,10 @@ export async function updateWorkContext(
     // The stamp says when a note was last added, so it only moves when one was. Moving
     // it on every run made a rerun of the same week differ from the first run.
     const stamp = now.toISOString().split("T")[0];
-    replaceFirstLine(lines, liveRegionEnd(lines), LAST_UPDATED_PREFIX, `*Last updated: ${stamp}*`);
+    replaceFirstLine(lines, 0, liveRegionEnd(lines), LAST_UPDATED_PREFIX, `*Last updated: ${stamp}*`);
   }
 
-  if (!changed) return "placeholder";
+  if (!changed) return "unchanged";
   await writeFile(workContextPath, lines.join(eol), "utf-8");
   return "written";
 }
@@ -509,7 +598,7 @@ export async function updateProfile(
   const end = Math.min(sectionEnd(lines, headingIdx), liveEnd);
   const existing: string[] = [];
   for (let i = headingIdx + 1; i < end; i++) if (isBullet(lines[i])) existing.push(lines[i].slice(2));
-  if (findCanonicalIndex(existing, update.bulletPoint) !== -1) return "placeholder";
+  if (findCanonicalIndex(existing, update.bulletPoint) !== -1) return "unchanged";
 
   let insertAt = end;
   while (insertAt > headingIdx + 1 && lines[insertAt - 1].trim() === "") insertAt--;
@@ -663,34 +752,36 @@ function keepMask(records: readonly StoredRecord[], fold: FoldRecord): RecordMas
   return { keep, lines, placeholders, duplicates };
 }
 
-function unchanged(lines: readonly string[]): CleanedRecords {
-  return { content: lines.join("\n"), placeholders: 0, duplicates: 0 };
+function unchanged(lines: readonly string[], eol: string): CleanedRecords {
+  return { content: lines.join(eol), placeholders: 0, duplicates: 0 };
 }
 
 function cleanTable(
   lines: string[],
   fromLine: number,
   limit: number,
+  eol: string,
   recordOf: (row: string) => StoredRecord,
   fold: FoldRecord,
 ): CleanedRecords {
   const table = findTable(lines, fromLine);
   // The separator has to be inside the section: a table further down the file belongs
   // to another section, and deleting rows from it would be deleting someone else's data.
-  if (!table || table.rowStart - 1 >= limit) return unchanged(lines);
+  if (!table || table.rowStart - 1 >= limit) return unchanged(lines, eol);
 
   const rowEnd = Math.min(table.rowEnd, limit);
   const rows = lines.slice(table.rowStart, rowEnd);
   const mask = keepMask(rows.map(recordOf), fold);
   const next = [...lines];
   next.splice(table.rowStart, rows.length, ...mask.lines.filter((_, i) => mask.keep[i]));
-  return { content: next.join("\n"), placeholders: mask.placeholders, duplicates: mask.duplicates };
+  return { content: next.join(eol), placeholders: mask.placeholders, duplicates: mask.duplicates };
 }
 
 function cleanBullets(
   lines: string[],
   headingIdx: number,
   limit: number,
+  eol: string,
   textOf: (bullet: string) => string,
   fold: FoldRecord,
 ): CleanedRecords {
@@ -710,7 +801,7 @@ function cleanBullets(
   for (const [n, i] of bulletIdx.entries()) next[i] = mask.lines[n];
   const drop = new Set(bulletIdx.filter((_, n) => !mask.keep[n]));
   return {
-    content: next.filter((_, i) => !drop.has(i)).join("\n"),
+    content: next.filter((_, i) => !drop.has(i)).join(eol),
     placeholders: mask.placeholders,
     duplicates: mask.duplicates,
   };
@@ -740,7 +831,8 @@ function foldNothing(): null {
  * "## Impact Timeline Notes" is never mistaken for the timeline.
  */
 function cleanVaultRecords(content: string, kind: VaultRecordKind): CleanedRecords {
-  const lines = content.split("\n");
+  const eol = detectEol(content);
+  const lines = toLines(content);
   const liveEnd = liveRegionEnd(lines);
 
   switch (kind) {
@@ -751,6 +843,7 @@ function cleanVaultRecords(content: string, kind: VaultRecordKind): CleanedRecor
         lines,
         0,
         liveEnd,
+        eol,
         (row) => {
           const item = rowCell(row, MEMORY_ITEM_COLUMN);
           return { line: row, identity: item, value: item };
@@ -760,7 +853,7 @@ function cleanVaultRecords(content: string, kind: VaultRecordKind): CleanedRecor
 
     case "impact-log": {
       const headingIdx = findExactHeading(lines, IMPACT_TIMELINE_HEADING, liveEnd);
-      if (headingIdx === -1) return unchanged(lines);
+      if (headingIdx === -1) return unchanged(lines, eol);
       // Identity is the date and the achievement together, but only the achievement
       // decides whether the row says anything: a date in front of "(none)" would
       // otherwise make the placeholder row look like real content.
@@ -768,6 +861,7 @@ function cleanVaultRecords(content: string, kind: VaultRecordKind): CleanedRecor
         lines,
         headingIdx,
         sectionScope(lines, headingIdx, liveEnd),
+        eol,
         (row) => ({
           line: row,
           identity: `${rowCell(row, 0)} ${rowCell(row, 1)}`,
@@ -779,14 +873,14 @@ function cleanVaultRecords(content: string, kind: VaultRecordKind): CleanedRecor
 
     case "work-context": {
       const headingIdx = findExactHeading(lines, ORG_NOTES_HEADING, liveEnd);
-      if (headingIdx === -1) return unchanged(lines);
-      return cleanBullets(lines, headingIdx, liveEnd, orgNoteText, foldNoteSource);
+      if (headingIdx === -1) return unchanged(lines, eol);
+      return cleanBullets(lines, headingIdx, liveEnd, eol, orgNoteText, foldNoteSource);
     }
 
     case "my-profile": {
       const headingIdx = findExactHeading(lines, KEY_STRENGTHS_HEADING, liveEnd);
-      if (headingIdx === -1) return unchanged(lines);
-      return cleanBullets(lines, headingIdx, liveEnd, (bullet) => bullet.slice(2), foldNothing);
+      if (headingIdx === -1) return unchanged(lines, eol);
+      return cleanBullets(lines, headingIdx, liveEnd, eol, (bullet) => bullet.slice(2), foldNothing);
     }
   }
 }
