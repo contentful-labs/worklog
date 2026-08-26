@@ -86,3 +86,41 @@ describe("thresholds", () => {
     expect(score).toBeGreaterThanOrEqual(PROSE_SIMILARITY_THRESHOLD);
   });
 });
+
+describe("contractions", () => {
+  const affirmative = "Release trains ship on Tuesdays";
+
+  it("reads a contracted negation as a negation", () => {
+    for (const negated of [
+      "Release trains don't ship on Tuesdays",
+      "Release trains don’t ship on Tuesdays",
+      "Release trains aren't shipping on Tuesdays",
+      "Release trains won't ship on Tuesdays",
+      "Release trains can't ship on Tuesdays",
+    ]) {
+      expect(textSimilarity(affirmative, negated), negated).toBe(0);
+    }
+  });
+
+  it("expands every negated contraction the model writes", () => {
+    for (const [contracted, expected] of [
+      ["don't", "do not"],
+      ["doesn't", "does not"],
+      ["isn't", "is not"],
+      ["can't", "ca not"],
+      ["won't", "wo not"],
+      ["didn't", "did not"],
+      ["aren't", "are not"],
+      ["wasn't", "was not"],
+      ["weren't", "were not"],
+      ["shouldn't", "should not"],
+      ["couldn't", "could not"],
+      ["wouldn't", "would not"],
+      ["haven't", "have not"],
+      ["hasn't", "has not"],
+      ["hadn't", "had not"],
+    ]) {
+      expect(normalizeText(contracted), contracted).toBe(expected);
+    }
+  });
+});

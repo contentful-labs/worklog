@@ -43,12 +43,24 @@ export function canonicalText(text: string): string {
   return text.trim().toLowerCase().split(/\s+/).join(" ");
 }
 
+/**
+ * Expand negated contractions so the negation survives punctuation stripping.
+ *
+ * Every one of don't, doesn't, isn't, can't, won't, didn't, aren't, wasn't, weren't,
+ * shouldn't, couldn't, wouldn't, haven't, hasn't and hadn't ends in "n't", so one rule
+ * covers them all. The result is not always English ("ca not"), which does not matter:
+ * what matters is that the word "not" reaches the token set. Curly apostrophes are
+ * folded first, since a note pasted from a word processor carries those.
+ */
+function expandNegatedContractions(text: string): string {
+  return text.split("\u2019").join("'").split("n't").join(" not");
+}
+
 /** Strip markdown down to comparable words. */
 export function normalizeText(text: string): string {
   // Bracket syntax is left to the alphanumeric filter below; only the URL has to go,
   // since otherwise every item carrying a Jira link would look alike.
-  return stripLinkTargets(text)
-    .toLowerCase()
+  return expandNegatedContractions(stripLinkTargets(text).toLowerCase())
     .replace(/[^a-z0-9]+/g, " ")
     .trim();
 }
