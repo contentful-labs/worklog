@@ -2238,14 +2238,14 @@ describe("notes whose bold is not a category label", () => {
     expect(await readFile(path, "utf-8")).toContain("_(TEAM-1200, TEAM-1300)_");
   });
 
-  it("collapses two identical freeform bullets", async () => {
+  it("collapses two freeform bullets that say exactly the same thing", async () => {
     const path = join(tmpDir, "work-context.md");
     await writeFile(path, `# Work Context
 
 ## Organizational Notes
 
 - **Deploy manually** for legacy tenants _(DOC-1)_
-- **Deploy manually** for legacy tenants _(DOC-2)_
+- **Deploy manually** for legacy tenants _(DOC-1)_
 
 ---
 
@@ -2253,9 +2253,27 @@ describe("notes whose bold is not a category label", () => {
 `);
 
     expect((await migrateVaultRecordsFile(path, "work-context"))?.duplicates).toBe(1);
-    const content = await readFile(path, "utf-8");
-    expect(content.match(/Deploy manually/g)).toHaveLength(1);
-    expect(content).toContain("_(DOC-1, DOC-2)_");
+    expect((await readFile(path, "utf-8")).match(/Deploy manually/g)).toHaveLength(1);
+  });
+
+  it("keeps two freeform bullets that differ only in their trailing aside", async () => {
+    const path = join(tmpDir, "work-context.md");
+    const file = `# Work Context
+
+## Organizational Notes
+
+- Deploy on Fridays _(except holidays)_
+- Deploy on Fridays _(including holidays)_
+
+---
+
+*Last updated: 2026-02-01*
+`;
+    await writeFile(path, file);
+
+    // The aside is part of what a freeform bullet says, not evidence for it.
+    expect(await migrateVaultRecordsFile(path, "work-context")).toBeNull();
+    expect(await readFile(path, "utf-8")).toBe(file);
   });
 });
 
@@ -2282,5 +2300,150 @@ describe("a TODO the user wrote themselves", () => {
 
     expect(await updateProfile(path, { achievement: "Note", bulletPoint: "<!-- TODO: verify Q4 promotion evidence -->" }))
       .toMatchObject({ status: "unchanged" });
+  });
+});
+
+describe("bullets that continue on the next line", () => {
+  const CONTINUED = `# My Profile
+
+## Key Strengths
+
+- Leads release reviews
+  for the search platform
+- Leads release reviews
+  for the billing platform
+
+---
+
+*Last updated: 2026-02-01*
+`;
+
+  it("keeps two bullets that begin alike and continue differently", async () => {
+    const path = join(tmpDir, "my-profile.md");
+    await writeFile(path, CONTINUED);
+
+    expect(await migrateVaultRecordsFile(path, "my-profile")).toBeNull();
+    expect(await readFile(path, "utf-8")).toBe(CONTINUED);
+  });
+
+  it("collapses a two-line bullet that repeats in full", async () => {
+    const path = join(tmpDir, "my-profile.md");
+    await writeFile(path, `# My Profile
+
+## Key Strengths
+
+- Leads release reviews
+  for the search platform
+- Leads release reviews
+  for the search platform
+
+---
+
+*Last updated: 2026-02-01*
+`);
+
+    expect((await migrateVaultRecordsFile(path, "my-profile"))?.duplicates).toBe(1);
+
+    const content = await readFile(path, "utf-8");
+    expect(content.match(/Leads release reviews/g)).toHaveLength(1);
+    // The whole item goes, not just its marker line.
+    expect(content.match(/for the search platform/g)).toHaveLength(1);
+  });
+
+  it("reads a continued note as one record", async () => {
+    const path = join(tmpDir, "work-context.md");
+    await writeFile(path, `# Work Context
+
+## Organizational Notes
+
+- **process:** Release trains ship on Tuesdays
+  unless the release captain is away _(TEAM-1200)_
+
+---
+
+*Last updated: 2026-02-01*
+`);
+
+    // The same note in full, so its source folds in rather than a second copy landing.
+    const result = await updateWorkContext(path, [
+      {
+        category: "process",
+        info: "Release trains ship on Tuesdays unless the release captain is away",
+        source: "TEAM-1300",
+      },
+    ], new Date("2026-03-08T00:00:00Z"));
+
+    expect(result).toMatchObject({ status: "written", added: 0, merged: 1 });
+    expect(await readFile(path, "utf-8")).toContain("_(TEAM-1200, TEAM-1300)_");
+  });
+
+  it("refuses the section when an indented line belongs to nothing", async () => {
+    const path = join(tmpDir, "my-profile.md");
+    const file = `# My Profile
+
+## Key Strengths
+
+  a stray indented line
+
+- Untangles flaky test suites other people avoid
+`;
+    await writeFile(path, file);
+
+    expect(await updateProfile(path, { achievement: "Rollout", bulletPoint: "Runs multi-team rollouts" }))
+      .toMatchObject({ status: "no-section" });
+    expect(await migrateVaultRecordsFile(path, "my-profile")).toBeNull();
+    expect(await readFile(path, "utf-8")).toBe(file);
+  });
+});
+
+describe("YAML frontmatter is not structure", () => {
+  it("ignores a heading and a table inside the frontmatter block", async () => {
+    const path = join(tmpDir, "memory.md");
+    await writeFile(path, `---
+title: Memory
+aliases:
+  - "## Previous Team — ARCHIVED"
+notes: |
+  | Date | Item | Category | Notes |
+  |------|------|----------|-------|
+---
+
+# Memory
+
+| Date | Item | Category | Notes |
+|------|------|----------|-------|
+| 2026-03-01 | Wrote the fallback path | project | TEAM-1234 |
+`);
+
+    // Neither the archived-looking alias nor the table in the block may be read as
+    // structure: the row belongs in the real table below them.
+    expect(await updateMemory(path, ["| 2026-03-08 | Cut the index rebuild time | project |  |"], []))
+      .toMatchObject({ status: "written", added: 1 });
+
+    const content = await readFile(path, "utf-8");
+    expect(content).toContain('  - "## Previous Team — ARCHIVED"');
+    expect(content.indexOf("Cut the index rebuild time")).toBeGreaterThan(content.indexOf("# Memory"));
+  });
+
+  it("does not treat a section heading inside frontmatter as the section", async () => {
+    const path = join(tmpDir, "my-profile.md");
+    await writeFile(path, `---
+aliases:
+- "## Key Strengths"
+---
+
+# My Profile
+
+## Key Strengths
+
+- Untangles flaky test suites other people avoid
+`);
+
+    expect(await updateProfile(path, { achievement: "Rollout", bulletPoint: "Runs multi-team rollouts" }))
+      .toMatchObject({ status: "written" });
+
+    const content = await readFile(path, "utf-8");
+    expect(content).toContain('- "## Key Strengths"');
+    expect(content.indexOf("Runs multi-team rollouts")).toBeGreaterThan(content.indexOf("# My Profile"));
   });
 });

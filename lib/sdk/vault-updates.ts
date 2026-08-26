@@ -316,6 +316,26 @@ function rowCell(row: string, index: number): string {
   return splitRow(row)[index] ?? "";
 }
 
+/**
+ * Index of the line closing a leading YAML frontmatter block, or -1 when there is none.
+ * Delimiters sit at column 0; an indented `---` is content inside the block, not its end.
+ *
+ * The same four lines as `frontmatterEnd` in `focus.ts`, which is private to that
+ * module. Duplicated rather than exported so focus tracking keeps its own copy of a
+ * rule it already relies on.
+ */
+function frontmatterEnd(lines: readonly string[]): number {
+  const isDelimiter = (line: string) => line === "---" || line === "---\r";
+  if (!isDelimiter(lines[0] ?? "")) return -1;
+  for (let i = 1; i < lines.length; i++) if (isDelimiter(lines[i])) return i;
+  return -1;
+}
+
+/** First line of the document body. Everything above it is frontmatter, whatever it looks like. */
+function bodyStart(lines: readonly string[]): number {
+  return frontmatterEnd(lines) + 1;
+}
+
 interface Heading {
   level: number;
   /** Canonical heading text: case folded, whitespace collapsed. */
@@ -371,8 +391,10 @@ function isArchivedHeading(line: string): boolean {
  * that has ended, and rewriting it would rewrite history.
  */
 function liveRegionEnd(lines: readonly string[]): number {
-  const idx = lines.findIndex(isArchivedHeading);
-  return idx === -1 ? lines.length : idx;
+  for (let i = bodyStart(lines); i < lines.length; i++) {
+    if (isArchivedHeading(lines[i])) return i;
+  }
+  return lines.length;
 }
 
 /** True where a heading closes the section above it. A subsection does not. */
@@ -397,7 +419,7 @@ function sectionEnd(lines: readonly string[], headingIdx: number): number {
  */
 function findExactHeading(lines: readonly string[], heading: string, limit: number): number {
   const target = h2Text(heading) ?? canonicalText(heading);
-  for (let i = 0; i < limit; i++) {
+  for (let i = bodyStart(lines); i < limit; i++) {
     if (h2Text(lines[i]) === target) return i;
   }
   return -1;
@@ -447,8 +469,55 @@ function toLines(content: string): string[] {
   return content.split("\n").map((line) => (line.endsWith("\r") ? line.slice(0, -1) : line));
 }
 
-function isBullet(line: string): boolean {
-  return line.startsWith("- ");
+const BULLET_MARKER = "- ";
+/** A continuation of a `- ` bullet sits at or past the column its content starts in. */
+const CONTINUATION_INDENT = 2;
+
+interface BulletItem {
+  /** Index of the marker line. */
+  start: number;
+  /** One past the item's last line. */
+  end: number;
+  /** The whole item: the marker line's content, then each continuation, space joined. */
+  text: string;
+}
+
+/**
+ * The bullets between `from` and `to`, each with the indented lines that continue it.
+ *
+ * Reading only the marker line made two bullets that begin the same word for word into
+ * one record, and the cleanup merged both continuations into whichever it kept. An
+ * indented line this cannot attribute to the bullet above it returns null instead, and
+ * the caller leaves the section alone: guessing here deletes what somebody wrote.
+ */
+function readBullets(lines: readonly string[], from: number, to: number): BulletItem[] | null {
+  const items: BulletItem[] = [];
+  let open: BulletItem | null = null;
+
+  for (let i = from; i < to; i++) {
+    const line = lines[i];
+
+    if (line.startsWith(BULLET_MARKER)) {
+      open = { start: i, end: i + 1, text: line.slice(BULLET_MARKER.length).trim() };
+      items.push(open);
+      continue;
+    }
+    if (line.trim().length === 0) {
+      open = null;
+      continue;
+    }
+
+    const indent = line.length - line.trimStart().length;
+    if (indent < CONTINUATION_INDENT) {
+      open = null;
+      continue;
+    }
+    if (!open || open.end !== i) return null;
+    open.end = i + 1;
+    open.text = `${open.text} ${line.trim()}`;
+  }
+
+  return items;
 }
 
 /**
@@ -480,26 +549,28 @@ function stripNoteSource(text: string): string {
  * "**Deploy manually** for legacy tenants" and "**Never deploy manually** for legacy
  * tenants" the same note, and the cleanup deleted the second.
  */
-function parseOrgNote(bullet: string): OrgNote {
-  const body = bullet.slice(2);
+function parseOrgNote(body: string): OrgNote {
   if (body.startsWith("**")) {
     const labelEnd = body.indexOf("**", 2);
     if (labelEnd !== -1 && body.slice(2, labelEnd).trimEnd().endsWith(":")) {
       return { text: stripNoteSource(body.slice(labelEnd + 2)), generated: true };
     }
   }
-  return { text: stripNoteSource(body), generated: false };
+  // A freeform bullet's `_(...)_` is part of what it says, not evidence for it:
+  // "Deploy on Fridays _(except holidays)_" is not the note that says "_(including
+  // holidays)_", and stripping the suffix made them one.
+  return { text: body.trim(), generated: false };
 }
 
 /** What decides whether a note is already in the file. */
-function orgNoteIdentity(bullet: string): string {
-  const note = parseOrgNote(bullet);
+function orgNoteIdentity(body: string): string {
+  const note = parseOrgNote(body);
   return note.generated ? note.text : `${FREEFORM_NOTE}${note.text}`;
 }
 
 /** What decides whether a note says anything at all. */
-function orgNoteText(bullet: string): string {
-  return parseOrgNote(bullet).text;
+function orgNoteText(body: string): string {
+  return parseOrgNote(body).text;
 }
 
 /** The `_(source)_` suffix of an organizational note, or "" when it has none. */
@@ -589,7 +660,7 @@ export async function updateMemory(
   // under an archived heading has no live table: appending there would file this
   // week's work under a team the user left, and a graduation would delete a row from
   // that record.
-  const table = findTableByHeader(lines, 0, liveEnd, MEMORY_HEADER);
+  const table = findTableByHeader(lines, bodyStart(lines), liveEnd, MEMORY_HEADER);
   if (!table) {
     const skipped = itemsToAdd.length + itemsToRemove.length;
     const requested = itemsToRemove.map((removal) => ({ requested: removal, candidate: "" }));
@@ -778,14 +849,14 @@ export async function updateWorkContext(
   if (headingIdx === -1) return writeResult("no-section", { skipped: updates.length });
 
   const end = Math.min(sectionEnd(lines, headingIdx), liveEnd);
-  const bulletLines: number[] = [];
-  for (let i = headingIdx + 1; i < end; i++) if (isBullet(lines[i])) bulletLines.push(i);
+  const bullets = readBullets(lines, headingIdx + 1, end);
+  if (!bullets) return writeResult("no-section", { skipped: updates.length });
 
   // Notes already in the file, then notes queued by this batch. Queued notes stay
   // structured so a later update naming the same fact folds its source into them
   // instead of being dropped.
   const queued: Array<{ category: string; info: string; source: string }> = [];
-  const notes = bulletLines.map((i) => orgNoteIdentity(lines[i]));
+  const notes = bullets.map((bullet) => orgNoteIdentity(bullet.text));
   let changed = false;
   let merged = 0;
   let skipped = 0;
@@ -803,10 +874,12 @@ export async function updateWorkContext(
       continue;
     }
 
-    if (idx < bulletLines.length) {
-      const folded = mergeNoteSource(lines[bulletLines[idx]], update.source);
+    if (idx < bullets.length) {
+      // The source sits at the end of the note, which is its last line.
+      const target = bullets[idx].end - 1;
+      const folded = mergeNoteSource(lines[target], update.source);
       if (folded) {
-        lines[bulletLines[idx]] = folded;
+        lines[target] = folded;
         changed = true;
         merged++;
       } else {
@@ -815,7 +888,7 @@ export async function updateWorkContext(
       continue;
     }
 
-    const note = queued[idx - bulletLines.length];
+    const note = queued[idx - bullets.length];
     const source = mergeCell(note.source, update.source);
     if (source === note.source) skipped++;
     else merged++;
@@ -854,9 +927,11 @@ export async function updateProfile(
   if (headingIdx === -1) return writeResult("no-section", { skipped: 1 });
 
   const end = Math.min(sectionEnd(lines, headingIdx), liveEnd);
-  const existing: string[] = [];
-  for (let i = headingIdx + 1; i < end; i++) if (isBullet(lines[i])) existing.push(lines[i].slice(2));
-  if (findCanonicalIndex(existing, update.bulletPoint) !== -1) return writeResult("unchanged", { skipped: 1 });
+  const bullets = readBullets(lines, headingIdx + 1, end);
+  if (!bullets) return writeResult("no-section", { skipped: 1 });
+  if (findCanonicalIndex(bullets.map((bullet) => bullet.text), update.bulletPoint) !== -1) {
+    return writeResult("unchanged", { skipped: 1 });
+  }
 
   let insertAt = end;
   while (insertAt > headingIdx + 1 && lines[insertAt - 1].trim() === "") insertAt--;
@@ -1047,17 +1122,27 @@ function cleanBullets(
   fold: FoldRecord,
 ): CleanedRecords {
   const end = Math.min(sectionEnd(lines, headingIdx), limit);
-  const bulletIdx: number[] = [];
-  for (let i = headingIdx + 1; i < end; i++) if (isBullet(lines[i])) bulletIdx.push(i);
+  const bullets = readBullets(lines, headingIdx + 1, end);
+  if (!bullets) return unchanged(lines, eol);
 
+  // A note is folded into, and identified by, its whole self; the `_(source)_` a fold
+  // rewrites is on its last line.
   const mask = keepMask(
-    bulletIdx.map((i) => ({ line: lines[i], identity: identityOf(lines[i]), value: contentOf(lines[i]) })),
+    bullets.map((bullet) => ({
+      line: lines[bullet.end - 1],
+      identity: identityOf(bullet.text),
+      value: contentOf(bullet.text),
+    })),
     fold,
   );
 
   const next = [...lines];
-  for (const [n, i] of bulletIdx.entries()) next[i] = mask.lines[n];
-  const drop = new Set(bulletIdx.filter((_, n) => !mask.keep[n]));
+  const drop = new Set<number>();
+  for (const [n, bullet] of bullets.entries()) {
+    next[bullet.end - 1] = mask.lines[n];
+    if (mask.keep[n]) continue;
+    for (let i = bullet.start; i < bullet.end; i++) drop.add(i);
+  }
   return {
     content: next.filter((_, i) => !drop.has(i)).join(eol),
     placeholders: mask.placeholders,
@@ -1099,7 +1184,7 @@ function cleanVaultRecords(content: string, kind: VaultRecordKind): CleanedRecor
       // written.
       return cleanTable(
         lines,
-        0,
+        bodyStart(lines),
         liveEnd,
         eol,
         MEMORY_HEADER,
@@ -1140,8 +1225,8 @@ function cleanVaultRecords(content: string, kind: VaultRecordKind): CleanedRecor
     case "my-profile": {
       const headingIdx = findExactHeading(lines, KEY_STRENGTHS_HEADING, liveEnd);
       if (headingIdx === -1) return unchanged(lines, eol);
-      const strengthText = (bullet: string) => bullet.slice(2);
-      return cleanBullets(lines, headingIdx, liveEnd, eol, strengthText, strengthText, foldNothing);
+      const itself = (text: string) => text;
+      return cleanBullets(lines, headingIdx, liveEnd, eol, itself, itself, foldNothing);
     }
   }
 }
