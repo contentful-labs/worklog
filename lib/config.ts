@@ -74,7 +74,7 @@ export function loadConfig(): WorklogConfig | null {
 
   if (existsSync(CONFIG_FILE)) {
     try {
-      _config = JSON.parse(require("fs").readFileSync(CONFIG_FILE, "utf-8"));
+      _config = expandConfigPaths(JSON.parse(require("fs").readFileSync(CONFIG_FILE, "utf-8")));
       return _config!;
     } catch {
       return null;
@@ -100,10 +100,54 @@ export function saveConfig(config: WorklogConfig): void {
   if (!existsSync(CONFIG_DIR)) {
     mkdirSync(CONFIG_DIR, { recursive: true });
   }
-  require("fs").writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2) + "\n");
-  _config = config;
+  // Stored home-relative, cached expanded: the file stays portable while callers
+  // keep getting absolute paths.
+  require("fs").writeFileSync(CONFIG_FILE, JSON.stringify(contractConfigPaths(config), null, 2) + "\n");
+  _config = expandConfigPaths(config);
 }
 
+
+/**
+ * Expand a leading `~` or `$HOME` to the current home directory.
+ *
+ * Paths in config.json are stored home-relative so the file survives being restored
+ * onto a machine with a different username. Nothing else is touched: a relative path
+ * stays relative, because resolving it here would silently depend on the caller's cwd.
+ */
+export function expandHome(path: string): string {
+  if (path === "~") return homedir();
+  if (path.startsWith("~/")) return join(homedir(), path.slice(2));
+  // biome-ignore lint/suspicious/noTemplateCurlyInString: literal shell syntax, not a template
+  for (const prefix of ["$HOME/", "${HOME}/"]) {
+    if (path.startsWith(prefix)) return join(homedir(), path.slice(prefix.length));
+  }
+  return path;
+}
+
+/** Inverse of expandHome: rewrite a path inside the home directory back to `~/...`. */
+export function contractHome(path: string): string {
+  const home = homedir();
+  if (path === home) return "~";
+  return path.startsWith(`${home}/`) ? `~/${path.slice(home.length + 1)}` : path;
+}
+
+function mapConfigPaths(config: WorklogConfig, transform: (path: string) => string): WorklogConfig {
+  return {
+    ...config,
+    vault: transform(config.vault),
+    career: { ...config.career, careerDocPaths: config.career.careerDocPaths.map(transform) },
+  };
+}
+
+/** Absolute paths for use at runtime. */
+export function expandConfigPaths(config: WorklogConfig): WorklogConfig {
+  return mapConfigPaths(config, expandHome);
+}
+
+/** Home-relative paths for storage on disk. */
+export function contractConfigPaths(config: WorklogConfig): WorklogConfig {
+  return mapConfigPaths(config, contractHome);
+}
 
 export function validateAtlassianUrl(url: string): string | null {
   try {

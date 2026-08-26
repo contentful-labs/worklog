@@ -10,6 +10,8 @@ import {
   validateAtlassianUrl,
   validateEmail,
   validateISODate,
+  expandHome,
+  contractHome,
   parseCommaSeparated,
   parseTicketPrefixes,
   parseReviewCycleDates,
@@ -27,9 +29,9 @@ function cancelGuard(value: unknown): void {
   }
 }
 
-function expandHome(path: string): string {
-  if (path.startsWith("~/")) return join(homedir(), path.slice(2));
-  return resolve(path);
+/** Prompt input may be `~/x`, `$HOME/x`, absolute, or relative to the shell's cwd. */
+function resolveInputPath(path: string): string {
+  return resolve(expandHome(path));
 }
 
 const DEFAULT_VAULT_PATH = "~/Documents/worklog";
@@ -242,7 +244,7 @@ export async function promptVault(
   });
   cancelGuard(vault);
   const selected = (vault as string).trim() || fallbackValue;
-  return expandHome(selected);
+  return resolveInputPath(selected);
 }
 
 export async function promptAI(
@@ -619,7 +621,7 @@ export async function promptCareer(
     skills: parseCommaSeparated((skills as string) || ""),
     growthAreas: parseCommaSeparated((growthAreas as string) || ""),
     careerDocPaths: parseCommaSeparated((careerDocPaths as string) || "").map(
-      expandHome
+      resolveInputPath
     ),
   };
 }
@@ -945,7 +947,7 @@ export async function runInit(options?: { dryRun?: boolean }): Promise<void> {
 
   // --- Outro ---
   p.log.success(`Config saved to ${getConfigPath()}`);
-  const vaultDisplay = vault.replace(homedir(), "~");
+  const vaultDisplay = contractHome(vault);
   p.log.message(`
   Files written to ${vaultDisplay}:
     my-profile.md      — edit to add your title, team, skills
