@@ -76,7 +76,7 @@ export function generateWorkContextDoc(config: WorklogConfig, date?: Date): stri
 **Company:** ${pr.company || todo("update your company")}
 **Team:** ${pr.team || todo("update your team name")}
 **Domain:** ${pr.teamDomain || todo("update your team domain")}
-**Ticket Prefixes:** ${pr.ticketPrefixes.length > 0 ? pr.ticketPrefixes.join(", ") : todo("add your Jira ticket prefixes (e.g. TEAM-)")}
+**Ticket Prefixes:** ${pr.ticketPrefixes.length > 0 ? pr.ticketPrefixes.join(", ") : todo("add your Jira project keys (e.g. TEAM)")}
 
 ## Career Framework
 

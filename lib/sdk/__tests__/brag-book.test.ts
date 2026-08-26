@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseBragBookResult, getPendingFocusItems, parseReviewCycle } from "../brag-book";
+import { parseBragBookResult, parseReviewCycle, ensureBragBookFrontmatter } from "../brag-book";
 
 describe("parseBragBookResult", () => {
   it("returns raw content when no markers present", () => {
@@ -134,7 +134,9 @@ None
     expect(result.profileUpdate).toBeNull();
   });
 
-  it("parses focus items from coaching session", () => {
+  it("ignores focus suggestions in the coaching prose", () => {
+    // The coaching section states the same suggestions for the reader. Parsing it too is
+    // what used to turn two suggestions into four rows a week.
     const raw = `Content
 
 ---
@@ -145,15 +147,13 @@ None
 
 - Ship the auth PR
 - Review team RFC
-1. Prepare demo
 
 <!-- /COACHING_SESSION -->`;
 
-    const result = parseBragBookResult(raw);
-    expect(result.focusItems).toEqual(["Ship the auth PR", "Review team RFC", "Prepare demo"]);
+    expect(parseBragBookResult(raw).focusItems).toEqual([]);
   });
 
-  it("parses focus updates from focus update section", () => {
+  it("parses focus updates keyed by id, and new items only from FOCUS_UPDATE", () => {
     const raw = `Content
 
 ---
@@ -162,10 +162,10 @@ None
 
 ## Focus Items Status
 
-| Week | Item | Status | Notes |
-|------|------|--------|-------|
-| 2026-W09 | Review RFC | completed | Approved |
-| 2026-W09 | Ship auth | ongoing | In review |
+| ID | New Status | Notes |
+|----|------------|-------|
+| 2026-W09.1 | completed | Approved |
+| 2026-W09.2 | ongoing | In review |
 
 ## New Focus Items
 
@@ -174,35 +174,50 @@ None
 <!-- /FOCUS_UPDATE -->`;
 
     const result = parseBragBookResult(raw);
-    expect(result.focusUpdates).toHaveLength(2);
-    expect(result.focusUpdates[0]).toEqual({ week: "2026-W09", item: "Review RFC", status: "completed", notes: "Approved" });
-    expect(result.focusItems).toContain("Write migration docs");
+    expect(result.focusUpdates).toEqual([
+      { id: "2026-W09.1", status: "completed", notes: "Approved" },
+      { id: "2026-W09.2", status: "ongoing", notes: "In review" },
+    ]);
+    expect(result.focusItems).toEqual(["Write migration docs"]);
+  });
+
+  it("drops status rows that are not keyed by a valid id", () => {
+    const raw = `<!-- FOCUS_UPDATE -->
+
+## Focus Items Status
+
+| ID | New Status | Notes |
+|----|------------|-------|
+| Review the RFC | completed | pasted the item text instead of the id |
+| 2026-W09.1 | completed | |
+
+<!-- /FOCUS_UPDATE -->`;
+
+    const result = parseBragBookResult(raw);
+    expect(result.focusUpdates).toEqual([{ id: "2026-W09.1", status: "completed", notes: "" }]);
+  });
+
+  it("ignores the template placeholder lines in New Focus Items", () => {
+    const raw = `<!-- FOCUS_UPDATE -->
+
+## New Focus Items
+
+- Real item
+- (This list is the ONLY place new focus items are recorded.)
+
+<!-- /FOCUS_UPDATE -->`;
+
+    expect(parseBragBookResult(raw).focusItems).toEqual(["Real item"]);
   });
 });
 
-describe("getPendingFocusItems", () => {
-  it("extracts pending items from tracking table", () => {
-    const content = `| Week | Item | Status |
-|------|------|--------|
-| 2026-W08 | Ship auth | completed |
-| 2026-W09 | Write docs | pending |
-| 2026-W09 | Review RFC | pending |`;
-
-    const pending = getPendingFocusItems(content);
-    expect(pending).toHaveLength(2);
-    expect(pending[0]).toEqual({ week: "2026-W09", item: "Write docs" });
+describe("ensureBragBookFrontmatter", () => {
+  it("prepends frontmatter when missing", () => {
+    expect(ensureBragBookFrontmatter("# Brag Book")).toBe("---\ntags:\n  - areas/work\n  - areas/work/brag-book\n---\n\n# Brag Book");
   });
 
-  it("returns empty array when no pending items", () => {
-    const content = `| Week | Item | Status |
-|------|------|--------|
-| 2026-W08 | Ship auth | completed |`;
-
-    expect(getPendingFocusItems(content)).toEqual([]);
-  });
-
-  it("returns empty array for empty content", () => {
-    expect(getPendingFocusItems("No focus items tracked yet.")).toEqual([]);
+  it("leaves existing frontmatter alone", () => {
+    expect(ensureBragBookFrontmatter("---\ntags: []\n---\n# x")).toBe("---\ntags: []\n---\n# x");
   });
 });
 
@@ -221,36 +236,46 @@ describe("parseReviewCycle", () => {
     expect(parseReviewCycle(ctx)).toBeNull();
   });
 
-  it("parses future review cycle", () => {
-    const futureDate = new Date();
-    futureDate.setDate(futureDate.getDate() + 42); // 6 weeks — "attention" range
-    const dateStr = futureDate.toISOString().split("T")[0];
+  const today = new Date("2026-03-01T00:00:00Z");
 
+  it("parses future review cycle", () => {
     const ctx = `## Review Cycle
 
 | Review Type | Date |
 |-------------|------|
-| Year-end | ${dateStr} |`;
+| Year-end | 2026-04-12 |`;
 
-    const result = parseReviewCycle(ctx);
+    const result = parseReviewCycle(ctx, today);
     expect(result).not.toBeNull();
     expect(result!.nextReview).toBe("Year-end");
-    expect(result!.date).toBe(dateStr);
+    expect(result!.date).toBe("2026-04-12");
+    expect(result!.weeksRemaining).toBe(6);
     expect(result!.urgency).toBe("attention");
   });
 
   it("classifies urgent reviews", () => {
-    const futureDate = new Date();
-    futureDate.setDate(futureDate.getDate() + 14);
-    const dateStr = futureDate.toISOString().split("T")[0];
-
     const ctx = `## Review Cycle
 
 | Review Type | Date |
 |-------------|------|
-| Perf review | ${dateStr} |`;
+| Perf review | 2026-03-15 |`;
 
-    const result = parseReviewCycle(ctx);
+    const result = parseReviewCycle(ctx, today);
+    expect(result!.weeksRemaining).toBe(2);
     expect(result!.urgency).toBe("urgent");
+  });
+
+  it("picks the nearest future review and ignores past ones", () => {
+    const ctx = `## Review Cycle
+
+| Review Type | Date |
+|-------------|------|
+| Q4 Check-in | 2025-11-01 |
+| Annual Review | 2026-06-01 |
+| Q1 Check-in | 2026-05-01 |`;
+
+    const result = parseReviewCycle(ctx, today);
+    expect(result!.nextReview).toBe("Q1 Check-in");
+    expect(result!.urgency).toBe("normal");
   });
 });

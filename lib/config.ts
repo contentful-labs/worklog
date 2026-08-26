@@ -138,6 +138,23 @@ export function parseCommaSeparated(input: string): string[] {
     .filter(Boolean);
 }
 
+/**
+ * Jira project keys have no trailing dash, but people type prefixes as "TEAM-".
+ * The sprint JQL is `project in (...)`, which rejects "TEAM-", so strip it.
+ */
+export function normalizeTicketPrefix(prefix: string): string {
+  // Trailing dashes are trimmed by scanning, not by /-+$/, which backtracks
+  // polynomially on long dash runs (CodeQL js/polynomial-redos).
+  const trimmed = prefix.trim();
+  let end = trimmed.length;
+  while (end > 0 && trimmed[end - 1] === "-") end--;
+  return trimmed.slice(0, end).toUpperCase();
+}
+
+export function parseTicketPrefixes(input: string): string[] {
+  return parseCommaSeparated(input).map(normalizeTicketPrefix).filter(Boolean);
+}
+
 export function parseReviewCycleDates(
   input: string
 ): Array<{ type: string; date: string }> {

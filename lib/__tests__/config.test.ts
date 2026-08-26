@@ -4,8 +4,22 @@ import {
   validateEmail,
   validateISODate,
   parseCommaSeparated,
+  parseTicketPrefixes,
+  normalizeTicketPrefix,
   parseReviewCycleDates,
 } from "../config";
+
+describe("normalizeTicketPrefix", () => {
+  it("strips trailing dashes so the value is a valid JQL project key", () => {
+    expect(normalizeTicketPrefix("TEAM-")).toBe("TEAM");
+    expect(normalizeTicketPrefix("team--")).toBe("TEAM");
+    expect(normalizeTicketPrefix(" ops ")).toBe("OPS");
+  });
+
+  it("parseTicketPrefixes normalizes every entry and drops empties", () => {
+    expect(parseTicketPrefixes("TEAM-, core, -")).toEqual(["TEAM", "CORE"]);
+  });
+});
 
 describe("validateAtlassianUrl", () => {
   it("accepts valid atlassian.net URL", () => {

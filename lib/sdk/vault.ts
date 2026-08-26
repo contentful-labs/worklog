@@ -67,6 +67,22 @@ export async function readImpactLog(paths: VaultPaths): Promise<string> {
   return readFileOrDefault(paths.impactLog, "No impact log available.");
 }
 
+/**
+ * Drop table rows whose first cell is an ISO date before `minDate`. Headings, notes,
+ * and table headers stay, so the model still sees the file's structure.
+ * Used to keep memory.md's years of small items out of every weekly prompt.
+ */
+export function dropDatedRowsBefore(content: string, minDate: string): string {
+  return content
+    .split("\n")
+    .filter((line) => {
+      if (!line.startsWith("|")) return true;
+      const first = line.split("|")[1]?.trim() ?? "";
+      return !/^\d{4}-\d{2}-\d{2}$/.test(first) || first >= minDate;
+    })
+    .join("\n");
+}
+
 export async function readCoachPersona(paths: VaultPaths): Promise<string> {
   return readFileOrDefault(paths.coachPersona, "No coach persona defined.");
 }

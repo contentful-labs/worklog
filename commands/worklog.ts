@@ -16,6 +16,7 @@ import {
   readFocusDoc,
   readArchivedFocusDocs,
   readCareerContext,
+  dropDatedRowsBefore,
   getBragBooks,
   readTeamTimeline,
   getTeamForDate,
@@ -27,6 +28,7 @@ import {
 import {
   getWeekNumber,
   weekId,
+  weekIdForDate,
   getWeekStart,
   getWeekEnd,
   formatDuration,
@@ -41,17 +43,35 @@ import {
 import { generateMarkdown } from "../lib/sdk/markdown";
 import {
   parseBragBookResult,
-  getPendingFocusItems,
   parseReviewCycle,
+  ensureBragBookFrontmatter,
 } from "../lib/sdk/brag-book";
+import {
+  selectOpenFocusItems,
+  summarizeFocusHistory,
+  DEFAULT_INJECT_CAP,
+  DEFAULT_LAPSE_AFTER,
+  type FocusItem,
+} from "../lib/sdk/focus";
 import {
   updateMemory,
   updateImpactLog,
   updateWorkContext,
   updateProfile,
   updateFocusTracking,
+  migrateFocusTrackingFile,
 } from "../lib/sdk/vault-updates";
 import { createLogger } from "../lib/sdk/logger";
+
+// Prompt-size guards. Everything older than these windows is still in the vault,
+// it just stops being re-sent to the model every week.
+const MEMORY_WINDOW_WEEKS = 26;
+/** How far back the one-line focus history summary reaches. */
+const FOCUS_SUMMARY_WEEKS = 12;
+
+function weeksBefore(date: Date, weeks: number): Date {
+  return new Date(date.getTime() - weeks * 7 * 24 * 60 * 60 * 1000);
+}
 
 // --- Stats ---
 
@@ -328,11 +348,11 @@ async function buildBragBookPrompt(
   focusHistoryContent: string,
   careerContext: string,
   vaultNotes: Array<{ title: string; excerpt: string }>,
-  pendingFocusItems: Array<{ week: string; item: string }>,
+  openFocusItems: FocusItem[],
+  focusHistorySummary: string,
   reviewInfo: ReturnType<typeof parseReviewCycle>,
   timeline: TeamTimeline,
   weekInfo: WeekInfo | undefined,
-  provider: string,
   config: Parameters<typeof buildConfigContext>[0],
 ): Promise<string> {
   const rawPromptTemplate = await Bun.file(PROMPT_TEMPLATE_PATH).text();
@@ -340,41 +360,11 @@ async function buildBragBookPrompt(
   const currentTeamLabel = teamForWeek?.team ?? "Unknown Team";
   const currentRole = `${config.profile.jobTitle} / ${config.profile.level} (${config.profile.company} - ${currentTeamLabel})`;
 
-  let promptTemplate = fillTemplate(rawPromptTemplate, {
+  const promptTemplate = fillTemplate(rawPromptTemplate, {
     ...buildConfigContext(config),
     current_team: currentTeamLabel,
     current_role: currentRole,
   });
-
-  if (provider === "openai") {
-    promptTemplate = promptTemplate.replace(
-      /<available_research_tools>[\s\S]*?<\/available_research_tools>/,
-      `<available_research_tools>
-You have tool-calling access to research the engineer's work. Use these tools proactively to write richer, more insightful brag book entries and coaching notes.
-
-Available tools:
-- fetchJiraTicket({ ticketKey }) — Fetch full details of a Jira ticket (e.g. "TEAM-1234")
-- fetchConfluencePage({ pageIdOrUrl }) — Fetch a Confluence page by ID or URL
-- searchConfluence({ query }) — Search Confluence for pages matching a query
-- searchJira({ query }) — Search Jira for tickets matching a query
-- readVaultNote({ noteName }) — Read a vault note by name (without .md extension)
-- searchVault({ keyword }) — Search the vault for markdown files containing a keyword
-
-IMPORTANT — proactive research expectations:
-1. When vault_research_notes excerpts are provided, use readVaultNote to read the FULL notes for any that relate to this week's key work themes, coaching, or focus areas. Excerpts are truncated — the full notes contain context you need.
-2. Use searchVault with keywords related to this week's major themes (project names, technologies, team names) to find notes the engineer wrote that weren't auto-discovered.
-3. Use fetchJiraTicket for the most significant tickets this week — especially P0/P1 focus items and anything mentioned in coaching.
-4. When Confluence pages appear in the work log, use fetchConfluencePage to understand what the engineer contributed.
-5. Your coaching and brag book quality directly depends on how well you understand the engineer's actual work — surface-level summaries from ticket titles are not enough.
-
-CRITICAL — ticket status freshness:
-6. ALWAYS use fetchJiraTicket to get the latest status before writing about ANY ticket in the brag book or coaching notes. The work log snapshot may be stale — tickets change status after the data was fetched.
-7. Check ticket comments — they often contain important context: decisions made, blockers raised, scope changes, reviewer feedback, or follow-up actions that the ticket title/description alone won't capture.
-8. If a ticket's current status contradicts what the work log shows (e.g., work log says "In Progress" but ticket is now "Done" or "Won't Do"), use the CURRENT status and adjust your narrative accordingly.
-9. Do NOT describe a ticket as "in progress" or "blocked" if it has since been resolved. Do NOT claim completion if the ticket was reopened or reverted.
-</available_research_tools>`
-    );
-  }
 
   const vaultNotesSection = vaultNotes.length > 0
     ? `\n---\n\n<vault_research_notes>\nThese are work-related notes from the engineer's vault that were created or updated this week.\nThey provide additional context about research, meetings, and work that may not appear in Jira/GitHub/Confluence.\n\n${vaultNotes.map((n) => `### ${n.title}\n${n.excerpt}`).join("\n\n")}\n</vault_research_notes>`
@@ -384,8 +374,8 @@ CRITICAL — ticket status freshness:
     ? `\n---\n\n<review_proximity>\n  <next_review>${reviewInfo.nextReview}</next_review>\n  <date>${reviewInfo.date}</date>\n  <weeks_remaining>${reviewInfo.weeksRemaining}</weeks_remaining>\n  <urgency>${reviewInfo.urgency}</urgency>\n</review_proximity>`
     : "";
 
-  const pendingFocusSection = pendingFocusItems.length > 0
-    ? `\n---\n\n<pending_focus_items>\nReview these items from previous weeks. Check if this week's work addresses them.\nMark as completed/ongoing/dropped in your FOCUS_UPDATE section.\n\n${pendingFocusItems.map((f) => `  - Week ${f.week}: ${f.item}`).join("\n")}\n</pending_focus_items>`
+  const openFocusSection = openFocusItems.length > 0
+    ? `\n---\n\n<open_focus_items>\nCommitments from previous coaching sessions that are still open. Check each against this week's work\nand return a status row for EVERY id in your FOCUS_UPDATE section.\n\n${openFocusItems.map((f) => `  - ${f.id} (week ${f.week}, reviewed ${f.reviews}x): ${f.item}`).join("\n")}\n${focusHistorySummary ? `\n${focusHistorySummary}\n` : ""}</open_focus_items>`
     : "";
 
   const generationContext = (() => {
@@ -451,7 +441,7 @@ ${focusHistoryContent}
 ${careerContext}
 </career_context>
 ${reviewProximitySection}
-${pendingFocusSection}
+${openFocusSection}
 ${vaultNotesSection}
 ---
 ${generationContext}
@@ -484,6 +474,16 @@ export async function runWorklog(opts: {
   const config = requireConfig();
   const paths = buildVaultPaths(config, TEAM_TIMELINE_PATH);
   const timeline = readTeamTimeline(paths);
+
+  // Focus items are keyed by id now; upgrade a pre-id file before anything reads it.
+  const migration = await migrateFocusTrackingFile(paths.focusTracking);
+  if (migration) {
+    p.log.info(
+      `Upgraded focus-tracking.md to id-keyed format: ${migration.assigned} items kept, ` +
+      `${migration.collapsed} duplicates collapsed, ${migration.lapsed} stale items closed. ` +
+      `Backup: ${paths.focusTracking}.pre-ids.bak`,
+    );
+  }
 
   const weeksToGenerate = await getWeeksToGenerate(paths.vault, weeksBack, specificWeek, force, sinceDate);
 
@@ -566,7 +566,7 @@ export async function runWorklog(opts: {
 
     // Load vault context
     log("Loading vault context files...");
-    const [memoryContent, profileContent, workContextContent, impactLogContent, coachPersona, focusTrackingContent, focusDocContent, focusHistoryContent, careerContext, previousBragBooks] = await Promise.all([
+    const [fullMemoryContent, profileContent, workContextContent, impactLogContent, coachPersona, rawFocusTrackingContent, focusDocContent, focusHistoryContent, careerContext, previousBragBooks] = await Promise.all([
       readMemory(paths),
       readProfile(paths),
       readWorkContext(paths),
@@ -578,14 +578,20 @@ export async function runWorklog(opts: {
       readCareerContext(paths),
       getBragBooks(paths, 2, `${wid} Brag Book.md`),
     ]);
-    log(`Vault files loaded — memory: ${memoryContent.length} chars, profile: ${profileContent.length} chars`);
+    const memoryCutoff = weeksBefore(weekInfo.startDate, MEMORY_WINDOW_WEEKS).toISOString().split("T")[0];
+    const memoryContent = dropDatedRowsBefore(fullMemoryContent, memoryCutoff);
+    log(`Vault files loaded — memory: ${memoryContent.length} chars (of ${fullMemoryContent.length}, rows since ${memoryCutoff}), profile: ${profileContent.length} chars`);
 
     const vaultNotes = await discoverWeeklyNotes(config, paths, weekInfo.startDate, weekInfo.endDate);
     log(`Discovered ${vaultNotes.length} weekly vault notes`);
 
-    const pendingFocusItems = getPendingFocusItems(focusTrackingContent);
+    const openFocusItems = selectOpenFocusItems(rawFocusTrackingContent, DEFAULT_INJECT_CAP);
+    const focusHistorySummary = summarizeFocusHistory(
+      rawFocusTrackingContent,
+      weekIdForDate(weeksBefore(weekInfo.startDate, FOCUS_SUMMARY_WEEKS)),
+    );
     const reviewInfo = parseReviewCycle(workContextContent);
-    log(`Pending focus items: ${pendingFocusItems.length}`);
+    log(`Open focus items injected: ${openFocusItems.length}${focusHistorySummary ? ` | ${focusHistorySummary}` : ""}`);
     if (reviewInfo) log(`Review cycle: ${reviewInfo.urgency} — ${reviewInfo.nextReview} in ${reviewInfo.weeksRemaining} weeks`);
 
     // Generate brag book
@@ -595,14 +601,16 @@ export async function runWorklog(opts: {
     const fullPrompt = await buildBragBookPrompt(
       markdown, previousBragBooks, workContextContent, memoryContent, profileContent,
       impactLogContent, coachPersona, focusDocContent, focusHistoryContent,
-      careerContext, vaultNotes, pendingFocusItems, reviewInfo, timeline, weekInfo, provider, config
+      careerContext, vaultNotes, openFocusItems, focusHistorySummary, reviewInfo, timeline, weekInfo, config
     );
     log(`AI query — provider: ${provider}, model: ${config.ai.model ?? "default"}, prompt: ${fullPrompt.length} chars`);
 
     const rawResult = await aiQuery({ prompt: fullPrompt, config, log });
     log(`AI response: ${rawResult.length} chars`);
 
-    const { bragBookContent, itemsToAdd, itemsToRemove, impactLogEntry, workContextUpdates, profileUpdate, focusItems, focusUpdates } = parseBragBookResult(rawResult);
+    const parsed = parseBragBookResult(rawResult);
+    const { itemsToAdd, itemsToRemove, impactLogEntry, workContextUpdates, profileUpdate, focusItems, focusUpdates } = parsed;
+    const bragBookContent = ensureBragBookFrontmatter(parsed.bragBookContent);
     const bragMs = Math.round(performance.now() - bragStart);
     s.stop(`Brag book generated in ${formatDuration(bragMs)}`);
 
@@ -621,9 +629,15 @@ export async function runWorklog(opts: {
     if (impactLogEntry) await updateImpactLog(paths.impactLog, impactLogEntry);
     if (workContextUpdates.length > 0) await updateWorkContext(paths.workContext, workContextUpdates);
     if (profileUpdate) await updateProfile(paths.profile, profileUpdate);
-    if (focusItems.length > 0 || focusUpdates.length > 0) {
-      const weekLabel = `${weekInfo.year}-W${String(weekInfo.weekNumber).padStart(2, "0")}`;
-      await updateFocusTracking(paths.focusTracking, focusItems, focusUpdates, weekLabel);
+    if (focusItems.length > 0 || focusUpdates.length > 0 || openFocusItems.length > 0) {
+      const focusResult = await updateFocusTracking(paths.focusTracking, {
+        focusItems,
+        focusUpdates,
+        reviewedIds: openFocusItems.map((f) => f.id),
+        weekLabel: wid,
+        lapseAfter: DEFAULT_LAPSE_AFTER,
+      });
+      log(`Focus: ${focusResult.resolved} resolved, ${focusResult.lapsed} lapsed, ${focusResult.added} added, ${focusResult.restated} restated`);
     }
 
     const ctxMs = Math.round(performance.now() - ctxStart);

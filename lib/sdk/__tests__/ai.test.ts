@@ -26,6 +26,11 @@ describe("postProcess", () => {
     expect(postProcess(input)).toBe("Some content here");
   });
 
+  it("keeps frontmatter that is already at the start", () => {
+    const input = "---\ntags:\n  - areas/work\n---\n# Brag Book\nBody";
+    expect(postProcess(input)).toBe(input);
+  });
+
   it("picks earliest preamble marker", () => {
     const input = "Preamble text\n# Heading\nBody\n---\nFooter";
     expect(postProcess(input)).toBe("# Heading\nBody\n---\nFooter");

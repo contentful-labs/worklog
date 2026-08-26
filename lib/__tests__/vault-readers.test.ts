@@ -48,15 +48,20 @@ describe("weekId", () => {
 });
 
 describe("getExpectedBragBookWeeks", () => {
+  const now = new Date("2026-03-11T12:00:00Z"); // Wednesday of 2026-W11
+
   it("returns correct number of weeks", () => {
-    // Use a fixed untilDate to avoid test flakiness
-    const result = getExpectedBragBookWeeks(4, undefined, "2026-03-01");
-    expect(result.length).toBeGreaterThanOrEqual(1);
-    expect(result.length).toBeLessThanOrEqual(4);
+    const result = getExpectedBragBookWeeks(4, undefined, "2026-03-01", now);
+    expect(result).toEqual(["2026-W06", "2026-W07", "2026-W08", "2026-W09"]);
+  });
+
+  it("skips the current week when no untilDate is given", () => {
+    const result = getExpectedBragBookWeeks(3, undefined, undefined, now);
+    expect(result).toEqual(["2026-W09", "2026-W10"]);
   });
 
   it("respects sinceDate boundary", () => {
-    const result = getExpectedBragBookWeeks(52, "2026-02-01", "2026-03-01");
+    const result = getExpectedBragBookWeeks(52, "2026-02-01", "2026-03-01", now);
     // Should only span ~4 weeks between Feb 1 and Mar 1
     for (const wid of result) {
       expect(wid >= "2026-W05").toBe(true); // Feb 1 is around W05
@@ -64,7 +69,7 @@ describe("getExpectedBragBookWeeks", () => {
   });
 
   it("respects untilDate boundary", () => {
-    const result = getExpectedBragBookWeeks(4, undefined, "2026-02-15");
+    const result = getExpectedBragBookWeeks(4, undefined, "2026-02-15", now);
     for (const wid of result) {
       expect(wid <= "2026-W07").toBe(true); // Feb 15 is W07
     }

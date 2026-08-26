@@ -27,6 +27,7 @@ export type { VaultPaths, TeamTimelineEntry, TeamTimeline } from "./vault";
 export {
   buildVaultPaths,
   readFileOrDefault,
+  dropDatedRowsBefore,
   readMemory,
   readProfile,
   readWorkContext,
@@ -55,7 +56,19 @@ export { generateMarkdown } from "./markdown";
 
 // Brag book parsing
 export type { BragBookResult, ReviewInfo } from "./brag-book";
-export { parseBragBookResult, getPendingFocusItems, parseReviewCycle } from "./brag-book";
+export { parseBragBookResult, parseReviewCycle, ensureBragBookFrontmatter } from "./brag-book";
+
+// Focus tracking
+export type { FocusItem, FocusStatusUpdate, ApplyFocusOptions, ApplyFocusResult, FocusMigrationResult } from "./focus";
+export {
+  FOCUS_OPEN_STATUS, FOCUS_LAPSED_STATUS, FOCUS_TRACKING_TEMPLATE,
+  DEFAULT_LAPSE_AFTER, DEFAULT_INJECT_CAP,
+  normalizeFocusText, focusSimilarity, parseFocusItems, needsFocusMigration,
+  migrateFocusTracking, selectOpenFocusItems, summarizeFocusHistory, applyFocusUpdates,
+} from "./focus";
+
+// Markdown tables
+export { isTableSeparator, splitRow, escapeCell, renderRow, appendToFirstTable } from "./markdown-table";
 
 // Prep doc generation
 export type { PrepType, PrepContext, PrepOptions } from "./prep";
@@ -65,15 +78,22 @@ export {
 } from "./prep";
 
 // Vault updates
-export { updateMemory, updateImpactLog, updateWorkContext, updateProfile, updateFocusTracking } from "./vault-updates";
+export {
+  updateMemory, updateImpactLog, updateWorkContext, updateProfile,
+  updateFocusTracking, migrateFocusTrackingFile,
+} from "./vault-updates";
 
 // Data fetching
 export type { FetchCredentials, FetchHeaders, WeekInfo, PRReview, FetchedWeekData } from "./data-fetch";
 export {
+  JIRA_ISSUE_FIELDS,
   buildHeaders,
   getAccountId,
   getGitHubUsername,
   searchConfluence,
+  fetchJiraIssues,
+  fetchGitHubPRs,
+  buildTeamSprintJql,
   fetchDataForWeek,
 } from "./data-fetch";
 

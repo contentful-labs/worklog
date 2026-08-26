@@ -1,5 +1,8 @@
 import type { WorklogConfig } from "./types";
 import type { JiraIssue, ConfluencePage, ConfluenceComment, ConfluenceTag, GitHubPR } from "../types";
+import { normalizeTicketPrefix } from "../config";
+
+export const JIRA_ISSUE_FIELDS = ["summary", "status", "created", "updated", "resolutiondate", "description", "priority", "labels", "components", "timetracking", "comment"];
 
 export interface FetchCredentials {
   atlassianApiToken: string;
@@ -95,6 +98,60 @@ export async function searchConfluence<T = Record<string, unknown>>(
   return results;
 }
 
+/** Run a JQL query through Jira's token-paginated search, collecting every page (or up to `limit` issues). */
+export async function fetchJiraIssues(
+  config: WorklogConfig,
+  headers: FetchHeaders,
+  jql: string,
+  fields: string[] = JIRA_ISSUE_FIELDS,
+  opts: { pageSize?: number; limit?: number; onPage?: (count: number) => void } = {},
+): Promise<JiraIssue[]> {
+  const { pageSize = 100, limit, onPage } = opts;
+  let issues: JiraIssue[] = [];
+  let nextPageToken: string | undefined;
+
+  while (true) {
+    const body: Record<string, unknown> = { jql, fields, maxResults: pageSize };
+    if (nextPageToken) body.nextPageToken = nextPageToken;
+
+    const res = await fetch(`${config.atlassian.url}/rest/api/3/search/jql`, {
+      method: "POST",
+      headers: headers.atlassian,
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) throw new Error(`Jira API error ${res.status}: ${await res.text()}`);
+    const data = await res.json();
+    issues = issues.concat(data.issues || []);
+    onPage?.(issues.length);
+    if (!data.nextPageToken || (limit !== undefined && issues.length >= limit)) break;
+    nextPageToken = data.nextPageToken;
+  }
+
+  return issues;
+}
+
+/** Run a GitHub issues search (PRs), collecting every page. */
+export async function fetchGitHubPRs(
+  headers: FetchHeaders,
+  query: string,
+  sort: "created" | "updated" = "created",
+  onPage?: (count: number, total: number) => void,
+): Promise<GitHubPR[]> {
+  let prs: GitHubPR[] = [];
+  let page = 1;
+  while (true) {
+    const url = `https://api.github.com/search/issues?q=${encodeURIComponent(query)}&per_page=100&page=${page}&sort=${sort}&order=desc`;
+    const res = await fetch(url, { headers: headers.github });
+    if (!res.ok) throw new Error(`GitHub API error ${res.status}: ${await res.text()}`);
+    const data = await res.json();
+    prs = prs.concat(data.items || []);
+    onPage?.(prs.length, data.total_count);
+    if (prs.length >= data.total_count) break;
+    page++;
+  }
+  return prs;
+}
+
 export async function fetchDataForWeek(
   config: WorklogConfig,
   headers: FetchHeaders,
@@ -110,25 +167,7 @@ export async function fetchDataForWeek(
 
   // --- Jira issues ---
   const jql = `(assignee = "${email}" OR reporter = "${email}") AND updated >= "${startDate}" AND updated <= "${endDate}" ORDER BY updated DESC`;
-  let issues: JiraIssue[] = [];
-  let nextPageToken: string | undefined;
-  const fields = ["summary", "status", "created", "updated", "resolutiondate", "description", "priority", "labels", "components", "timetracking", "comment"];
-
-  while (true) {
-    const body: Record<string, unknown> = { jql, fields, maxResults: 100 };
-    if (nextPageToken) body.nextPageToken = nextPageToken;
-
-    const res = await fetch(`${config.atlassian.url}/rest/api/3/search/jql`, {
-      method: "POST",
-      headers: headers.atlassian,
-      body: JSON.stringify(body),
-    });
-    if (!res.ok) throw new Error(`Jira API error ${res.status}: ${await res.text()}`);
-    const data = await res.json();
-    issues = issues.concat(data.issues || []);
-    if (!data.nextPageToken) break;
-    nextPageToken = data.nextPageToken;
-  }
+  const issues = await fetchJiraIssues(config, headers, jql);
 
   // --- Confluence pages ---
   const contributorCql = `contributor = "${accountId}" AND type = page AND lastModified >= "${startDate}" AND lastModified <= "${endDate}"`;
@@ -175,34 +214,15 @@ export async function fetchDataForWeek(
 
   // --- GitHub PRs ---
   const ghQuery = `type:pr author:${githubUsername} ${orgFilter} created:${startDate}..${endDate}`;
-  let prs: GitHubPR[] = [];
-  let ghPage = 1;
-  while (true) {
-    const url = `https://api.github.com/search/issues?q=${encodeURIComponent(ghQuery)}&per_page=100&page=${ghPage}&sort=created&order=desc`;
-    const res = await fetch(url, { headers: headers.github });
-    if (!res.ok) throw new Error(`GitHub API error ${res.status}: ${await res.text()}`);
-    const data = await res.json();
-    prs = prs.concat(data.items || []);
-    if (prs.length >= data.total_count) break;
-    ghPage++;
-  }
+  const prs = await fetchGitHubPRs(headers, ghQuery, "created");
 
   // --- GitHub PR Reviews ---
   const reviews: PRReview[] = [];
   const authoredUrls = new Set(prs.map(p => p.html_url));
   const reviewQuery = `type:pr reviewed-by:${githubUsername} ${orgFilter} updated:${startDate}..${endDate}`;
 
-  let reviewPRs: GitHubPR[] = [];
-  let rPage = 1;
-  while (true) {
-    const url = `https://api.github.com/search/issues?q=${encodeURIComponent(reviewQuery)}&per_page=100&page=${rPage}&sort=updated&order=desc`;
-    const res = await fetch(url, { headers: headers.github });
-    if (!res.ok) break; // non-fatal
-    const data = await res.json();
-    reviewPRs = reviewPRs.concat(data.items || []);
-    if (reviewPRs.length >= data.total_count) break;
-    rPage++;
-  }
+  // Reviews are supplementary; a failed search shouldn't abort the week.
+  const reviewPRs = await fetchGitHubPRs(headers, reviewQuery, "updated").catch(() => [] as GitHubPR[]);
 
   for (const pr of reviewPRs) {
     if (authoredUrls.has(pr.html_url)) continue;
@@ -242,31 +262,21 @@ export async function fetchDataForWeek(
 
   // --- Team sprint items ---
   let teamSprintItems: JiraIssue[] = [];
-  if (config.profile.ticketPrefixes.length > 0) {
-    const projects = config.profile.ticketPrefixes.join(", ");
-    const sprintJql = `project in (${projects}) AND sprint in openSprints() AND NOT (assignee = "${email}" OR reporter = "${email}") ORDER BY rank ASC`;
-
-    try {
-      let sprintPageToken: string | undefined;
-      while (true) {
-        const body: Record<string, unknown> = { jql: sprintJql, fields: ["summary", "status", "priority", "labels", "components"], maxResults: 50 };
-        if (sprintPageToken) body.nextPageToken = sprintPageToken;
-
-        const res = await fetch(`${config.atlassian.url}/rest/api/3/search/jql`, {
-          method: "POST",
-          headers: headers.atlassian,
-          body: JSON.stringify(body),
-        });
-        if (!res.ok) break; // non-fatal
-        const data = await res.json();
-        teamSprintItems = teamSprintItems.concat(data.issues || []);
-        if (!data.nextPageToken || teamSprintItems.length >= 50) break;
-        sprintPageToken = data.nextPageToken;
-      }
-    } catch {
-      // non-fatal
-    }
+  const projectKeys = config.profile.ticketPrefixes.map(normalizeTicketPrefix).filter(Boolean);
+  if (projectKeys.length > 0) {
+    const sprintJql = buildTeamSprintJql(projectKeys, email);
+    // Sprint context is supplementary; a failed query shouldn't abort the week.
+    teamSprintItems = await fetchJiraIssues(
+      config, headers, sprintJql,
+      ["summary", "status", "priority", "labels", "components"],
+      { pageSize: 50, limit: 50 },
+    ).catch(() => []);
   }
 
   return { issues, pages, prs, reviews, teamSprintItems };
+}
+
+/** Open-sprint items in the team's projects that aren't the engineer's own. */
+export function buildTeamSprintJql(projectKeys: string[], email: string): string {
+  return `project in (${projectKeys.join(", ")}) AND sprint in openSprints() AND NOT (assignee = "${email}" OR reporter = "${email}") ORDER BY rank ASC`;
 }

@@ -17,14 +17,15 @@ import {
 } from "../lib/sdk/vault";
 import { getExpectedBragBookWeeks } from "../lib/sdk/week-utils";
 import { aiQuery } from "../lib/sdk/ai";
-import { fillTemplate, buildConfigContext } from "../lib/sdk/template";
 
 import {
   PREP_TYPES,
   DEFAULT_WEEKS,
   OUTPUT_PREFIX,
-  PROMPT_FILE,
-  getDateRange,
+  buildPrepPrompt,
+  getPromptFile,
+  ensureFrontmatter,
+  buildOutputFilename,
   type PrepType,
 } from "../lib/sdk/prep";
 
@@ -112,42 +113,29 @@ export async function runPrep(opts: {
     process.exit(1);
   }
 
-  const promptFile =
-    type === "self-review" && extended ? "prep-self-review-extended.md" : PROMPT_FILE[type];
-  const promptPath = new URL(`../prompts/${promptFile}`, import.meta.url).pathname;
-  const rawTemplate = await Bun.file(promptPath).text();
-
-  const dateRange = getDateRange(weeks, sinceDate, untilDate);
-  const timeline = readTeamTimeline(paths);
-  const teamTimeline = formatTeamTimelineForPrompt(timeline);
+  const promptPath = new URL(`../prompts/${getPromptFile(type, extended)}`, import.meta.url).pathname;
   const writingStylePath = new URL("../prompts/_writing-style.md", import.meta.url).pathname;
-  const writingStyle = await Bun.file(writingStylePath).text();
+  const [rawTemplate, writingStyle] = await Promise.all([
+    Bun.file(promptPath).text(),
+    Bun.file(writingStylePath).text(),
+  ]);
 
-  const prompt = fillTemplate(rawTemplate, {
-    ...buildConfigContext(config),
-    date_range: dateRange,
-    profile,
-    work_context: workContext,
-    career_context: careerContext,
-    focus_doc: focusDoc,
-    brag_books: bragBooks,
-    impact_log: impactLog,
-    focus_tracking: focusTracking,
-    memory,
-    team_timeline: teamTimeline,
-    writing_style: writingStyle,
-  });
+  const prompt = buildPrepPrompt(
+    config,
+    { type, weeks, sinceDate, untilDate, extended },
+    {
+      bragBooks, profile, workContext, careerContext, focusDoc, impactLog, focusTracking, memory,
+      teamTimeline: formatTeamTimelineForPrompt(readTeamTimeline(paths)),
+      writingStyle,
+    },
+    rawTemplate,
+  );
 
   s.start("Generating...");
-  let result = await aiQuery({ prompt, config });
+  const result = ensureFrontmatter(await aiQuery({ prompt, config }));
   s.stop("Generated");
 
-  if (!result.startsWith("---")) {
-    result = `---\ntags:\n  - areas/work\n---\n\n${result}`;
-  }
-
-  const today = new Date().toISOString().split("T")[0];
-  const filename = `${OUTPUT_PREFIX[type]} ${today}.md`;
+  const filename = buildOutputFilename(type);
   const outputPath = `${paths.vault}/${filename}`;
 
   await Bun.write(outputPath, result);
@@ -156,8 +144,7 @@ export async function runPrep(opts: {
   if (richText) {
     const { markdownToDocx } = await import("../lib/markdown-to-docx");
     const docxBuffer = await markdownToDocx(result);
-    const docxFilename = `${OUTPUT_PREFIX[type]} ${today}.docx`;
-    const docxPath = `${paths.vault}/${docxFilename}`;
+    const docxPath = `${paths.vault}/${filename.replace(/\.md$/, ".docx")}`;
     await Bun.write(docxPath, docxBuffer);
     p.log.success(`Rich text: ${docxPath}`);
   }

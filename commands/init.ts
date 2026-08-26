@@ -11,6 +11,7 @@ import {
   validateEmail,
   validateISODate,
   parseCommaSeparated,
+  parseTicketPrefixes,
   parseReviewCycleDates,
   CONFIG_DIR,
   TEAM_TIMELINE_PATH,
@@ -508,7 +509,7 @@ export async function promptProfile(
   cancelGuard(teamDomain);
 
   const ticketPrefixes = await p.text({
-    message: "Jira ticket prefix(es) (comma-sep, e.g. TEAM-):",
+    message: "Jira project key(s) (comma-sep, e.g. TEAM):",
     initialValue: initial?.ticketPrefixes?.join(", "),
   });
   cancelGuard(ticketPrefixes);
@@ -525,7 +526,7 @@ export async function promptProfile(
     domain: (domain as string).trim(),
     team: (team as string).trim(),
     teamDomain: (teamDomain as string).trim(),
-    ticketPrefixes: parseCommaSeparated((ticketPrefixes as string) || ""),
+    ticketPrefixes: parseTicketPrefixes((ticketPrefixes as string) || ""),
   };
 }
 
@@ -668,7 +669,7 @@ export async function promptTeamHistory(
     cancelGuard(end);
 
     const prefixes = await p.text({
-      message: "Ticket prefixes (comma-sep, or Enter to skip):",
+      message: "Jira project key(s) (comma-sep, e.g. TEAM, or Enter to skip):",
     });
     cancelGuard(prefixes);
 
@@ -682,7 +683,7 @@ export async function promptTeamHistory(
       domain: (domain as string).trim() || null,
       start: (start as string).trim(),
       end: (end as string).trim() || null,
-      ticketPrefixes: parseCommaSeparated((prefixes as string) || ""),
+      ticketPrefixes: parseTicketPrefixes((prefixes as string) || ""),
       notes: (notes as string).trim() || null,
     });
 
