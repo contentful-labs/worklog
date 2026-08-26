@@ -59,6 +59,17 @@ function expandNegatedContractions(text: string): string {
 /** Symbols that belong to a name when they are attached to one: c++, c#, f#. */
 const NAME_SYMBOLS = new Set(["+", "#"]);
 
+/**
+ * True for a word that names a particular thing rather than describing one: a version,
+ * a ticket key, a language. A digit or one of the name symbols is what marks it.
+ */
+function namesSomething(word: string): boolean {
+  for (const char of word) {
+    if ((char >= "0" && char <= "9") || NAME_SYMBOLS.has(char)) return true;
+  }
+  return false;
+}
+
 function isWordChar(char: string): boolean {
   return (char >= "a" && char <= "z") || (char >= "0" && char <= "9");
 }
@@ -95,7 +106,14 @@ function toWords(text: string): string {
     }
     out += " ";
   }
-  return out.split(" ").filter((word) => word.length > 0).join(" ");
+  return out
+    .split(" ")
+    .filter((word) => word.length > 0)
+    // A hyphen holds an identifier together (TEAM-1234) and merely joins an ordinary
+    // word (follow-up), where it has to fall away or the hyphenated spelling and the
+    // spaced one stop looking like the same words.
+    .map((word) => (namesSomething(word) ? word : word.split("-").join(" ")))
+    .join(" ");
 }
 
 /** Strip markdown down to comparable words. */
@@ -123,16 +141,13 @@ const STOP_WORDS = new Set([
 const NEGATIONS = new Set(["not", "no", "never", "nor", "cannot", "without"]);
 
 /**
- * A token carrying a digit or a name symbol is what tells two otherwise identical
- * records apart: a version, a ticket number, a language. Never dropped for being short.
+ * A token naming a particular thing is what tells two otherwise identical records
+ * apart: a version, a ticket key, a language. Never dropped for being short. A plain
+ * hyphenated word is not one of these, or "follow-up" would separate two notes that
+ * differ only in how someone spelled it.
  */
 function isDistinguishing(token: string): boolean {
-  for (const char of token) {
-    if ((char >= "0" && char <= "9") || char === "+" || char === "#" || char === "." || char === "-") {
-      return true;
-    }
-  }
-  return false;
+  return namesSomething(token);
 }
 
 function tokenSet(text: string): Set<string> {

@@ -180,3 +180,15 @@ describe("a name on one side only", () => {
     expect(textSimilarity("Ship the TEAM-1234 rollout to every space", "Ship the CORE-1234 rollout to every space")).toBe(0);
   });
 });
+
+describe("hyphens", () => {
+  it("reads a hyphenated word and its spaced spelling as the same words", () => {
+    expect(normalizeText("Follow-up with the platform team")).toBe("follow up with the platform team");
+    expect(textSimilarity("Follow up with the platform team", "Follow-up with the platform team")).toBe(1);
+  });
+
+  it("keeps a ticket key whole", () => {
+    expect(normalizeText("TEAM-1234 and CORE-1234")).toBe("team-1234 and core-1234");
+    expect(textSimilarity("Ship the TEAM-1234 rollout to every space", "Ship the CORE-1234 rollout to every space")).toBe(0);
+  });
+});
