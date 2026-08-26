@@ -13,22 +13,13 @@ vi.mock("@clack/prompts", () => ({
 
 import { promptAtlassian, promptGitHub } from "../init";
 
-type TextOptions = {
-  message: string;
-  placeholder?: string;
-  initialValue?: string;
-  validate?: (value: string | undefined) => string | undefined;
-};
-
-const mockedText = vi.mocked(p.text) as unknown as {
-  mockImplementation: (fn: (opts: TextOptions) => Promise<string>) => void;
-};
+type TextOptions = Parameters<typeof p.text>[0];
 
 const seen: TextOptions[] = [];
 
 /** Answer each prompt by its message text; anything unanswered comes back as an empty input. */
 function answer(answers: Record<string, string>): void {
-  mockedText.mockImplementation(async (opts: TextOptions) => {
+  vi.mocked(p.text).mockImplementation(async (opts) => {
     seen.push(opts);
     return answers[opts.message] ?? "";
   });

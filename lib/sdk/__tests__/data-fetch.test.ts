@@ -127,6 +127,20 @@ const handlers = [
   }),
 ];
 
+/** Answers the authored-PR search with nothing and the reviewed-by search with one PR by someone else. */
+const reviewedPRHandler = http.get("https://api.github.com/search/issues", ({ request }) => {
+  const q = new URL(request.url).searchParams.get("q") || "";
+  if (q.includes("reviewed-by:")) {
+    return HttpResponse.json({
+      total_count: 1,
+      items: [
+        { number: 7, title: "Their change", state: "open", created_at: "2026-03-03", updated_at: "2026-03-04", html_url: "https://github.com/test-org/repo/pull/7", repository_url: "https://api.github.com/repos/test-org/repo", user: { login: "otheruser" } },
+      ],
+    });
+  }
+  return HttpResponse.json({ total_count: 0, items: [] });
+});
+
 const server = setupServer(...handlers);
 
 beforeAll(() => server.listen({ onUnhandledRequest: "error" }));
@@ -298,6 +312,64 @@ describe("fetchDataForWeek", () => {
     });
 
     expect(warnings.some((w) => w.includes("GitHub reviewed-PR search failed"))).toBe(true);
+    expect(data.reviews).toHaveLength(0);
+  });
+
+  it("warns when a PR's reviews cannot be read", async () => {
+    server.use(
+      reviewedPRHandler,
+      http.get("https://api.github.com/repos/test-org/repo/pulls/7/reviews", () =>
+        HttpResponse.json({ message: "Forbidden" }, { status: 403 }),
+      ),
+    );
+
+    const warnings: string[] = [];
+    const h = buildHeaders(mockConfig, mockCreds);
+    const data = await fetchDataForWeek(mockConfig, h, "abc123", "testuser", weekInfo, {
+      onWarning: (message) => warnings.push(message),
+    });
+
+    expect(warnings.some((w) => w.includes("Could not read reviews for test-org/repo#7") && w.includes("403"))).toBe(true);
+    expect(data.reviews).toHaveLength(0);
+  });
+
+  it("warns when a PR's review comments cannot be read but still records the review", async () => {
+    server.use(
+      reviewedPRHandler,
+      http.get("https://api.github.com/repos/test-org/repo/pulls/7/reviews", () =>
+        HttpResponse.json([
+          { user: { login: "testuser" }, state: "APPROVED", submitted_at: "2026-03-04", html_url: "https://github.com/test-org/repo/pull/7#r1" },
+        ]),
+      ),
+      http.get("https://api.github.com/repos/test-org/repo/pulls/7/comments", () =>
+        HttpResponse.json({ message: "Server error" }, { status: 500 }),
+      ),
+    );
+
+    const warnings: string[] = [];
+    const h = buildHeaders(mockConfig, mockCreds);
+    const data = await fetchDataForWeek(mockConfig, h, "abc123", "testuser", weekInfo, {
+      onWarning: (message) => warnings.push(message),
+    });
+
+    expect(warnings.some((w) => w.includes("Could not read review comments for test-org/repo#7") && w.includes("500"))).toBe(true);
+    expect(data.reviews).toHaveLength(1);
+    expect(data.reviews[0].comment_count).toBe(0);
+  });
+
+  it("warns when a PR's review fetch throws", async () => {
+    server.use(
+      reviewedPRHandler,
+      http.get("https://api.github.com/repos/test-org/repo/pulls/7/reviews", () => HttpResponse.error()),
+    );
+
+    const warnings: string[] = [];
+    const h = buildHeaders(mockConfig, mockCreds);
+    const data = await fetchDataForWeek(mockConfig, h, "abc123", "testuser", weekInfo, {
+      onWarning: (message) => warnings.push(message),
+    });
+
+    expect(warnings.some((w) => w.includes("Review fetch failed for test-org/repo#7"))).toBe(true);
     expect(data.reviews).toHaveLength(0);
   });
 });

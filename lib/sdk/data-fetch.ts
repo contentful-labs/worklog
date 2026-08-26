@@ -242,7 +242,10 @@ export async function fetchDataForWeek(
 
     try {
       const reviewsRes = await fetch(`https://api.github.com/repos/${repoPath}/pulls/${pr.number}/reviews`, { headers: headers.github });
-      if (!reviewsRes.ok) continue;
+      if (!reviewsRes.ok) {
+        onWarning?.(`Could not read reviews for ${repoPath}#${pr.number}, it will be missing from this week: HTTP ${reviewsRes.status}`);
+        continue;
+      }
       const prReviews = await reviewsRes.json();
       const userReviews = prReviews.filter((r: { user?: { login: string }; state: string; submitted_at: string; html_url: string }) => r.user?.login === githubUsername);
       if (userReviews.length === 0) continue;
@@ -254,6 +257,8 @@ export async function fetchDataForWeek(
       if (commentsRes.ok) {
         const prComments = await commentsRes.json();
         commentCount = prComments.filter((c: { user?: { login: string } }) => c.user?.login === githubUsername).length;
+      } else {
+        onWarning?.(`Could not read review comments for ${repoPath}#${pr.number}, its comment count will read 0: HTTP ${commentsRes.status}`);
       }
 
       reviews.push({
@@ -267,8 +272,8 @@ export async function fetchDataForWeek(
         html_url: latestReview.html_url,
         pr_html_url: pr.html_url,
       });
-    } catch {
-      // skip failed review fetches
+    } catch (err) {
+      onWarning?.(`Review fetch failed for ${repoPath}#${pr.number}, it will be missing from this week: ${String(err)}`);
     }
   }
 
