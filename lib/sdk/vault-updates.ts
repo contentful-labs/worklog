@@ -49,12 +49,14 @@ const LAST_UPDATED_PREFIX = "*Last updated:";
 /** Words the model uses when it means "nothing to record". */
 const PLACEHOLDER_WORDS = new Set(["none", "n a", "na", "nil", "nothing", "tbd", "todo", "unknown"]);
 
-/** Strip the emphasis and list markers around a value so its content can be judged. */
+const DECORATION_CHARS = new Set(["_", "*", "`", " ", "\t"]);
+
+/** Strip the emphasis around a value so its content can be judged. */
 function stripDecoration(text: string): string {
   let start = 0;
   let end = text.length;
-  while (start < end && (text[start] === "_" || text[start] === "*" || text[start] === "`" || text[start] === " " || text[start] === "\t")) start++;
-  while (end > start && (text[end - 1] === "_" || text[end - 1] === "*" || text[end - 1] === "`" || text[end - 1] === " " || text[end - 1] === "\t")) end--;
+  while (start < end && DECORATION_CHARS.has(text[start])) start++;
+  while (end > start && DECORATION_CHARS.has(text[end - 1])) end--;
   return text.slice(start, end);
 }
 
@@ -120,7 +122,7 @@ function findRecordIndex(texts: readonly string[], target: string, excluded: Rea
 }
 
 /** Cell of a table row, or "" when the row is shorter than expected. */
-function cell(row: string, index: number): string {
+function rowCell(row: string, index: number): string {
   return splitRow(row)[index] ?? "";
 }
 
@@ -161,7 +163,7 @@ export async function updateMemory(memoryPath: string, itemsToAdd: string[], ite
   const lines = content.split("\n");
   const table = findTable(lines);
   const rows = table ? lines.slice(table.rowStart, table.rowEnd) : [];
-  const items = rows.map((row) => cell(row, MEMORY_ITEM_COLUMN));
+  const items = rows.map((row) => rowCell(row, MEMORY_ITEM_COLUMN));
 
   // Graduation. The model paraphrases the row it is closing, so matching by
   // `includes()` on its prose almost never landed: 17 hits in 27 weeks.
@@ -180,7 +182,7 @@ export async function updateMemory(memoryPath: string, itemsToAdd: string[], ite
   }
 
   const accept = createRecordFilter(items.filter((_, i) => !graduated.has(i)));
-  const newRows = itemsToAdd.filter((row) => row.includes("|") && accept(cell(row, MEMORY_ITEM_COLUMN)));
+  const newRows = itemsToAdd.filter((row) => row.includes("|") && accept(rowCell(row, MEMORY_ITEM_COLUMN)));
 
   await writeFile(memoryPath, appendToFirstTable(content, newRows), "utf-8");
 }
@@ -195,7 +197,7 @@ export async function updateImpactLog(impactLogPath: string, entry: BragBookResu
   const table = findTable(lines, timelineIdx === -1 ? 0 : timelineIdx);
   if (table) {
     // Same achievement on the same date is the same entry, whatever the wording.
-    const keyOf = (row: string) => `${cell(row, 0)} ${cell(row, 1)}`;
+    const keyOf = (row: string) => `${rowCell(row, 0)} ${rowCell(row, 1)}`;
     const existing = lines.slice(table.rowStart, table.rowEnd).map(keyOf);
     const accept = createRecordFilter(existing);
     if (accept(`${entry.date} ${entry.achievement}`)) {
@@ -341,6 +343,11 @@ interface CleanedRecords extends VaultRecordsMigration {
   content: string;
 }
 
+interface RecordMask extends VaultRecordsMigration {
+  /** Whether each record survives, in file order. */
+  keep: boolean[];
+}
+
 /**
  * Decide which of a file's existing records to keep.
  *
@@ -349,7 +356,7 @@ interface CleanedRecords extends VaultRecordsMigration {
  * merge is not something they can spot afterwards, so the migration only removes what
  * is provably the same record twice.
  */
-function keepMask(keys: readonly string[]): { keep: boolean[]; placeholders: number; duplicates: number } {
+function keepMask(keys: readonly string[]): RecordMask {
   const seen = new Set<string>();
   const keep: boolean[] = [];
   let placeholders = 0;
@@ -407,10 +414,10 @@ function cleanVaultRecords(content: string, kind: VaultRecordKind): CleanedRecor
   switch (kind) {
     case "memory":
       // First table only: the tables below it are archived eras, kept as written.
-      return cleanTable(lines, 0, (row) => cell(row, MEMORY_ITEM_COLUMN));
+      return cleanTable(lines, 0, (row) => rowCell(row, MEMORY_ITEM_COLUMN));
     case "impact-log": {
       const timelineIdx = lines.findIndex((line) => line.startsWith(IMPACT_TIMELINE_HEADING));
-      return cleanTable(lines, timelineIdx === -1 ? 0 : timelineIdx, (row) => `${cell(row, 0)} ${cell(row, 1)}`);
+      return cleanTable(lines, timelineIdx === -1 ? 0 : timelineIdx, (row) => `${rowCell(row, 0)} ${rowCell(row, 1)}`);
     }
     case "work-context":
       return cleanBullets(lines, ORG_NOTES_HEADING, orgNoteText);

@@ -80,8 +80,6 @@ export function appendToFirstTable(content: string, rows: string[]): string {
 }
 
 export interface TableBounds {
-  /** Line index of the `|---|` separator. */
-  separatorIdx: number;
   /** Line index of the first data row. */
   rowStart: number;
   /** One past the last data row. */
@@ -104,5 +102,5 @@ export function findTable(lines: string[], fromLine = 0): TableBounds | null {
 
   let rowEnd = separatorIdx + 1;
   while (rowEnd < lines.length && lines[rowEnd].startsWith("|")) rowEnd++;
-  return { separatorIdx, rowStart: separatorIdx + 1, rowEnd };
+  return { rowStart: separatorIdx + 1, rowEnd };
 }
