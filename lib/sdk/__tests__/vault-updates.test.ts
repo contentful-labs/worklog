@@ -509,7 +509,7 @@ describe("updateProfile record identity", () => {
     expect(await updateProfile(path, {
       achievement: "Test suite cleanup",
       bulletPoint: "  untangles FLAKY test suites   other people avoid",
-    })).toBe("unchanged");
+    })).toMatchObject({ status: "unchanged" });
     expect(await readFile(path, "utf-8")).toBe(CLEAN_PROFILE);
   });
 
@@ -519,7 +519,7 @@ describe("updateProfile record identity", () => {
     expect(await updateProfile(path, {
       achievement: "Test suite cleanup",
       bulletPoint: "Untangles the flaky test suites that other people avoid, then teaches the fix",
-    })).toBe("written");
+    })).toMatchObject({ status: "written" });
 
     const content = await readFile(path, "utf-8");
     expect(content).toContain("- Untangles flaky test suites other people avoid");
@@ -860,7 +860,7 @@ describe("live section bounds", () => {
     const path = join(tmpDir, "impact-log.md");
     await writeFile(path, ARCHIVED_IMPACT_LOG);
 
-    expect(await updateImpactLog(path, IMPACT_ENTRY)).toBe("written");
+    expect(await updateImpactLog(path, IMPACT_ENTRY)).toMatchObject({ status: "written" });
 
     const content = await readFile(path, "utf-8");
     expect(content.indexOf("Search Revamp rollout")).toBeLessThan(content.indexOf("ARCHIVED"));
@@ -882,7 +882,7 @@ describe("live section bounds", () => {
 `;
     await writeFile(path, withoutTimeline);
 
-    expect(await updateImpactLog(path, IMPACT_ENTRY)).toBe("no-section");
+    expect(await updateImpactLog(path, IMPACT_ENTRY)).toMatchObject({ status: "no-section" });
     expect(await readFile(path, "utf-8")).toBe(withoutTimeline);
   });
 
@@ -1232,7 +1232,7 @@ describe("impact heading is matched exactly", () => {
 `;
     await writeFile(path, file);
 
-    expect(await updateImpactLog(path, IMPACT_ENTRY)).toBe("no-section");
+    expect(await updateImpactLog(path, IMPACT_ENTRY)).toMatchObject({ status: "no-section" });
     expect(await readFile(path, "utf-8")).toBe(file);
   });
 
@@ -1252,7 +1252,7 @@ Nothing recorded yet.
 `;
     await writeFile(path, file);
 
-    expect(await updateImpactLog(path, IMPACT_ENTRY)).toBe("no-section");
+    expect(await updateImpactLog(path, IMPACT_ENTRY)).toMatchObject({ status: "no-section" });
     expect(await readFile(path, "utf-8")).toBe(file);
   });
 
@@ -1260,7 +1260,7 @@ Nothing recorded yet.
     const path = join(tmpDir, "impact-log.md");
     await writeFile(path, CLEAN_IMPACT_LOG.replace("## Impact Timeline", "##  Impact  Timeline"));
 
-    expect(await updateImpactLog(path, IMPACT_ENTRY)).toBe("written");
+    expect(await updateImpactLog(path, IMPACT_ENTRY)).toMatchObject({ status: "written" });
     expect(await readFile(path, "utf-8")).toContain("Led the Search Revamp rollout");
   });
 });
@@ -1341,8 +1341,8 @@ describe("the two ways an impact entry is not written", () => {
     const path = join(tmpDir, "impact-log.md");
     await writeFile(path, CLEAN_IMPACT_LOG);
 
-    expect(await updateImpactLog(path, { ...IMPACT_ENTRY, achievement: "(none)" })).toBe("placeholder");
-    expect(await updateImpactLog(path, null)).toBe("placeholder");
+    expect(await updateImpactLog(path, { ...IMPACT_ENTRY, achievement: "(none)" })).toMatchObject({ status: "placeholder" });
+    expect(await updateImpactLog(path, null)).toMatchObject({ status: "placeholder" });
     expect(await readFile(path, "utf-8")).toBe(CLEAN_IMPACT_LOG);
   });
 });
@@ -1482,7 +1482,7 @@ describe("writers require the exact section heading", () => {
     await writeFile(path, file);
 
     expect(await updateProfile(path, { achievement: "Rollout", bulletPoint: "Runs multi-team rollouts" }))
-      .toBe("no-section");
+      .toMatchObject({ status: "no-section" });
     expect(await readFile(path, "utf-8")).toBe(file);
   });
 
@@ -1498,7 +1498,7 @@ describe("writers require the exact section heading", () => {
 
     expect(await updateWorkContext(path, [
       { category: "team", info: "Support rota rotates fortnightly", source: "TEAM-1400" },
-    ], new Date("2026-03-08T00:00:00Z"))).toBe("no-section");
+    ], new Date("2026-03-08T00:00:00Z"))).toMatchObject({ status: "no-section" });
     expect(await readFile(path, "utf-8")).toBe(file);
   });
 
@@ -1507,9 +1507,9 @@ describe("writers require the exact section heading", () => {
     await writeFile(path, CLEAN_PROFILE);
 
     expect(await updateProfile(path, { achievement: "Rollout", bulletPoint: "Runs multi-team rollouts" }))
-      .toBe("written");
+      .toMatchObject({ status: "written" });
     expect(await updateProfile(path, { achievement: "Rollout", bulletPoint: "Runs multi-team rollouts" }))
-      .toBe("unchanged");
+      .toMatchObject({ status: "unchanged" });
   });
 });
 
@@ -1528,7 +1528,7 @@ describe("the archive boundary", () => {
     await writeFile(path, ARCHIVED_ONLY_MEMORY);
 
     expect(await updateMemory(path, ["| 2026-03-08 | Cut the index rebuild time | project |  |"], []))
-      .toBe("no-section");
+      .toMatchObject({ status: "no-section" });
     expect(await readFile(path, "utf-8")).toBe(ARCHIVED_ONLY_MEMORY);
   });
 
@@ -1537,7 +1537,7 @@ describe("the archive boundary", () => {
     await writeFile(path, ARCHIVED_ONLY_MEMORY);
 
     expect(await updateMemory(path, [], ["Fallback path work for the Search Revamp indexer (now part of: shipped it)"]))
-      .toBe("no-section");
+      .toMatchObject({ status: "no-section" });
     expect(await readFile(path, "utf-8")).toBe(ARCHIVED_ONLY_MEMORY);
   });
 
@@ -1545,7 +1545,7 @@ describe("the archive boundary", () => {
     const path = join(tmpDir, "memory.md");
     await writeFile(path, TWO_ERA_MEMORY);
 
-    expect(await updateMemory(path, ["| 2026-03-08 | New item | Fix | |"], [])).toBe("written");
+    expect(await updateMemory(path, ["| 2026-03-08 | New item | Fix | |"], [])).toMatchObject({ status: "written" });
     const content = await readFile(path, "utf-8");
     expect(content.indexOf("New item")).toBeLessThan(content.indexOf("HISTORICAL"));
   });
@@ -1555,7 +1555,7 @@ describe("the archive boundary", () => {
     await writeFile(path, CLEAN_MEMORY);
     const rows = ["| 2026-03-01 | Wrote the fallback path for the Search Revamp indexer | project | TEAM-1234 |"];
 
-    expect(await updateMemory(path, rows, [])).toBe("unchanged");
+    expect(await updateMemory(path, rows, [])).toMatchObject({ status: "unchanged" });
     expect(await readFile(path, "utf-8")).toBe(CLEAN_MEMORY);
   });
 });
@@ -1596,7 +1596,7 @@ describe("impact status lines", () => {
 
     // A rerun of an earlier week. The file already knows about a later impact, and
     // regenerating history must not move the file's idea of "latest" backwards.
-    expect(await updateImpactLog(path, { ...IMPACT_ENTRY, date: "2026-03-05" })).toBe("written");
+    expect(await updateImpactLog(path, { ...IMPACT_ENTRY, date: "2026-03-05" })).toMatchObject({ status: "written" });
 
     const content = await readFile(path, "utf-8");
     expect(content).toContain("| 2026-03-05 | Led the Search Revamp rollout across three teams |");
@@ -1608,9 +1608,9 @@ describe("impact status lines", () => {
     const path = join(tmpDir, "impact-log.md");
     await writeFile(path, CLEAN_IMPACT_LOG);
 
-    expect(await updateImpactLog(path, IMPACT_ENTRY)).toBe("written");
+    expect(await updateImpactLog(path, IMPACT_ENTRY)).toMatchObject({ status: "written" });
     const written = await readFile(path, "utf-8");
-    expect(await updateImpactLog(path, IMPACT_ENTRY)).toBe("unchanged");
+    expect(await updateImpactLog(path, IMPACT_ENTRY)).toMatchObject({ status: "unchanged" });
     expect(await readFile(path, "utf-8")).toBe(written);
   });
 });
@@ -1629,7 +1629,7 @@ describe("heading level", () => {
     await writeFile(path, file);
 
     expect(await updateProfile(path, { achievement: "Rollout", bulletPoint: "Runs multi-team rollouts" }))
-      .toBe("no-section");
+      .toMatchObject({ status: "no-section" });
     expect(await readFile(path, "utf-8")).toBe(file);
   });
 
@@ -1655,7 +1655,7 @@ describe("heading level", () => {
     await writeFile(path, CLEAN_PROFILE.replace("## Key Strengths", "  ## Key Strengths"));
 
     expect(await updateProfile(path, { achievement: "Rollout", bulletPoint: "Runs multi-team rollouts" }))
-      .toBe("written");
+      .toMatchObject({ status: "written" });
   });
 });
 
@@ -1665,7 +1665,7 @@ describe("text the word scan cannot read", () => {
     await writeFile(path, CLEAN_PROFILE);
 
     expect(isPlaceholder("(技術リード)")).toBe(false);
-    expect(await updateProfile(path, { achievement: "Lead", bulletPoint: "(技術リード)" })).toBe("written");
+    expect(await updateProfile(path, { achievement: "Lead", bulletPoint: "(技術リード)" })).toMatchObject({ status: "written" });
 
     expect(await migrateVaultRecordsFile(path, "my-profile")).toBeNull();
     expect(await readFile(path, "utf-8")).toContain("- (技術リード)");
@@ -1695,7 +1695,7 @@ describe("a source arriving at a note that has none", () => {
 
     expect(await updateWorkContext(path, [
       { category: "process", info: "Release trains ship on Tuesdays", source: "TEAM-1300" },
-    ], new Date("2026-03-08T00:00:00Z"))).toBe("written");
+    ], new Date("2026-03-08T00:00:00Z"))).toMatchObject({ status: "written" });
 
     expect(await readFile(path, "utf-8"))
       .toContain("- **process:** Release trains ship on Tuesdays _(TEAM-1300)_");
@@ -1744,5 +1744,152 @@ describe("CRLF through the migration", () => {
     const content = await readFile(path, "utf-8");
     expect(content).toContain("_(TEAM-1200, TEAM-1201)_");
     expect(content.split("\n").every((line) => line === "" || line.endsWith("\r"))).toBe(true);
+  });
+});
+
+describe("indented headings still bound a write", () => {
+  it("treats an indented archive heading as the archive", async () => {
+    const path = join(tmpDir, "memory.md");
+    const file = `# Memory
+
+  ## Previous Team (2025) — ARCHIVED
+
+| Date | Item | Category | Notes |
+|------|------|----------|-------|
+| 2025-05-01 | Old item | Fix | |
+`;
+    await writeFile(path, file);
+
+    expect(await updateMemory(path, ["| 2026-03-08 | New item | project |  |"], []))
+      .toMatchObject({ status: "no-section" });
+    expect(await readFile(path, "utf-8")).toBe(file);
+  });
+
+  it("lets an indented heading end the impact timeline section", async () => {
+    const path = join(tmpDir, "impact-log.md");
+    const file = `# Impact Log
+
+## Impact Timeline
+
+Nothing recorded yet.
+
+  ## Metrics
+
+| Metric | Value |
+|--------|-------|
+| Reviews | 4 |
+`;
+    await writeFile(path, file);
+
+    expect(await updateImpactLog(path, IMPACT_ENTRY)).toMatchObject({ status: "no-section" });
+    expect(await readFile(path, "utf-8")).toBe(file);
+  });
+
+  it("does not let a subsection end the section it sits in", async () => {
+    const path = join(tmpDir, "work-context.md");
+    await writeFile(path, `# Work Context
+
+## Organizational Notes
+
+### Current era
+
+- **process:** Release trains ship on Tuesdays _(TEAM-1200)_
+
+---
+
+*Last updated: 2026-02-01*
+`);
+
+    await updateWorkContext(path, [
+      { category: "process", info: "Release trains ship on Tuesdays", source: "TEAM-1300" },
+    ], new Date("2026-03-08T00:00:00Z"));
+
+    // The bullet under the subsection is still part of this section, so the source
+    // folds into it rather than a second copy being written above.
+    const content = await readFile(path, "utf-8");
+    expect(content.match(/ship on Tuesdays/g)).toHaveLength(1);
+    expect(content).toContain("_(TEAM-1200, TEAM-1300)_");
+  });
+});
+
+describe("sentinels are whole phrases", () => {
+  it("keeps text that merely starts with a sentinel's letters", () => {
+    for (const text of [
+      "(Nonetheless shipped the migration)",
+      "(Nothingham office visit write-up)",
+      "(None of the work landed, but the design did)",
+      "(Tbdale platform review)",
+    ]) {
+      expect(isPlaceholder(text), text).toBe(false);
+    }
+  });
+
+  it("still rejects the sentinels themselves", () => {
+    for (const text of ["(none)", "(n/a)", "(tbd)", "(leave blank if none)", "(None configured)"]) {
+      expect(isPlaceholder(text), text).toBe(true);
+    }
+  });
+
+  it("keeps such a strength through the migration", async () => {
+    const path = join(tmpDir, "my-profile.md");
+    const file = `# My Profile
+
+## Key Strengths
+
+- (Nonetheless shipped the migration)
+`;
+    await writeFile(path, file);
+
+    expect(await migrateVaultRecordsFile(path, "my-profile")).toBeNull();
+    expect(await readFile(path, "utf-8")).toBe(file);
+  });
+});
+
+describe("what a batch did", () => {
+  it("counts a repeat and a new record separately", async () => {
+    const path = join(tmpDir, "memory.md");
+    await writeFile(path, CLEAN_MEMORY);
+
+    const result = await updateMemory(path, [
+      "| 2026-03-08 | Wrote the fallback path for the Search Revamp indexer | project | TEAM-1234, TEAM-1240 |",
+      "| 2026-03-08 | Cut the search index rebuild from 40 to 12 minutes | project | TEAM-1250 |",
+      "| 2026-03-08 | (none) | project |  |",
+    ], []);
+
+    expect(result).toEqual({ status: "written", added: 1, removed: 0, merged: 1, skipped: 1 });
+  });
+
+  it("counts the rows a graduation took out", async () => {
+    const path = join(tmpDir, "memory.md");
+    await writeFile(path, CLEAN_MEMORY);
+
+    const result = await updateMemory(path, [], [
+      "Fallback path work for the Search Revamp indexer (now part of: shipped indexer resilience)",
+    ]);
+
+    expect(result).toMatchObject({ status: "written", added: 0, removed: 1 });
+  });
+
+  it("counts a mixed batch of notes", async () => {
+    const path = join(tmpDir, "work-context.md");
+    await writeFile(path, CLEAN_WORK_CONTEXT);
+
+    const result = await updateWorkContext(path, [
+      { category: "process", info: "Release trains ship on Tuesdays", source: "TEAM-1300" },
+      { category: "team", info: "Support rota rotates fortnightly", source: "TEAM-1400" },
+      { category: "team", info: "(none)", source: "unknown" },
+    ], new Date("2026-03-08T00:00:00Z"));
+
+    expect(result).toEqual({ status: "written", added: 1, removed: 0, merged: 1, skipped: 1 });
+  });
+
+  it("reports nothing added when every record was already there", async () => {
+    const path = join(tmpDir, "my-profile.md");
+    await writeFile(path, CLEAN_PROFILE);
+
+    expect(await updateProfile(path, {
+      achievement: "Test suite cleanup",
+      bulletPoint: "Untangles flaky test suites other people avoid",
+    })).toEqual({ status: "unchanged", added: 0, removed: 0, merged: 0, skipped: 1 });
   });
 });

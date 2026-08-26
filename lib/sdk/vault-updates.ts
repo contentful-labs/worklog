@@ -64,11 +64,21 @@ const LAST_UPDATED_PREFIX = "*Last updated:";
 const PLACEHOLDER_WORDS = new Set(["none", "n a", "na", "nil", "nothing", "tbd", "todo", "unknown"]);
 
 /**
- * Openings of the parenthesised asides the prompt and the seed templates use.
- * Only these count: a parenthesised value is not a placeholder by itself, or a real
- * strength such as "(Acting tech lead)" would be thrown away.
+ * The parenthesised asides the prompt and the seed templates use, matched as whole
+ * phrases at a word boundary.
+ *
+ * Only instructions belong here, never a bare word: matching "none" as a prefix threw
+ * away "(Nonetheless shipped the migration)" and "(None of the work landed)". A bare
+ * sentinel is caught by PLACEHOLDER_WORDS instead, which compares the whole value.
  */
-const PLACEHOLDER_PREFIXES = ["leave blank", "added automatically", "none", "nothing", "n a", "tbd", "todo"];
+const PLACEHOLDER_PHRASES = ["leave blank", "added automatically", "none configured"];
+
+/** True when `words` opens with `phrase` and the phrase ends on a word boundary. */
+function opensWithPhrase(words: string, phrase: string): boolean {
+  if (!words.startsWith(phrase)) return false;
+  const next = words[phrase.length];
+  return next === undefined || next === " ";
+}
 
 const DECORATION_CHARS = new Set(["_", "*", "`", " ", "\t"]);
 
@@ -102,7 +112,7 @@ export function isPlaceholder(text: string): boolean {
   const words = normalizeText(inner);
   if (words.length === 0) return false;
   if (PLACEHOLDER_WORDS.has(words)) return true;
-  return parenthesised && PLACEHOLDER_PREFIXES.some((prefix) => words.startsWith(prefix));
+  return parenthesised && PLACEHOLDER_PHRASES.some((phrase) => opensWithPhrase(words, phrase));
 }
 
 /**
@@ -210,9 +220,45 @@ function rowCell(row: string, index: number): string {
   return splitRow(row)[index] ?? "";
 }
 
+interface Heading {
+  level: number;
+  /** Canonical heading text: case folded, whitespace collapsed. */
+  text: string;
+}
+
+/**
+ * Parse an ATX heading, or null when the line is not one.
+ *
+ * Every boundary in this file goes through here. Three of them used to test column
+ * zero with `startsWith`, so the three leading spaces GFM allows were enough to hide
+ * an archived heading from the archive check and stop a section ever ending.
+ */
+function parseHeading(line: string): Heading | null {
+  let i = 0;
+  while (i < 3 && line[i] === " ") i++;
+
+  let level = 0;
+  while (line[i + level] === "#") level++;
+  if (level === 0 || level > 6) return null;
+
+  const rest = line.slice(i + level);
+  // `##text` is not a heading; `##` alone is an empty one.
+  if (rest.length > 0 && rest[0] !== " " && rest[0] !== "\t") return null;
+  return { level, text: canonicalText(rest) };
+}
+
+/** The text of an H2 heading line, or null when the line is not one. */
+function h2Text(line: string): string | null {
+  const heading = parseHeading(line);
+  return heading?.level === 2 ? heading.text : null;
+}
+
 /** True for the heading that opens an archived or historical era. */
 function isArchivedHeading(line: string): boolean {
-  return line.startsWith("##") && (line.includes("ARCHIVED") || line.includes("HISTORICAL"));
+  const heading = parseHeading(line);
+  if (!heading) return false;
+  const words = heading.text.split(" ");
+  return words.includes("archived") || words.includes("historical");
 }
 
 /**
@@ -225,26 +271,18 @@ function liveRegionEnd(lines: readonly string[]): number {
   return idx === -1 ? lines.length : idx;
 }
 
-/** Where a `## ` section ends: the next heading, the closing rule, or end of file. */
-function sectionEnd(lines: readonly string[], headingIdx: number): number {
-  for (let i = headingIdx + 1; i < lines.length; i++) {
-    if (lines[i].startsWith("## ") || lines[i].trim() === "---") return i;
-  }
-  return lines.length;
+/** True where a heading closes the section above it. A subsection does not. */
+function endsSection(line: string): boolean {
+  const heading = parseHeading(line);
+  return heading !== null && heading.level <= 2;
 }
 
-/**
- * The text of an H2 heading line, or null when the line is not one.
- *
- * The level is part of the match: `### Key Strengths` is a subsection of something
- * else, and writing a strength into it, or deleting one from it, is writing into a
- * section this code does not own. GFM allows up to three leading spaces.
- */
-function h2Text(line: string): string | null {
-  let i = 0;
-  while (i < 3 && line[i] === " ") i++;
-  if (line[i] !== "#" || line[i + 1] !== "#" || line[i + 2] !== " ") return null;
-  return canonicalText(line.slice(i + 3));
+/** Where a section ends: the next heading of its own level or higher, a rule, or the end. */
+function sectionEnd(lines: readonly string[], headingIdx: number): number {
+  for (let i = headingIdx + 1; i < lines.length; i++) {
+    if (endsSection(lines[i]) || lines[i].trim() === "---") return i;
+  }
+  return lines.length;
 }
 
 /**
@@ -269,7 +307,7 @@ function findExactHeading(lines: readonly string[], heading: string, limit: numb
  */
 function sectionScope(lines: readonly string[], headingIdx: number, limit: number): number {
   for (let i = headingIdx + 1; i < limit; i++) {
-    if (lines[i].startsWith("## ")) return i;
+    if (endsSection(lines[i])) return i;
   }
   return limit;
 }
@@ -355,6 +393,32 @@ function mergeNoteSource(bullet: string, source: string): string | null {
   return merged === stored ? null : `${trimmed.slice(0, start)}_(${merged})_`;
 }
 
+export type VaultWriteStatus = "written" | "unchanged" | "placeholder" | "no-section";
+
+/**
+ * What one batch did to a file.
+ *
+ * The status describes the file; the counts describe the records in the batch, which
+ * is what a run summary needs. A batch of one repeat and one new record is a written
+ * file with one added and one skipped, and reporting it as two updates was how the
+ * weekly summary came to overstate every week's work.
+ */
+export interface VaultWriteResult {
+  status: VaultWriteStatus;
+  /** Records inserted. */
+  added: number;
+  /** Records taken out, which only graduation does. */
+  removed: number;
+  /** Records already present that gained something from this batch. */
+  merged: number;
+  /** Records proposed that changed nothing: placeholders, and repeats with nothing new. */
+  skipped: number;
+}
+
+function writeResult(status: VaultWriteStatus, counts: Partial<Omit<VaultWriteResult, "status">> = {}): VaultWriteResult {
+  return { status, added: 0, removed: 0, merged: 0, skipped: 0, ...counts };
+}
+
 export async function updateMemory(
   memoryPath: string,
   itemsToAdd: string[],
@@ -369,7 +433,7 @@ export async function updateMemory(
   // archived heading has no live table: appending there would file this week's work
   // under a team the user left, and a graduation would delete a row from that record.
   const table = findTable(lines);
-  if (!table || table.rowStart - 1 >= liveEnd) return "no-section";
+  if (!table || table.rowStart - 1 >= liveEnd) return writeResult("no-section", { skipped: itemsToAdd.length });
 
   const rowEnd = Math.min(table.rowEnd, liveEnd);
   const rows = lines.slice(table.rowStart, rowEnd);
@@ -392,13 +456,20 @@ export async function updateMemory(
   // Rows already in the file, then rows queued by this batch, so a repeat inside one
   // batch is folded into the row queued moments earlier rather than added twice.
   const pending = kept.map((row) => rowCell(row, MEMORY_ITEM_COLUMN));
-  let merges = 0;
+  let merged = 0;
+  let skipped = 0;
 
   for (const row of itemsToAdd) {
-    if (!row.includes("|")) continue;
+    if (!row.includes("|")) {
+      skipped++;
+      continue;
+    }
     const incoming = splitRow(row);
     const item = incoming[MEMORY_ITEM_COLUMN] ?? "";
-    if (isPlaceholder(item)) continue;
+    if (isPlaceholder(item)) {
+      skipped++;
+      continue;
+    }
 
     const idx = findCanonicalIndex(pending, item);
     if (idx === -1) {
@@ -409,18 +480,23 @@ export async function updateMemory(
 
     const target = idx < kept.length ? kept : newRows;
     const offset = idx < kept.length ? idx : idx - kept.length;
-    const merged = mergeRowCells(target[offset], incoming, [MEMORY_NOTES_COLUMN]);
-    if (merged) {
-      target[offset] = merged;
-      merges++;
+    const folded = mergeRowCells(target[offset], incoming, [MEMORY_NOTES_COLUMN]);
+    if (folded) {
+      target[offset] = folded;
+      merged++;
+    } else {
+      skipped++;
     }
   }
 
-  if (graduated.size === 0 && newRows.length === 0 && merges === 0) return "unchanged";
+  const counts = { added: newRows.length, removed: graduated.size, merged, skipped };
+  if (counts.added === 0 && counts.removed === 0 && counts.merged === 0) {
+    return writeResult("unchanged", counts);
+  }
 
   lines.splice(table.rowStart, rows.length, ...kept, ...newRows);
   await writeFile(memoryPath, lines.join(eol), "utf-8");
-  return "written";
+  return writeResult("written", counts);
 }
 
 /**
@@ -431,8 +507,6 @@ export async function updateMemory(
  * "no-section" is the file not having the live heading to write under, which is worth
  * telling the user about: the update existed and had nowhere to go.
  */
-export type VaultWriteResult = "written" | "unchanged" | "placeholder" | "no-section";
-
 /** True for a `YYYY-MM-DD` cell, the only thing worth comparing as a date. */
 function isIsoDate(value: string): boolean {
   if (value.length !== 10 || value[4] !== "-" || value[7] !== "-") return false;
@@ -458,7 +532,7 @@ export async function updateImpactLog(
   impactLogPath: string,
   entry: BragBookResult["impactLogEntry"],
 ): Promise<VaultWriteResult> {
-  if (!entry || isPlaceholder(entry.achievement)) return "placeholder";
+  if (!entry || isPlaceholder(entry.achievement)) return writeResult("placeholder", { skipped: entry ? 1 : 0 });
 
   const original = await readFile(impactLogPath, "utf-8");
   const eol = detectEol(original);
@@ -466,14 +540,14 @@ export async function updateImpactLog(
   const liveEnd = liveRegionEnd(lines);
 
   const headingIdx = findExactHeading(lines, IMPACT_TIMELINE_HEADING, liveEnd);
-  if (headingIdx === -1) return "no-section";
+  if (headingIdx === -1) return writeResult("no-section", { skipped: 1 });
 
   // Everything this function touches lives between the heading and the next one. A
   // table further down the file belongs to another section, and an archived era's
   // status lines record what was true when that era ended.
   const scope = sectionScope(lines, headingIdx, liveEnd);
   const table = findTable(lines, headingIdx);
-  if (!table || table.rowStart - 1 >= scope) return "no-section";
+  if (!table || table.rowStart - 1 >= scope) return writeResult("no-section", { skipped: 1 });
 
   const rowEnd = Math.min(table.rowEnd, scope);
   const rows = lines.slice(table.rowStart, rowEnd);
@@ -483,16 +557,21 @@ export async function updateImpactLog(
   const idx = findCanonicalIndex(keys, `${entry.date} ${entry.achievement}`);
 
   let changed = false;
+  const counts = { added: 0, removed: 0, merged: 0, skipped: 0 };
   if (idx === -1) {
     lines.splice(rowEnd, 0, renderRow(incoming));
     rows.push(renderRow(incoming));
+    counts.added = 1;
     changed = true;
   } else {
-    const merged = mergeRowCells(rows[idx], incoming, [IMPACT_SCOPE_COLUMN, IMPACT_VALUE_COLUMN, IMPACT_EVIDENCE_COLUMN]);
-    if (merged) {
-      lines[table.rowStart + idx] = merged;
-      rows[idx] = merged;
+    const folded = mergeRowCells(rows[idx], incoming, [IMPACT_SCOPE_COLUMN, IMPACT_VALUE_COLUMN, IMPACT_EVIDENCE_COLUMN]);
+    if (folded) {
+      lines[table.rowStart + idx] = folded;
+      rows[idx] = folded;
+      counts.merged = 1;
       changed = true;
+    } else {
+      counts.skipped = 1;
     }
   }
 
@@ -509,9 +588,9 @@ export async function updateImpactLog(
     }
   }
 
-  if (!changed) return "unchanged";
+  if (!changed) return writeResult("unchanged", counts);
   await writeFile(impactLogPath, lines.join(eol), "utf-8");
-  return "written";
+  return writeResult("written", counts);
 }
 
 export async function updateWorkContext(
@@ -519,7 +598,7 @@ export async function updateWorkContext(
   updates: BragBookResult["workContextUpdates"],
   now: Date = new Date(),
 ): Promise<VaultWriteResult> {
-  if (updates.length === 0) return "placeholder";
+  if (updates.length === 0) return writeResult("placeholder");
 
   const original = await readFile(workContextPath, "utf-8");
   const eol = detectEol(original);
@@ -529,7 +608,7 @@ export async function updateWorkContext(
   // Exact, like the cleanup: a section merely named like this one belongs to someone
   // else, and notes filed under it are notes the user will not find again.
   const headingIdx = findExactHeading(lines, ORG_NOTES_HEADING, liveEnd);
-  if (headingIdx === -1) return "no-section";
+  if (headingIdx === -1) return writeResult("no-section", { skipped: updates.length });
 
   const end = Math.min(sectionEnd(lines, headingIdx), liveEnd);
   const bulletLines: number[] = [];
@@ -541,9 +620,14 @@ export async function updateWorkContext(
   const queued: Array<{ category: string; info: string; source: string }> = [];
   const notes = bulletLines.map((i) => orgNoteText(lines[i]));
   let changed = false;
+  let merged = 0;
+  let skipped = 0;
 
   for (const update of updates) {
-    if (isPlaceholder(update.info)) continue;
+    if (isPlaceholder(update.info)) {
+      skipped++;
+      continue;
+    }
     const idx = findCanonicalIndex(notes, update.info);
 
     if (idx === -1) {
@@ -553,16 +637,22 @@ export async function updateWorkContext(
     }
 
     if (idx < bulletLines.length) {
-      const merged = mergeNoteSource(lines[bulletLines[idx]], update.source);
-      if (merged) {
-        lines[bulletLines[idx]] = merged;
+      const folded = mergeNoteSource(lines[bulletLines[idx]], update.source);
+      if (folded) {
+        lines[bulletLines[idx]] = folded;
         changed = true;
+        merged++;
+      } else {
+        skipped++;
       }
       continue;
     }
 
     const note = queued[idx - bulletLines.length];
-    note.source = mergeCell(note.source, update.source);
+    const source = mergeCell(note.source, update.source);
+    if (source === note.source) skipped++;
+    else merged++;
+    note.source = source;
   }
 
   if (queued.length > 0) {
@@ -576,16 +666,17 @@ export async function updateWorkContext(
     replaceFirstLine(lines, 0, liveRegionEnd(lines), LAST_UPDATED_PREFIX, `*Last updated: ${stamp}*`);
   }
 
-  if (!changed) return "unchanged";
+  const counts = { added: queued.length, removed: 0, merged, skipped };
+  if (!changed) return writeResult("unchanged", counts);
   await writeFile(workContextPath, lines.join(eol), "utf-8");
-  return "written";
+  return writeResult("written", counts);
 }
 
 export async function updateProfile(
   profilePath: string,
   update: BragBookResult["profileUpdate"],
 ): Promise<VaultWriteResult> {
-  if (!update || isPlaceholder(update.bulletPoint)) return "placeholder";
+  if (!update || isPlaceholder(update.bulletPoint)) return writeResult("placeholder", { skipped: update ? 1 : 0 });
 
   const original = await readFile(profilePath, "utf-8");
   const eol = detectEol(original);
@@ -593,19 +684,19 @@ export async function updateProfile(
   const liveEnd = liveRegionEnd(lines);
 
   const headingIdx = findExactHeading(lines, KEY_STRENGTHS_HEADING, liveEnd);
-  if (headingIdx === -1) return "no-section";
+  if (headingIdx === -1) return writeResult("no-section", { skipped: 1 });
 
   const end = Math.min(sectionEnd(lines, headingIdx), liveEnd);
   const existing: string[] = [];
   for (let i = headingIdx + 1; i < end; i++) if (isBullet(lines[i])) existing.push(lines[i].slice(2));
-  if (findCanonicalIndex(existing, update.bulletPoint) !== -1) return "unchanged";
+  if (findCanonicalIndex(existing, update.bulletPoint) !== -1) return writeResult("unchanged", { skipped: 1 });
 
   let insertAt = end;
   while (insertAt > headingIdx + 1 && lines[insertAt - 1].trim() === "") insertAt--;
   lines.splice(insertAt, 0, `- ${update.bulletPoint}`);
 
   await writeFile(profilePath, lines.join(eol), "utf-8");
-  return "written";
+  return writeResult("written", { added: 1 });
 }
 
 export async function updateFocusTracking(
