@@ -6,9 +6,18 @@
  * placeholder, and applying the same week twice must change nothing. Left ungated that
  * produced 201 `- (none)` rows in my-profile.md and 45 duplicate records elsewhere.
  *
- * One rule decides what is already here: **canonical text equality**. Case and spacing
- * are folded, nothing else. A record that reads like another record but is not the same
- * string is written. That is deliberate and was arrived at the hard way: four review
+ * Two rules decide what happens to an incoming record.
+ *
+ * **What it is**: every cell except the mergeable one. A memory row is its date, item
+ * and category; an impact row is its date, achievement, scope and value; an
+ * organizational note is its category and its text. Change any of those and it is a
+ * different record, not an update to an existing one. Exactly one cell per record is
+ * evidence rather than identity, and only that one merges: memory Notes, impact
+ * Evidence, a note's `_(source)_`.
+ *
+ * **Whether it is already here**: **canonical text equality** over that identity. Case
+ * and spacing are folded, nothing else. A record that reads like another record but is
+ * not the same string is written. That is deliberate and was arrived at the hard way: four review
  * rounds each found a new pair that a similarity score called identical and a reader
  * would not (a fact and its negation, a contraction, C++ against C#, one version
  * against another, a general statement against a specific one). A repeat costs a line;
@@ -57,13 +66,14 @@ const MEMORY_HEADER = ["Date", "Item", "Category", "Notes"];
 const IMPACT_HEADER = ["Date", "Achievement", "Scope", "Core Value", "Evidence"];
 
 /** Column indexes in a memory row: `| Date | Item | Category | Notes |`. */
-const MEMORY_DATE_COLUMN = 0;
 const MEMORY_ITEM_COLUMN = 1;
 const MEMORY_NOTES_COLUMN = 3;
+/** Everything but the Notes is what makes a memory row that row. */
+const MEMORY_IDENTITY_COLUMNS = [0, 1, 2];
 /** Column indexes in an impact row: `| Date | Achievement | Scope | Core Value | Evidence |`. */
-const IMPACT_SCOPE_COLUMN = 2;
-const IMPACT_VALUE_COLUMN = 3;
 const IMPACT_EVIDENCE_COLUMN = 4;
+/** Everything but the Evidence is what makes an impact row that row. */
+const IMPACT_IDENTITY_COLUMNS = [0, 1, 2, 3];
 /** How the prompt asks the model to mark a graduated memory item. */
 const GRADUATION_MARKER = "(now part of";
 
@@ -312,16 +322,29 @@ function findTableByHeader(
   return null;
 }
 
+/** A row's identity: every cell that is not the one designated mergeable. */
+function rowIdentity(row: string, columns: readonly number[]): string {
+  return columns.map((column) => rowCell(row, column)).join(" ");
+}
+
 /**
- * What makes a memory row that row.
+ * What makes a memory row that row: its date, its item and its category.
  *
  * The date is part of it. Memory is where small work accumulates until it adds up to
  * something, and the same task done again next week is another instance of it, not a
  * repeat of the first: collapsing "Reviewed the incident runbook" on two dates into
- * one row loses exactly the evidence the file exists to gather.
+ * one row loses exactly the evidence the file exists to gather. The category is part
+ * of it because filing that work under a different heading is a different claim about
+ * it, and the row that named the category would otherwise swallow the one that
+ * renamed it.
  */
 function memoryIdentity(row: string): string {
-  return `${rowCell(row, MEMORY_DATE_COLUMN)} ${rowCell(row, MEMORY_ITEM_COLUMN)}`;
+  return rowIdentity(row, MEMORY_IDENTITY_COLUMNS);
+}
+
+/** What makes an impact row that row: everything it claims except the evidence for it. */
+function impactIdentity(row: string): string {
+  return rowIdentity(row, IMPACT_IDENTITY_COLUMNS);
 }
 
 /** Cell of a table row, or "" when the row is shorter than expected. */
@@ -629,6 +652,8 @@ function readBullets(lines: readonly string[], from: number, to: number): Bullet
 const FREEFORM_NOTE = "\u0000";
 
 interface OrgNote {
+  /** The category label of a generated bullet, or "" for anything else. */
+  category: string;
   /** The info of a generated bullet, or the whole bullet for anything else. */
   text: string;
   /** True when the bullet has the shape this code writes. */
@@ -654,20 +679,35 @@ function stripNoteSource(text: string): string {
 function parseOrgNote(body: string): OrgNote {
   if (body.startsWith("**")) {
     const labelEnd = body.indexOf("**", 2);
-    if (labelEnd !== -1 && body.slice(2, labelEnd).trimEnd().endsWith(":")) {
-      return { text: stripNoteSource(body.slice(labelEnd + 2)), generated: true };
+    const label = body.slice(2, labelEnd).trimEnd();
+    if (labelEnd !== -1 && label.endsWith(":")) {
+      return {
+        category: label.slice(0, -1).trim(),
+        text: stripNoteSource(body.slice(labelEnd + 2)),
+        generated: true,
+      };
     }
   }
   // A freeform bullet's `_(...)_` is part of what it says, not evidence for it:
   // "Deploy on Fridays _(except holidays)_" is not the note that says "_(including
   // holidays)_", and stripping the suffix made them one.
-  return { text: body.trim(), generated: false };
+  return { category: "", text: body.trim(), generated: false };
 }
 
-/** What decides whether a note is already in the file. */
+/**
+ * What decides whether a note is already in the file.
+ *
+ * The category is part of it: the same fact filed under "policy" is a different note
+ * from the one filed under "process", and identifying by the info alone let whichever
+ * arrived first keep its label and swallow the other.
+ */
+function generatedNoteIdentity(category: string, info: string): string {
+  return `${category}: ${info}`;
+}
+
 function orgNoteIdentity(body: string): string {
   const note = parseOrgNote(body);
-  return note.generated ? note.text : `${FREEFORM_NOTE}${note.text}`;
+  return note.generated ? generatedNoteIdentity(note.category, note.text) : `${FREEFORM_NOTE}${note.text}`;
 }
 
 /** What decides whether a note says anything at all. */
@@ -820,7 +860,7 @@ export async function updateMemory(
       continue;
     }
 
-    const identity = `${incoming[MEMORY_DATE_COLUMN] ?? ""} ${item}`;
+    const identity = rowIdentity(row, MEMORY_IDENTITY_COLUMNS);
     const idx = findCanonicalIndex(pending, identity);
     if (idx === -1) {
       newRows.push(row);
@@ -903,9 +943,10 @@ export async function updateImpactLog(
   const rowEnd = Math.min(table.rowEnd, scope);
   const rows = lines.slice(table.rowStart, rowEnd);
   const incoming = [entry.date, entry.achievement, entry.scope, entry.coreValue, entry.evidence];
-  // Same achievement on the same date is the same entry, whatever the wording.
-  const keys = rows.map((row) => `${rowCell(row, 0)} ${rowCell(row, 1)}`);
-  const idx = findCanonicalIndex(keys, `${entry.date} ${entry.achievement}`);
+  // The same claim on the same date is the same entry; a different scope or value is a
+  // different claim, not more evidence for this one.
+  const keys = rows.map(impactIdentity);
+  const idx = findCanonicalIndex(keys, IMPACT_IDENTITY_COLUMNS.map((column) => incoming[column]).join(" "));
 
   let changed = false;
   const counts = { added: 0, removed: 0, merged: 0, skipped: 0 };
@@ -915,7 +956,7 @@ export async function updateImpactLog(
     counts.added = 1;
     changed = true;
   } else {
-    const folded = mergeRowCells(rows[idx], incoming, [IMPACT_SCOPE_COLUMN, IMPACT_VALUE_COLUMN, IMPACT_EVIDENCE_COLUMN]);
+    const folded = mergeRowCells(rows[idx], incoming, [IMPACT_EVIDENCE_COLUMN]);
     if (folded) {
       lines[table.rowStart + idx] = folded;
       rows[idx] = folded;
@@ -981,11 +1022,12 @@ export async function updateWorkContext(
       skipped++;
       continue;
     }
-    const idx = findCanonicalIndex(notes, update.info);
+    const identity = generatedNoteIdentity(update.category, update.info);
+    const idx = findCanonicalIndex(notes, identity);
 
     if (idx === -1) {
       queued.push({ category: update.category, info: update.info, source: update.source });
-      notes.push(update.info);
+      notes.push(identity);
       continue;
     }
 
@@ -1328,12 +1370,8 @@ function cleanVaultRecords(content: string, kind: VaultRecordKind): CleanedRecor
         sectionScope(scan, headingIdx, liveEnd),
         eol,
         IMPACT_HEADER,
-        (row) => ({
-          line: row,
-          identity: `${rowCell(row, 0)} ${rowCell(row, 1)}`,
-          value: rowCell(row, 1),
-        }),
-        foldRowCells([IMPACT_SCOPE_COLUMN, IMPACT_VALUE_COLUMN, IMPACT_EVIDENCE_COLUMN]),
+        (row) => ({ line: row, identity: impactIdentity(row), value: rowCell(row, 1) }),
+        foldRowCells([IMPACT_EVIDENCE_COLUMN]),
       );
     }
 

@@ -1211,7 +1211,7 @@ describe("migration carries evidence out of the rows it drops", () => {
 | Date | Achievement | Scope | Core Value | Evidence |
 |------|-------------|-------|------------|----------|
 | 2026-03-05 | Led the Search Revamp rollout | org | craft | TEAM-1234 |
-| 2026-03-05 | Led the Search Revamp rollout | | | TEAM-1235 |
+| 2026-03-05 | Led the Search Revamp rollout | org | craft | TEAM-1235 |
 
 **Last significant impact:** 2026-03-05
 **Current gap:** None - recent entry added
@@ -1995,9 +1995,9 @@ describe("markdown escapes survive a merge", () => {
 ${row}
 `);
 
-      // Same item, more evidence: the Notes cell changes and nothing else may.
+      // Same record, more evidence: the Notes cell changes and nothing else may.
       const result = await updateMemory(path, [
-        `| 2026-03-01 | Wrote the fallback path | ignored | TEAM-1234, TEAM-1240 |`,
+        `| 2026-03-01 | Wrote the fallback path | ${cell} | TEAM-1234, TEAM-1240 |`,
       ], []);
       expect(result.merged).toBe(1);
 
@@ -2793,5 +2793,140 @@ ${rule}
       achievement: "Cleanup",
       bulletPoint: "Untangles flaky test suites other people avoid",
     })).toMatchObject({ status: "written" });
+  });
+});
+
+describe("identity is every cell but the mergeable one", () => {
+  const CATEGORISED = `# Memory
+
+| Date | Item | Category | Notes |
+|------|------|----------|-------|
+| 2026-03-01 | Reviewed the incident runbook | support | TEAM-100 |
+`;
+
+  it("writes a row that files the same work under another category", async () => {
+    const path = join(tmpDir, "memory.md");
+    await writeFile(path, CATEGORISED);
+
+    const result = await updateMemory(path, [
+      "| 2026-03-01 | Reviewed the incident runbook | reliability | TEAM-200 |",
+    ], []);
+
+    expect(result).toMatchObject({ status: "written", added: 1, merged: 0 });
+    const content = await readFile(path, "utf-8");
+    expect(content).toContain("| support | TEAM-100 |");
+    expect(content).toContain("| reliability | TEAM-200 |");
+  });
+
+  it("keeps both categories through the cleanup", async () => {
+    const path = join(tmpDir, "memory.md");
+    const file = `${CATEGORISED}| 2026-03-01 | Reviewed the incident runbook | reliability | TEAM-200 |\n`;
+    await writeFile(path, file);
+
+    expect(await migrateVaultRecordsFile(path, "memory")).toBeNull();
+    expect(await readFile(path, "utf-8")).toBe(file);
+  });
+
+  it("still merges the Notes when every other cell agrees", async () => {
+    const path = join(tmpDir, "memory.md");
+    await writeFile(path, CATEGORISED);
+
+    const result = await updateMemory(path, [
+      "| 2026-03-01 | Reviewed the incident runbook | support | TEAM-200 |",
+    ], []);
+
+    expect(result).toMatchObject({ status: "written", added: 0, merged: 1 });
+    expect(await readFile(path, "utf-8")).toContain("| support | TEAM-100, TEAM-200 |");
+  });
+
+  it("writes an impact entry that claims a different scope", async () => {
+    const path = join(tmpDir, "impact-log.md");
+    await writeFile(path, CLEAN_IMPACT_LOG);
+
+    await updateImpactLog(path, IMPACT_ENTRY);
+    const result = await updateImpactLog(path, { ...IMPACT_ENTRY, scope: "team" });
+
+    expect(result).toMatchObject({ status: "written", added: 1, merged: 0 });
+    const content = await readFile(path, "utf-8");
+    expect(content).toContain("| org | craft | TEAM-1234 |");
+    expect(content).toContain("| team | craft | TEAM-1234 |");
+    // The old behaviour merged the scopes into one row reading "org, team".
+    expect(content).not.toContain("org, team");
+  });
+
+  it("writes an impact entry that claims a different core value", async () => {
+    const path = join(tmpDir, "impact-log.md");
+    await writeFile(path, CLEAN_IMPACT_LOG);
+
+    await updateImpactLog(path, IMPACT_ENTRY);
+    const result = await updateImpactLog(path, { ...IMPACT_ENTRY, coreValue: "candour" });
+
+    expect(result).toMatchObject({ status: "written", added: 1 });
+    expect(await readFile(path, "utf-8")).not.toContain("craft, candour");
+  });
+
+  it("keeps two impact rows that differ only in scope through the cleanup", async () => {
+    const path = join(tmpDir, "impact-log.md");
+    const file = `# Impact Log
+
+## Impact Timeline
+
+| Date | Achievement | Scope | Core Value | Evidence |
+|------|-------------|-------|------------|----------|
+| 2026-03-05 | Led the Search Revamp rollout | org | craft | TEAM-1234 |
+| 2026-03-05 | Led the Search Revamp rollout | team | craft | TEAM-1235 |
+
+**Last significant impact:** 2026-03-05
+**Current gap:** None - recent entry added
+`;
+    await writeFile(path, file);
+
+    expect(await migrateVaultRecordsFile(path, "impact-log")).toBeNull();
+    expect(await readFile(path, "utf-8")).toBe(file);
+  });
+
+  it("writes a note filed under a different category", async () => {
+    const path = join(tmpDir, "work-context.md");
+    await writeFile(path, CLEAN_WORK_CONTEXT);
+
+    const result = await updateWorkContext(path, [
+      { category: "policy", info: "Release trains ship on Tuesdays", source: "TEAM-1300" },
+    ], new Date("2026-03-08T00:00:00Z"));
+
+    expect(result).toMatchObject({ status: "written", added: 1, merged: 0 });
+    const content = await readFile(path, "utf-8");
+    expect(content).toContain("- **process:** Release trains ship on Tuesdays _(TEAM-1200)_");
+    expect(content).toContain("- **policy:** Release trains ship on Tuesdays _(TEAM-1300)_");
+  });
+
+  it("keeps both categories of a note through the cleanup", async () => {
+    const path = join(tmpDir, "work-context.md");
+    const file = `# Work Context
+
+## Organizational Notes
+
+- **process:** Release trains ship on Tuesdays _(TEAM-1200)_
+- **policy:** Release trains ship on Tuesdays _(TEAM-1300)_
+
+---
+
+*Last updated: 2026-02-01*
+`;
+    await writeFile(path, file);
+
+    expect(await migrateVaultRecordsFile(path, "work-context")).toBeNull();
+    expect(await readFile(path, "utf-8")).toBe(file);
+  });
+
+  it("still merges the source when the category agrees", async () => {
+    const path = join(tmpDir, "work-context.md");
+    await writeFile(path, CLEAN_WORK_CONTEXT);
+
+    const result = await updateWorkContext(path, [
+      { category: "process", info: "Release trains ship on Tuesdays", source: "TEAM-1300" },
+    ], new Date("2026-03-08T00:00:00Z"));
+
+    expect(result).toMatchObject({ status: "written", added: 0, merged: 1 });
+    expect(await readFile(path, "utf-8")).toContain("_(TEAM-1200, TEAM-1300)_");
   });
 });
