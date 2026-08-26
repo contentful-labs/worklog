@@ -96,6 +96,31 @@ describe("validateBragBookMarkdown", () => {
     expect(() => validateBragBookMarkdown("# Notes\n\n## Stats\n\n- 0")).toThrow(/no achievements section/);
   });
 
+  it("accepts closing hashes, which CommonMark allows and models write", () => {
+    expect(() => validateBragBookMarkdown("# Brag Book #\n\n## Achievements ##\n\n- Shipped auth")).not.toThrow();
+  });
+
+  it("accepts the three spaces of indentation CommonMark allows", () => {
+    expect(() => validateBragBookMarkdown("# Brag Book\n\n   ## Achievements\n\n- Shipped auth")).not.toThrow();
+  });
+
+  it("accepts a setext heading", () => {
+    expect(() => validateBragBookMarkdown("Achievements\n============\n\n- Shipped auth")).not.toThrow();
+  });
+
+  it("accepts a trailing colon", () => {
+    expect(() => validateBragBookMarkdown("# Brag Book\n\n## Achievements:\n\n- Shipped auth")).not.toThrow();
+  });
+
+  it("accepts emphasis inside the heading", () => {
+    expect(() => validateBragBookMarkdown("# Brag Book\n\n## **Achievements**\n\n- Shipped auth")).not.toThrow();
+  });
+
+  it("does not mistake the frontmatter fence for a heading", () => {
+    const withFrontmatter = "---\ntags:\n  - areas/work\n---\n\nJust a sentence, no headings at all.";
+    expect(() => validateBragBookMarkdown(withFrontmatter)).toThrow(/no markdown headings/);
+  });
+
   it("rejects a heading that merely mentions achievements", () => {
     // A substring test would accept this and let a document with no achievements through.
     expect(() => validateBragBookMarkdown("# Brag Book\n\n## Achievement statistics\n\n- 0")).toThrow(

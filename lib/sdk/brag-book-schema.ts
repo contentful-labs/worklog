@@ -22,6 +22,10 @@
  */
 
 import { z } from "zod";
+import { unified } from "unified";
+import remarkParse from "remark-parse";
+import remarkFrontmatter from "remark-frontmatter";
+import type { PhrasingContent } from "mdast";
 
 /** Statuses the coach may return for an open focus item. `pending` is not one: it means unanswered. */
 export const FOCUS_STATUSES = ["completed", "ongoing", "dropped"] as const;
@@ -220,6 +224,49 @@ export const validFocusStatusSchema = z.object({
 export const validNewFocusItemSchema = singleLineText;
 
 /**
+ * Heading text from a markdown document, normalized for comparison.
+ *
+ * Parsed with remark rather than scanned, because the scan this replaced rejected legal
+ * CommonMark that models do write: closing hashes (`## Achievements ##`), up to three
+ * spaces of indentation, and setext underlining. Recognizing valid markdown by hand is
+ * the same mistake this whole phase exists to undo.
+ */
+function documentHeadings(markdown: string): string[] {
+  // Frontmatter is stripped by the plugin; without it the closing `---` of the tags block
+  // can be read as a setext underline and invent a heading.
+  const tree = unified().use(remarkParse).use(remarkFrontmatter).parse(markdown);
+
+  const headings: string[] = [];
+  for (const node of tree.children) {
+    if (node.type !== "heading") continue;
+    headings.push(normalizeHeading(collectText(node.children)));
+  }
+  return headings;
+}
+
+/**
+ * Plain text of a heading, so `## **Achievements**` reads the same as `## Achievements`.
+ *
+ * Four lines against mdast's own union rather than mdast-util-to-string, which reaches
+ * this project only as a transitive dependency of remark.
+ */
+function collectText(nodes: PhrasingContent[]): string {
+  let text = "";
+  for (const node of nodes) {
+    if ("value" in node) text += node.value;
+    else if ("children" in node) text += collectText(node.children);
+  }
+  return text;
+}
+
+/** Models end a heading with a colon often enough that it should not fail a week. */
+function normalizeHeading(text: string): string {
+  let end = text.length;
+  while (end > 0 && text[end - 1] === ":") end--;
+  return text.slice(0, end).trim().toLowerCase();
+}
+
+/**
  * A brag book document good enough to overwrite whatever is already in the vault.
  *
  * This one hard-fails rather than dropping, because the file it replaces is the week's
@@ -229,20 +276,14 @@ export const validNewFocusItemSchema = singleLineText;
  * on validateBragBookMarkdown in brag-book.ts.
  */
 export function bragBookMarkdownProblem(markdown: string): string | null {
-  const trimmed = markdown.trim();
-  if (trimmed === "") return "the model returned an empty brag book document";
+  if (markdown.trim() === "") return "the model returned an empty brag book document";
 
-  const headings = trimmed.split("\n").filter((line) => line.startsWith("# ") || line.startsWith("## "));
+  const headings = documentHeadings(markdown);
   if (headings.length === 0) return "the brag book document has no markdown headings";
 
-  // Exact match on the heading text, not a substring: "## Achievement statistics" is a
-  // stats section, and accepting it would let a document with no achievements through.
-  const hasAchievements = headings.some((line) => {
-    let start = 0;
-    while (start < line.length && line[start] === "#") start++;
-    const text = line.slice(start).trim().toLowerCase();
-    return text === "achievements" || text === "achievement";
-  });
+  // Exact match on the heading text, not a substring: "Achievement statistics" is a stats
+  // section, and accepting it would let a document with no achievements through.
+  const hasAchievements = headings.some((text) => text === "achievements" || text === "achievement");
   if (!hasAchievements) return "the brag book document has no achievements section";
 
   return null;
