@@ -351,14 +351,20 @@ export async function updateMemory(memoryPath: string, itemsToAdd: string[], ite
 }
 
 /**
- * Record one achievement in the impact timeline.
+ * What became of an impact entry.
  *
- * Returns false when there is nothing to record or the live `## Impact Timeline`
- * section is missing, so a caller can warn instead of the row landing in whatever
- * table happened to come first in the file.
+ * "placeholder" is the model having nothing worth recording, which is normal and quiet.
+ * "no-section" is the file not having a live `## Impact Timeline` to write into, which
+ * is worth telling the user about: the entry existed and had nowhere to go.
  */
-export async function updateImpactLog(impactLogPath: string, entry: BragBookResult["impactLogEntry"]): Promise<boolean> {
-  if (!entry || isPlaceholder(entry.achievement)) return false;
+export type ImpactLogResult = "written" | "placeholder" | "no-section";
+
+/** Record one achievement in the impact timeline. */
+export async function updateImpactLog(
+  impactLogPath: string,
+  entry: BragBookResult["impactLogEntry"],
+): Promise<ImpactLogResult> {
+  if (!entry || isPlaceholder(entry.achievement)) return "placeholder";
 
   const original = await readFile(impactLogPath, "utf-8");
   const eol = detectEol(original);
@@ -366,14 +372,14 @@ export async function updateImpactLog(impactLogPath: string, entry: BragBookResu
   const liveEnd = liveRegionEnd(lines);
 
   const headingIdx = findExactHeading(lines, IMPACT_TIMELINE_HEADING, liveEnd);
-  if (headingIdx === -1) return false;
+  if (headingIdx === -1) return "no-section";
 
   // Everything this function touches lives between the heading and the next one. A
   // table further down the file belongs to another section, and an archived era's
   // status lines record what was true when that era ended.
   const scope = sectionScope(lines, headingIdx, liveEnd);
   const table = findTable(lines, headingIdx);
-  if (!table || table.rowStart - 1 >= scope) return false;
+  if (!table || table.rowStart - 1 >= scope) return "no-section";
 
   replaceFirstLine(lines, scope, LAST_IMPACT_PREFIX, `${LAST_IMPACT_PREFIX} ${entry.date}`);
   replaceFirstLine(lines, scope, CURRENT_GAP_PREFIX, `${CURRENT_GAP_PREFIX} None - recent entry added`);
@@ -393,7 +399,7 @@ export async function updateImpactLog(impactLogPath: string, entry: BragBookResu
   }
 
   await writeFile(impactLogPath, lines.join(eol), "utf-8");
-  return true;
+  return "written";
 }
 
 export async function updateWorkContext(
@@ -627,16 +633,24 @@ function keepMask(records: readonly StoredRecord[], fold: FoldRecord): RecordMas
   return { keep, lines, placeholders, duplicates };
 }
 
+function unchanged(lines: readonly string[]): CleanedRecords {
+  return { content: lines.join("\n"), placeholders: 0, duplicates: 0 };
+}
+
 function cleanTable(
   lines: string[],
   fromLine: number,
+  limit: number,
   recordOf: (row: string) => StoredRecord,
   fold: FoldRecord,
 ): CleanedRecords {
   const table = findTable(lines, fromLine);
-  if (!table) return { content: lines.join("\n"), placeholders: 0, duplicates: 0 };
+  // The separator has to be inside the section: a table further down the file belongs
+  // to another section, and deleting rows from it would be deleting someone else's data.
+  if (!table || table.rowStart - 1 >= limit) return unchanged(lines);
 
-  const rows = lines.slice(table.rowStart, table.rowEnd);
+  const rowEnd = Math.min(table.rowEnd, limit);
+  const rows = lines.slice(table.rowStart, rowEnd);
   const mask = keepMask(rows.map(recordOf), fold);
   const next = [...lines];
   next.splice(table.rowStart, rows.length, ...mask.lines.filter((_, i) => mask.keep[i]));
@@ -645,14 +659,12 @@ function cleanTable(
 
 function cleanBullets(
   lines: string[],
-  heading: string,
+  headingIdx: number,
+  limit: number,
   textOf: (bullet: string) => string,
   fold: FoldRecord,
 ): CleanedRecords {
-  const headingIdx = lines.findIndex((line) => line.startsWith(heading));
-  if (headingIdx === -1) return { content: lines.join("\n"), placeholders: 0, duplicates: 0 };
-
-  const end = sectionEnd(lines, headingIdx);
+  const end = Math.min(sectionEnd(lines, headingIdx), limit);
   const bulletIdx: number[] = [];
   for (let i = headingIdx + 1; i < end; i++) if (isBullet(lines[i])) bulletIdx.push(i);
 
@@ -689,28 +701,43 @@ function foldNothing(): null {
   return null;
 }
 
+/**
+ * Clean one file's records.
+ *
+ * Every path here matches its heading exactly and stays inside that section, the same
+ * way the writers do. This one deletes lines, so being strict is the safe failure: a
+ * file whose headings do not match is left alone rather than half cleaned, and
+ * "## Impact Timeline Notes" is never mistaken for the timeline.
+ */
 function cleanVaultRecords(content: string, kind: VaultRecordKind): CleanedRecords {
   const lines = content.split("\n");
+  const liveEnd = liveRegionEnd(lines);
+
   switch (kind) {
     case "memory":
-      // First table only: the tables below it are archived eras, kept as written.
+      // First table in the live region: the tables below it are archived eras, kept as
+      // written.
       return cleanTable(
         lines,
         0,
+        liveEnd,
         (row) => {
           const item = rowCell(row, MEMORY_ITEM_COLUMN);
           return { line: row, identity: item, value: item };
         },
         foldRowCells([MEMORY_NOTES_COLUMN]),
       );
+
     case "impact-log": {
-      const timelineIdx = lines.findIndex((line) => line.startsWith(IMPACT_TIMELINE_HEADING));
+      const headingIdx = findExactHeading(lines, IMPACT_TIMELINE_HEADING, liveEnd);
+      if (headingIdx === -1) return unchanged(lines);
       // Identity is the date and the achievement together, but only the achievement
       // decides whether the row says anything: a date in front of "(none)" would
       // otherwise make the placeholder row look like real content.
       return cleanTable(
         lines,
-        timelineIdx === -1 ? 0 : timelineIdx,
+        headingIdx,
+        sectionScope(lines, headingIdx, liveEnd),
         (row) => ({
           line: row,
           identity: `${rowCell(row, 0)} ${rowCell(row, 1)}`,
@@ -719,10 +746,18 @@ function cleanVaultRecords(content: string, kind: VaultRecordKind): CleanedRecor
         foldRowCells([IMPACT_SCOPE_COLUMN, IMPACT_VALUE_COLUMN, IMPACT_EVIDENCE_COLUMN]),
       );
     }
-    case "work-context":
-      return cleanBullets(lines, ORG_NOTES_HEADING, orgNoteText, foldNoteSource);
-    case "my-profile":
-      return cleanBullets(lines, KEY_STRENGTHS_HEADING, (bullet) => bullet.slice(2), foldNothing);
+
+    case "work-context": {
+      const headingIdx = findExactHeading(lines, ORG_NOTES_HEADING, liveEnd);
+      if (headingIdx === -1) return unchanged(lines);
+      return cleanBullets(lines, headingIdx, liveEnd, orgNoteText, foldNoteSource);
+    }
+
+    case "my-profile": {
+      const headingIdx = findExactHeading(lines, KEY_STRENGTHS_HEADING, liveEnd);
+      if (headingIdx === -1) return unchanged(lines);
+      return cleanBullets(lines, headingIdx, liveEnd, (bullet) => bullet.slice(2), foldNothing);
+    }
   }
 }
 
