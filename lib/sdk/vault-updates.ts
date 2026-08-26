@@ -22,7 +22,10 @@ import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import type { BragBookResult } from "./brag-book";
 
-import { escapeCell, findTable, renderRow, renderScannedRow, scanRow, splitRow } from "./markdown-table";
+import {
+  escapeCell, findTable, renderRow, renderScannedRow, scanRow, splitRow,
+  type TableBounds,
+} from "./markdown-table";
 import { weekIdForDate } from "./week-utils";
 import { LOOKUP_MARGIN, SIMILARITY_THRESHOLD, canonicalText, normalizeText, textSimilarity } from "./text-similarity";
 import {
@@ -42,6 +45,16 @@ Contributions here are waiting to accumulate into something brag-worthy.
 | Date | Item | Category | Notes |
 |------|------|----------|-------|
 `;
+
+/**
+ * The header a table must have before this code will touch it.
+ *
+ * Locating a table by "the first separator line" was enough to find a user's own
+ * `| Setting | Value |` table sitting above the real one and clean rows out of it.
+ * A table this code does not recognise is a table it leaves alone.
+ */
+const MEMORY_HEADER = ["Date", "Item", "Category", "Notes"];
+const IMPACT_HEADER = ["Date", "Achievement", "Scope", "Core Value", "Evidence"];
 
 /** Column indexes in a memory row: `| Date | Item | Category | Notes |`. */
 const MEMORY_ITEM_COLUMN = 1;
@@ -180,43 +193,44 @@ function splitValues(text: string): string[] {
 }
 
 /**
- * Fold a newer value into the stored one without losing either.
+ * The values in `incoming` that `stored` does not already list.
  *
  * A rerun of the same week often carries more evidence than the first run did
  * ("TEAM-1234" becoming "TEAM-1234, TEAM-1235"). Dropping the second because the record
- * is already there would throw that away. The two are merged as sets of whole values:
- * comparing them as substrings made TEAM-123 disappear into TEAM-1234, which is one
- * ticket swallowing another. Folding is stable, so a second identical run changes
- * nothing.
+ * is already there would throw that away. Comparison is by whole value: as substrings,
+ * TEAM-123 disappeared into TEAM-1234, which is one ticket swallowing another.
  */
-function mergeCell(stored: string, incoming: string): string {
-  const kept = stored.trim();
+function mergeValues(stored: string, incoming: string): string[] {
   const next = incoming.trim();
-  if (next.length === 0 || isPlaceholder(next)) return stored;
-  if (kept.length === 0) return next;
+  if (next.length === 0 || isPlaceholder(next)) return [];
 
-  const values = splitValues(kept);
-  const seen = new Set(values.map(canonicalText));
-  let added = false;
-
+  const seen = new Set(splitValues(stored).map(canonicalText));
+  const additions: string[] = [];
   for (const value of splitValues(next)) {
     const canonical = canonicalText(value);
     if (seen.has(canonical)) continue;
     seen.add(canonical);
-    values.push(value);
-    added = true;
+    additions.push(value);
   }
+  return additions;
+}
 
-  return added ? values.join(", ") : stored;
+/** Fold a newer value into the stored one. Stable: merging twice adds nothing twice. */
+function mergeCell(stored: string, incoming: string): string {
+  const additions = mergeValues(stored, incoming);
+  if (additions.length === 0) return stored;
+  const kept = stored.trim();
+  return kept.length === 0 ? additions.join(", ") : `${kept}, ${additions.join(", ")}`;
 }
 
 /**
  * Fold the named columns of `incoming` into `row`, or null when nothing changed.
  *
- * Only the cells that actually change are re-rendered. The others are put back exactly
- * as they were written, because escaping a cell is not the inverse of reading one: a
- * cell holding `\*literal\*` comes back from the scan with its backslashes and would
- * leave `escapeCell` as `\\*literal\\*`, which means something else.
+ * The cell keeps its own source and gains only the new fragment. Escaping is not the
+ * inverse of reading: a cell holding an escaped asterisk comes back from the scan with
+ * its backslash, and running the merged text through escapeCell would escape that
+ * backslash again, so the cell would gain one every week it was merged into. Only what
+ * is genuinely new gets escaped, and only once.
  */
 function mergeRowCells(row: string, incoming: readonly string[], columns: readonly number[]): string | null {
   const scanned = scanRow(row);
@@ -227,14 +241,48 @@ function mergeRowCells(row: string, incoming: readonly string[], columns: readon
       scanned.values.push("");
       scanned.raw.push("");
     }
-    const merged = mergeCell(scanned.values[column], incoming[column] ?? "");
-    if (merged === scanned.values[column]) continue;
-    scanned.values[column] = merged;
-    scanned.raw[column] = ` ${escapeCell(merged)} `;
+
+    const value = incoming[column] ?? "";
+    const additions = mergeValues(scanned.values[column], value);
+    if (additions.length === 0) continue;
+
+    const escaped = escapeCell(additions.join(", "));
+    const source = scanned.raw[column].trimEnd();
+    scanned.raw[column] = source.trim().length === 0 ? ` ${escaped} ` : `${source}, ${escaped} `;
+    scanned.values[column] = mergeCell(scanned.values[column], value);
     changed = true;
   }
 
   return changed ? renderScannedRow(scanned) : null;
+}
+
+/** True when a line is the header row this code expects. */
+function matchesHeader(line: string, header: readonly string[]): boolean {
+  const cells = splitRow(line);
+  return cells.length === header.length && cells.every((cell, i) => canonicalText(cell) === canonicalText(header[i]));
+}
+
+/**
+ * Locate the table with the expected header between `from` and `limit`, or null.
+ *
+ * Tables in range are walked in order rather than only the first being considered, so
+ * an unrelated table above the one this code maintains hides nothing.
+ */
+function findTableByHeader(
+  lines: readonly string[],
+  from: number,
+  limit: number,
+  header: readonly string[],
+): TableBounds | null {
+  let cursor = from;
+  while (cursor < limit) {
+    const table = findTable(lines, cursor);
+    if (!table || table.rowStart - 1 >= limit) return null;
+    const headerIdx = table.rowStart - 2;
+    if (headerIdx >= 0 && matchesHeader(lines[headerIdx], header)) return table;
+    cursor = Math.max(table.rowEnd, table.rowStart);
+  }
+  return null;
 }
 
 /** Cell of a table row, or "" when the row is shorter than expected. */
@@ -479,11 +527,12 @@ export async function updateMemory(
   const lines = toLines(original);
   const liveEnd = liveRegionEnd(lines);
 
-  // The live era's table, or nothing. A memory.md whose only table sits under an
-  // archived heading has no live table: appending there would file this week's work
-  // under a team the user left, and a graduation would delete a row from that record.
-  const table = findTable(lines);
-  if (!table || table.rowStart - 1 >= liveEnd) {
+  // The live era's memory table, or nothing. A memory.md whose only such table sits
+  // under an archived heading has no live table: appending there would file this
+  // week's work under a team the user left, and a graduation would delete a row from
+  // that record.
+  const table = findTableByHeader(lines, 0, liveEnd, MEMORY_HEADER);
+  if (!table) {
     const skipped = itemsToAdd.length + itemsToRemove.length;
     const requested = itemsToRemove.map((removal) => ({ requested: removal, candidate: "" }));
     return { ...writeResult("no-section", { skipped }), unmatchedGraduations: requested };
@@ -606,8 +655,8 @@ export async function updateImpactLog(
   // table further down the file belongs to another section, and an archived era's
   // status lines record what was true when that era ended.
   const scope = sectionScope(lines, headingIdx, liveEnd);
-  const table = findTable(lines, headingIdx);
-  if (!table || table.rowStart - 1 >= scope) return writeResult("no-section", { skipped: 1 });
+  const table = findTableByHeader(lines, headingIdx, scope, IMPACT_HEADER);
+  if (!table) return writeResult("no-section", { skipped: 1 });
 
   const rowEnd = Math.min(table.rowEnd, scope);
   const rows = lines.slice(table.rowStart, rowEnd);
@@ -912,13 +961,15 @@ function cleanTable(
   fromLine: number,
   limit: number,
   eol: string,
+  header: readonly string[],
   recordOf: (row: string) => StoredRecord,
   fold: FoldRecord,
 ): CleanedRecords {
-  const table = findTable(lines, fromLine);
-  // The separator has to be inside the section: a table further down the file belongs
-  // to another section, and deleting rows from it would be deleting someone else's data.
-  if (!table || table.rowStart - 1 >= limit) return unchanged(lines, eol);
+  // Both bounds and the header have to hold: a table further down the file, or one
+  // this code does not recognise, belongs to someone else and deleting rows from it
+  // would be deleting their data.
+  const table = findTableByHeader(lines, fromLine, limit, header);
+  if (!table) return unchanged(lines, eol);
 
   const rowEnd = Math.min(table.rowEnd, limit);
   const rows = lines.slice(table.rowStart, rowEnd);
@@ -995,6 +1046,7 @@ function cleanVaultRecords(content: string, kind: VaultRecordKind): CleanedRecor
         0,
         liveEnd,
         eol,
+        MEMORY_HEADER,
         (row) => {
           const item = rowCell(row, MEMORY_ITEM_COLUMN);
           return { line: row, identity: item, value: item };
@@ -1013,6 +1065,7 @@ function cleanVaultRecords(content: string, kind: VaultRecordKind): CleanedRecor
         headingIdx,
         sectionScope(lines, headingIdx, liveEnd),
         eol,
+        IMPACT_HEADER,
         (row) => ({
           line: row,
           identity: `${rowCell(row, 0)} ${rowCell(row, 1)}`,

@@ -147,7 +147,7 @@ export interface TableBounds {
  * Locate the first table at or after `fromLine`, so a caller can read or rewrite the
  * rows of one era's table without disturbing the archived tables below it.
  */
-export function findTable(lines: string[], fromLine = 0): TableBounds | null {
+export function findTable(lines: readonly string[], fromLine = 0): TableBounds | null {
   let separatorIdx = -1;
   for (let i = Math.max(fromLine, 0); i < lines.length; i++) {
     if (isTableSeparator(lines[i])) {

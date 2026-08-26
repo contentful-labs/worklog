@@ -2032,3 +2032,151 @@ describe("closing-hash headings", () => {
       .toMatchObject({ status: "no-section" });
   });
 });
+
+describe("a table this code does not own", () => {
+  const WITH_SETTINGS_TABLE = `# Memory
+
+| Setting | Value |
+|---------|-------|
+| Retention | none |
+| Retention | none |
+
+## Current Team (2026 - present)
+
+| Date | Item | Category | Notes |
+|------|------|----------|-------|
+| 2026-03-01 | Wrote the fallback path for the Search Revamp indexer | project | TEAM-1234 |
+`;
+
+  it("adds the row to the memory table, not the first table in the file", async () => {
+    const path = join(tmpDir, "memory.md");
+    await writeFile(path, WITH_SETTINGS_TABLE);
+
+    expect(await updateMemory(path, ["| 2026-03-08 | Cut the index rebuild time | project |  |"], []))
+      .toMatchObject({ status: "written", added: 1 });
+
+    const content = await readFile(path, "utf-8");
+    expect(content).toContain("| Retention | none |\n| Retention | none |");
+    expect(content.indexOf("Cut the index rebuild time")).toBeGreaterThan(content.indexOf("Current Team"));
+  });
+
+  it("leaves that table alone during the cleanup", async () => {
+    const path = join(tmpDir, "memory.md");
+    await writeFile(path, `${WITH_SETTINGS_TABLE}| 2026-03-02 | Wrote the fallback path for the Search Revamp indexer | project | TEAM-1240 |\n`);
+
+    expect((await migrateVaultRecordsFile(path, "memory"))?.duplicates).toBe(1);
+
+    const content = await readFile(path, "utf-8");
+    // The settings table keeps both its rows and its "none" value.
+    expect(content.match(/\| Retention \| none \|/g)).toHaveLength(2);
+    expect(content.match(/fallback path/g)).toHaveLength(1);
+    expect(content).toContain("TEAM-1234, TEAM-1240");
+  });
+
+  it("refuses to write when the memory table is not there at all", async () => {
+    const path = join(tmpDir, "memory.md");
+    const file = `# Memory
+
+| Setting | Value |
+|---------|-------|
+| Retention | none |
+`;
+    await writeFile(path, file);
+
+    expect(await updateMemory(path, ["| 2026-03-08 | New item | project |  |"], []))
+      .toMatchObject({ status: "no-section" });
+    expect(await migrateVaultRecordsFile(path, "memory")).toBeNull();
+    expect(await readFile(path, "utf-8")).toBe(file);
+  });
+
+  it("refuses when the impact table has a header this code does not know", async () => {
+    const path = join(tmpDir, "impact-log.md");
+    const file = `# Impact Log
+
+## Impact Timeline
+
+| When | What | Who |
+|------|------|-----|
+| 2026-03-01 | Something | someone |
+`;
+    await writeFile(path, file);
+
+    expect(await updateImpactLog(path, IMPACT_ENTRY)).toMatchObject({ status: "no-section" });
+    expect(await readFile(path, "utf-8")).toBe(file);
+  });
+});
+
+describe("merging into a cell that already carries escapes", () => {
+  it("appends to an escaped Notes cell without escaping it again", async () => {
+    const path = join(tmpDir, "memory.md");
+    const row = "| 2026-03-01 | Wrote the fallback path | project | \\*literal\\* |";
+    await writeFile(path, `# Memory
+
+| Date | Item | Category | Notes |
+|------|------|----------|-------|
+${row}
+`);
+
+    const result = await updateMemory(path, [
+      "| 2026-03-08 | Wrote the fallback path | project | TEAM-1240 |",
+    ], []);
+    expect(result.merged).toBe(1);
+
+    const content = await readFile(path, "utf-8");
+    expect(content).toContain("| \\*literal\\*, TEAM-1240 |");
+    expect(content).not.toContain("\\\\*literal");
+  });
+
+  it("appends to an escaped Evidence cell without escaping it again", async () => {
+    const path = join(tmpDir, "impact-log.md");
+    await writeFile(path, `# Impact Log
+
+## Impact Timeline
+
+| Date | Achievement | Scope | Core Value | Evidence |
+|------|-------------|-------|------------|----------|
+| 2026-03-05 | Led the Search Revamp rollout across three teams | org | craft | \\*literal\\* |
+
+**Last significant impact:** 2026-03-05
+**Current gap:** None - recent entry added
+`);
+
+    await updateImpactLog(path, { ...IMPACT_ENTRY, evidence: "TEAM-1240" });
+
+    const content = await readFile(path, "utf-8");
+    expect(content).toContain("| \\*literal\\*, TEAM-1240 |");
+    expect(content).not.toContain("\\\\*literal");
+  });
+
+  it("reads a merged escaped cell back as the value it started as", async () => {
+    const path = join(tmpDir, "memory.md");
+    await writeFile(path, `# Memory
+
+| Date | Item | Category | Notes |
+|------|------|----------|-------|
+| 2026-03-01 | Wrote the fallback path | project | C:\\\\Users\\\\example |
+`);
+
+    await updateMemory(path, ["| 2026-03-08 | Wrote the fallback path | project | TEAM-1240 |"], []);
+
+    const row = (await readFile(path, "utf-8")).split("\n").find((line) => line.includes("fallback path")) ?? "";
+    expect(splitRow(row)[3]).toBe("C:\\Users\\example, TEAM-1240");
+  });
+
+  it("does not grow the escapes when the same week is applied twice", async () => {
+    const path = join(tmpDir, "memory.md");
+    await writeFile(path, `# Memory
+
+| Date | Item | Category | Notes |
+|------|------|----------|-------|
+| 2026-03-01 | Wrote the fallback path | project | \\*literal\\* |
+`);
+
+    const rows = ["| 2026-03-08 | Wrote the fallback path | project | TEAM-1240 |"];
+    await updateMemory(path, rows, []);
+    const first = await readFile(path, "utf-8");
+    await updateMemory(path, rows, []);
+
+    expect(await readFile(path, "utf-8")).toBe(first);
+  });
+});
