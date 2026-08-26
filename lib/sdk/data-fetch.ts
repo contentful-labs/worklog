@@ -4,6 +4,10 @@ import { normalizeTicketPrefix } from "../config";
 
 export const JIRA_ISSUE_FIELDS = ["summary", "status", "created", "updated", "resolutiondate", "description", "priority", "labels", "components", "timetracking", "comment"];
 
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
 export interface FetchCredentials {
   atlassianApiToken: string;
   githubToken: string;
@@ -32,6 +36,11 @@ export interface PRReview {
   comment_count: number;
   html_url: string;
   pr_html_url: string;
+}
+
+export interface FetchWeekOptions {
+  /** Called when a supplementary fetch fails and the week continues without that data. */
+  onWarning?: (message: string) => void;
 }
 
 export interface FetchedWeekData {
@@ -158,7 +167,9 @@ export async function fetchDataForWeek(
   accountId: string,
   githubUsername: string,
   weekInfo: WeekInfo,
+  opts: FetchWeekOptions = {},
 ): Promise<FetchedWeekData> {
+  const { onWarning } = opts;
   const startDate = weekInfo.startDate.toISOString().split("T")[0];
   const endDate = weekInfo.endDate.toISOString().split("T")[0];
 
@@ -221,8 +232,11 @@ export async function fetchDataForWeek(
   const authoredUrls = new Set(prs.map(p => p.html_url));
   const reviewQuery = `type:pr reviewed-by:${githubUsername} ${orgFilter} updated:${startDate}..${endDate}`;
 
-  // Reviews are supplementary; a failed search shouldn't abort the week.
-  const reviewPRs = await fetchGitHubPRs(headers, reviewQuery, "updated").catch(() => [] as GitHubPR[]);
+  // Reviews are supplementary; a failed search shouldn't abort the week, but it must be reported.
+  const reviewPRs = await fetchGitHubPRs(headers, reviewQuery, "updated").catch((err: unknown) => {
+    onWarning?.(`GitHub reviewed-PR search failed, reviews will be missing from this week: ${errorMessage(err)}`);
+    return [] as GitHubPR[];
+  });
 
   for (const pr of reviewPRs) {
     if (authoredUrls.has(pr.html_url)) continue;
@@ -265,12 +279,15 @@ export async function fetchDataForWeek(
   const projectKeys = config.profile.ticketPrefixes.map(normalizeTicketPrefix).filter(Boolean);
   if (projectKeys.length > 0) {
     const sprintJql = buildTeamSprintJql(projectKeys, email);
-    // Sprint context is supplementary; a failed query shouldn't abort the week.
+    // Sprint context is supplementary; a failed query shouldn't abort the week, but it must be reported.
     teamSprintItems = await fetchJiraIssues(
       config, headers, sprintJql,
       ["summary", "status", "priority", "labels", "components"],
       { pageSize: 50, limit: 50 },
-    ).catch(() => []);
+    ).catch((err: unknown) => {
+      onWarning?.(`Team sprint query failed, sprint context will be missing from this week: ${errorMessage(err)}`);
+      return [];
+    });
   }
 
   return { issues, pages, prs, reviews, teamSprintItems };

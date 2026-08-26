@@ -555,7 +555,7 @@ export async function runWorklog(opts: {
     // Fetch
     const fetchStart = performance.now();
     s.start("Fetching data...");
-    const { issues, pages, prs, reviews, teamSprintItems } = await fetchDataForWeek(config, headers, accountId, githubUsername, weekInfo);
+    const { issues, pages, prs, reviews, teamSprintItems } = await fetchDataForWeek(config, headers, accountId, githubUsername, weekInfo, { onWarning: (msg) => p.log.warn(msg) });
     const fetchMs = Math.round(performance.now() - fetchStart);
     s.stop(`Fetched in ${formatDuration(fetchMs)} (${issues.length} jira, ${pages.length} confluence, ${prs.length} PRs, ${reviews.length} reviews)`);
     log(`Jira: ${issues.length}, Confluence: ${pages.length}, PRs: ${prs.length}, Reviews: ${reviews.length}`);

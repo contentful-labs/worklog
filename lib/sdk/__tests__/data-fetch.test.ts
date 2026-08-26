@@ -251,4 +251,53 @@ describe("fetchDataForWeek", () => {
     expect(data.prs).toHaveLength(0);
     expect(data.reviews).toHaveLength(0);
   });
+
+  it("warns and still completes the week when the team sprint query fails", async () => {
+    server.use(
+      http.post(`${BASE_URL}/rest/api/3/search/jql`, async ({ request }) => {
+        const body = await request.json() as { jql: string };
+        if (body.jql.includes("openSprints")) {
+          return HttpResponse.json({ errorMessages: ["Field 'sprint' does not exist"] }, { status: 400 });
+        }
+        return HttpResponse.json({
+          issues: [
+            { key: "CORE-1", fields: { summary: "Task 1", status: { name: "Done" }, created: "2026-03-02", updated: "2026-03-05" } },
+          ],
+        });
+      }),
+    );
+
+    const warnings: string[] = [];
+    const h = buildHeaders(mockConfig, mockCreds);
+    const data = await fetchDataForWeek(mockConfig, h, "abc123", "testuser", weekInfo, {
+      onWarning: (message) => warnings.push(message),
+    });
+
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("Team sprint query failed");
+    expect(warnings[0]).toContain("400");
+    expect(data.issues).toHaveLength(1);
+    expect(data.teamSprintItems).toHaveLength(0);
+  });
+
+  it("warns when the reviewed-PR search fails", async () => {
+    server.use(
+      http.get("https://api.github.com/search/issues", ({ request }) => {
+        const q = new URL(request.url).searchParams.get("q") || "";
+        if (q.includes("reviewed-by:")) {
+          return HttpResponse.json({ message: "Server error" }, { status: 500 });
+        }
+        return HttpResponse.json({ total_count: 0, items: [] });
+      }),
+    );
+
+    const warnings: string[] = [];
+    const h = buildHeaders(mockConfig, mockCreds);
+    const data = await fetchDataForWeek(mockConfig, h, "abc123", "testuser", weekInfo, {
+      onWarning: (message) => warnings.push(message),
+    });
+
+    expect(warnings.some((w) => w.includes("GitHub reviewed-PR search failed"))).toBe(true);
+    expect(data.reviews).toHaveLength(0);
+  });
 });

@@ -86,7 +86,7 @@ export {
 } from "./vault-updates";
 
 // Data fetching
-export type { FetchCredentials, FetchHeaders, WeekInfo, PRReview, FetchedWeekData } from "./data-fetch";
+export type { FetchCredentials, FetchHeaders, WeekInfo, PRReview, FetchedWeekData, FetchWeekOptions } from "./data-fetch";
 export {
   JIRA_ISSUE_FIELDS,
   buildHeaders,
