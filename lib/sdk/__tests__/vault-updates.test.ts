@@ -355,7 +355,7 @@ describe("isPlaceholder", () => {
       "(none)",
       "(leave blank if none)",
       "_(Added automatically as new information is discovered)_",
-      "<!-- TODO: add your technical skills -->",
+      "<!-- TODO: add your technical skills (e.g. TypeScript, React, Node.js) -->",
       "n/a",
       "None",
     ]) {
@@ -1986,7 +1986,7 @@ ${survivor}
 describe("comments the user wrote", () => {
   it("keeps a note to self and drops only the generated hint", async () => {
     expect(isPlaceholder("<!-- Revisit promotion evidence after Q4 -->")).toBe(false);
-    expect(isPlaceholder("<!-- TODO: add your technical skills -->")).toBe(true);
+    expect(isPlaceholder("<!-- TODO: add your technical skills (e.g. TypeScript, React, Node.js) -->")).toBe(true);
   });
 
   it("leaves a user comment alone through insert and migration", async () => {
@@ -2178,5 +2178,109 @@ ${row}
     await updateMemory(path, rows, []);
 
     expect(await readFile(path, "utf-8")).toBe(first);
+  });
+});
+
+describe("notes whose bold is not a category label", () => {
+  const OPPOSITE_NOTES = `# Work Context
+
+## Organizational Notes
+
+- **Deploy manually** for legacy tenants _(DOC-1)_
+- **Never deploy manually** for legacy tenants _(DOC-2)_
+
+---
+
+*Last updated: 2026-02-01*
+`;
+
+  it("keeps two notes that differ only inside the bold span", async () => {
+    const path = join(tmpDir, "work-context.md");
+    await writeFile(path, OPPOSITE_NOTES);
+
+    expect(await migrateVaultRecordsFile(path, "work-context")).toBeNull();
+    expect(await readFile(path, "utf-8")).toBe(OPPOSITE_NOTES);
+  });
+
+  it("does not fold a generated note into a bullet the user wrote", async () => {
+    const path = join(tmpDir, "work-context.md");
+    const file = `# Work Context
+
+## Organizational Notes
+
+- **Deploy manually** for legacy tenants _(DOC-1)_
+
+---
+
+*Last updated: 2026-02-01*
+`;
+    await writeFile(path, file);
+
+    // Same words as the freeform bullet's tail, arriving in the generated shape.
+    const result = await updateWorkContext(path, [
+      { category: "process", info: "for legacy tenants", source: "TEAM-1300" },
+    ], new Date("2026-03-08T00:00:00Z"));
+
+    expect(result).toMatchObject({ status: "written", added: 1 });
+    const content = await readFile(path, "utf-8");
+    expect(content).toContain("- **Deploy manually** for legacy tenants _(DOC-1)_");
+    expect(content).toContain("- **process:** for legacy tenants _(TEAM-1300)_");
+  });
+
+  it("still folds a source into a note it did write", async () => {
+    const path = join(tmpDir, "work-context.md");
+    await writeFile(path, CLEAN_WORK_CONTEXT);
+
+    await updateWorkContext(path, [
+      { category: "process", info: "Release trains ship on Tuesdays", source: "TEAM-1300" },
+    ], new Date("2026-03-08T00:00:00Z"));
+
+    expect(await readFile(path, "utf-8")).toContain("_(TEAM-1200, TEAM-1300)_");
+  });
+
+  it("collapses two identical freeform bullets", async () => {
+    const path = join(tmpDir, "work-context.md");
+    await writeFile(path, `# Work Context
+
+## Organizational Notes
+
+- **Deploy manually** for legacy tenants _(DOC-1)_
+- **Deploy manually** for legacy tenants _(DOC-2)_
+
+---
+
+*Last updated: 2026-02-01*
+`);
+
+    expect((await migrateVaultRecordsFile(path, "work-context"))?.duplicates).toBe(1);
+    const content = await readFile(path, "utf-8");
+    expect(content.match(/Deploy manually/g)).toHaveLength(1);
+    expect(content).toContain("_(DOC-1, DOC-2)_");
+  });
+});
+
+describe("a TODO the user wrote themselves", () => {
+  it("is content, and only the generated hint is not", () => {
+    expect(isPlaceholder("<!-- TODO: verify Q4 promotion evidence -->")).toBe(false);
+    expect(isPlaceholder("<!-- TODO: add your technical skills (e.g. TypeScript, React, Node.js) -->")).toBe(true);
+    expect(isPlaceholder("<!-- TODO: update your team domain -->")).toBe(true);
+  });
+
+  it("survives insert and migration under Key Strengths", async () => {
+    const path = join(tmpDir, "my-profile.md");
+    const file = `# My Profile
+
+## Key Strengths
+
+- <!-- TODO: verify Q4 promotion evidence -->
+- Untangles flaky test suites other people avoid
+`;
+    await writeFile(path, file);
+
+    expect(await migrateVaultRecordsFile(path, "my-profile")).toBeNull();
+    expect(await readFile(path, "utf-8")).toBe(file);
+
+    expect(await updateProfile(path, { achievement: "Note", bulletPoint: "<!-- TODO: verify Q4 promotion evidence -->" }))
+      .toMatchObject({ status: "unchanged" });
   });
 });

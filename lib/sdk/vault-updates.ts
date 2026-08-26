@@ -86,8 +86,34 @@ const PLACEHOLDER_WORDS = new Set(["none", "n a", "na", "nil", "nothing", "tbd",
  */
 const PLACEHOLDER_PHRASES = ["leave blank", "added automatically", "none configured"];
 
-/** How every hint `doc-generators.ts` leaves in a seeded file opens. */
-const TEMPLATE_HINT_PREFIX = "<!-- TODO:";
+/**
+ * The hints `doc-generators.ts` writes into a seeded file, compared whole.
+ *
+ * A prefix test was wrong: the generators only ever put a TODO hint in the fixed-field
+ * areas, never inside the four record areas this code maintains, so every comment it
+ * matched there was one the user had written for themselves. Kept in sync by hand; a
+ * hint that drifts out of this list is simply treated as content, which is the safe
+ * direction.
+ */
+const TEMPLATE_HINTS = [
+  "update your full name",
+  "update your job title",
+  "update your level (e.g. IC-5, Staff)",
+  "update your company",
+  "update your location",
+  "update your role start date (YYYY-MM-DD)",
+  "update your team name",
+  "update your team domain",
+  "describe what your team builds (1-2 sentences)",
+  "add your technical skills (e.g. TypeScript, React, Node.js)",
+  "add your growth areas (e.g. system design, cross-team influence)",
+  "add your company core values",
+  "add your review cycle dates (e.g. Q1 check-in: 2026-03-15, Mid-year: 2026-06-15)",
+  "add your Jira project keys (e.g. TEAM)",
+  "update career framework type",
+  "update your current level",
+  "update your target level",
+].map((hint) => canonicalText(`<!-- TODO: ${hint} -->`));
 
 /** True when `words` opens with `phrase` and the phrase ends on a word boundary. */
 function opensWithPhrase(words: string, phrase: string): boolean {
@@ -117,9 +143,9 @@ function stripDecoration(text: string): string {
 export function isPlaceholder(text: string): boolean {
   const core = stripDecoration(text);
   if (core.length === 0) return true;
-  // Only the hint the seed templates write. Any other comment is something the user
-  // put there on purpose, and deleting a note to self is not this code's business.
-  if (core.startsWith(TEMPLATE_HINT_PREFIX)) return true;
+  // Only a hint the seed templates wrote. Any other comment is something the user put
+  // there on purpose, and deleting a note to self is not this code's business.
+  if (TEMPLATE_HINTS.includes(canonicalText(core))) return true;
 
   const parenthesised = core.startsWith("(") && core.endsWith(")");
   const inner = parenthesised ? core.slice(1, -1) : core;
@@ -426,22 +452,54 @@ function isBullet(line: string): boolean {
 }
 
 /**
- * The part of an organizational note that identifies it.
- * Bullets read `- **Category:** info _(source)_`; the category and source repeat across
- * unrelated notes, so only the info decides whether the note is already there.
+ * Marks an identity that is a whole bullet rather than the info field of a generated
+ * one. A NUL cannot come out of `canonicalText`, so the two kinds can never collide.
  */
-function orgNoteText(bullet: string): string {
-  let text = bullet.slice(2);
-  if (text.startsWith("**")) {
-    const labelEnd = text.indexOf("**", 2);
-    if (labelEnd !== -1) text = text.slice(labelEnd + 2);
-  }
+const FREEFORM_NOTE = "\u0000";
+
+interface OrgNote {
+  /** The info of a generated bullet, or the whole bullet for anything else. */
+  text: string;
+  /** True when the bullet has the shape this code writes. */
+  generated: boolean;
+}
+
+/** Drop the `_(source)_` suffix, which is evidence rather than identity. */
+function stripNoteSource(text: string): string {
   const trimmed = text.trim();
-  if (trimmed.endsWith(")_")) {
-    const sourceStart = trimmed.lastIndexOf("_(");
-    if (sourceStart !== -1) return trimmed.slice(0, sourceStart).trim();
+  if (!trimmed.endsWith(")_")) return trimmed;
+  const start = trimmed.lastIndexOf("_(");
+  return start === -1 ? trimmed : trimmed.slice(0, start).trim();
+}
+
+/**
+ * Read an organizational note.
+ *
+ * The generated shape is `- **Category:** info _(source)_`, and only there is the
+ * leading bold a label to be dropped. Dropping any leading bold span made
+ * "**Deploy manually** for legacy tenants" and "**Never deploy manually** for legacy
+ * tenants" the same note, and the cleanup deleted the second.
+ */
+function parseOrgNote(bullet: string): OrgNote {
+  const body = bullet.slice(2);
+  if (body.startsWith("**")) {
+    const labelEnd = body.indexOf("**", 2);
+    if (labelEnd !== -1 && body.slice(2, labelEnd).trimEnd().endsWith(":")) {
+      return { text: stripNoteSource(body.slice(labelEnd + 2)), generated: true };
+    }
   }
-  return trimmed;
+  return { text: stripNoteSource(body), generated: false };
+}
+
+/** What decides whether a note is already in the file. */
+function orgNoteIdentity(bullet: string): string {
+  const note = parseOrgNote(bullet);
+  return note.generated ? note.text : `${FREEFORM_NOTE}${note.text}`;
+}
+
+/** What decides whether a note says anything at all. */
+function orgNoteText(bullet: string): string {
+  return parseOrgNote(bullet).text;
 }
 
 /** The `_(source)_` suffix of an organizational note, or "" when it has none. */
@@ -727,7 +785,7 @@ export async function updateWorkContext(
   // structured so a later update naming the same fact folds its source into them
   // instead of being dropped.
   const queued: Array<{ category: string; info: string; source: string }> = [];
-  const notes = bulletLines.map((i) => orgNoteText(lines[i]));
+  const notes = bulletLines.map((i) => orgNoteIdentity(lines[i]));
   let changed = false;
   let merged = 0;
   let skipped = 0;
@@ -984,7 +1042,8 @@ function cleanBullets(
   headingIdx: number,
   limit: number,
   eol: string,
-  textOf: (bullet: string) => string,
+  identityOf: (bullet: string) => string,
+  contentOf: (bullet: string) => string,
   fold: FoldRecord,
 ): CleanedRecords {
   const end = Math.min(sectionEnd(lines, headingIdx), limit);
@@ -992,10 +1051,7 @@ function cleanBullets(
   for (let i = headingIdx + 1; i < end; i++) if (isBullet(lines[i])) bulletIdx.push(i);
 
   const mask = keepMask(
-    bulletIdx.map((i) => {
-      const text = textOf(lines[i]);
-      return { line: lines[i], identity: text, value: text };
-    }),
+    bulletIdx.map((i) => ({ line: lines[i], identity: identityOf(lines[i]), value: contentOf(lines[i]) })),
     fold,
   );
 
@@ -1078,13 +1134,14 @@ function cleanVaultRecords(content: string, kind: VaultRecordKind): CleanedRecor
     case "work-context": {
       const headingIdx = findExactHeading(lines, ORG_NOTES_HEADING, liveEnd);
       if (headingIdx === -1) return unchanged(lines, eol);
-      return cleanBullets(lines, headingIdx, liveEnd, eol, orgNoteText, foldNoteSource);
+      return cleanBullets(lines, headingIdx, liveEnd, eol, orgNoteIdentity, orgNoteText, foldNoteSource);
     }
 
     case "my-profile": {
       const headingIdx = findExactHeading(lines, KEY_STRENGTHS_HEADING, liveEnd);
       if (headingIdx === -1) return unchanged(lines, eol);
-      return cleanBullets(lines, headingIdx, liveEnd, eol, (bullet) => bullet.slice(2), foldNothing);
+      const strengthText = (bullet: string) => bullet.slice(2);
+      return cleanBullets(lines, headingIdx, liveEnd, eol, strengthText, strengthText, foldNothing);
     }
   }
 }
