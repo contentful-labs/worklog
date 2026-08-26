@@ -12,6 +12,7 @@ export function generateMarkdown(
   weekInfo: WeekInfo,
   additionalContext: string,
   config: WorklogConfig,
+  accountId: string,
 ): string {
   const lines: string[] = [];
   const startDate = weekInfo.startDate.toISOString().split("T")[0];
@@ -59,8 +60,11 @@ export function generateMarkdown(
       }
 
       if (f.comment?.comments?.length) {
-        const myComments = f.comment.comments.filter(
-          (c) => c.author?.displayName === config.profile.displayName,
+        // Account id is the stable identifier; display names change and repeat.
+        const myComments = f.comment.comments.filter((c) =>
+          c.author?.accountId
+            ? c.author.accountId === accountId
+            : c.author?.displayName === config.profile.displayName,
         );
         if (myComments.length > 0) {
           lines.push(`**Your comments (${myComments.length}):**`);

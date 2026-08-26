@@ -11,7 +11,7 @@ export interface JiraIssue {
     labels?: string[];
     components?: Array<{ name: string }>;
     timetracking?: { timeSpent?: string };
-    comment?: { comments?: Array<{ body?: { content?: Array<{ content?: Array<{ text?: string }> }> }; author?: { displayName?: string }; created?: string }> };
+    comment?: { comments?: Array<{ body?: { content?: Array<{ content?: Array<{ text?: string }> }> }; author?: { accountId?: string; displayName?: string }; created?: string }> };
   };
 }
 

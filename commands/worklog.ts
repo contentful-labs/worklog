@@ -560,7 +560,7 @@ export async function runWorklog(opts: {
     s.stop(`Fetched in ${formatDuration(fetchMs)} (${issues.length} jira, ${pages.length} confluence, ${prs.length} PRs, ${reviews.length} reviews)`);
     log(`Jira: ${issues.length}, Confluence: ${pages.length}, PRs: ${prs.length}, Reviews: ${reviews.length}`);
 
-    const markdown = generateMarkdown(issues, pages, prs, reviews, teamSprintItems, weekInfo, additionalContext, config);
+    const markdown = generateMarkdown(issues, pages, prs, reviews, teamSprintItems, weekInfo, additionalContext, config, accountId);
     const workLogPath = `${paths.vault}/${weekInfo.filename}`;
     await Bun.write(workLogPath, markdown);
     log(`Work log written: ${workLogPath} (${markdown.length} chars)`);
