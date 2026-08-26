@@ -601,7 +601,8 @@ _(Added automatically as significant achievements are recorded)_
 *Last updated: 2026-02-01*
 `);
 
-    expect(await migrateVaultRecordsFile(path, "my-profile")).toEqual({ placeholders: 3, duplicates: 1 });
+    expect(await migrateVaultRecordsFile(path, "my-profile"))
+      .toEqual({ placeholders: 3, duplicates: 1, backup: `${path}.pre-dedupe.bak` });
 
     const content = await readFile(path, "utf-8");
     expect(content).not.toContain("(none)");
@@ -627,7 +628,8 @@ _(Added automatically as significant achievements are recorded)_
 *Last updated: 2026-02-01*
 `);
 
-    expect(await migrateVaultRecordsFile(path, "work-context")).toEqual({ placeholders: 1, duplicates: 2 });
+    expect(await migrateVaultRecordsFile(path, "work-context"))
+      .toEqual({ placeholders: 1, duplicates: 2, backup: `${path}.pre-dedupe.bak` });
 
     const content = await readFile(path, "utf-8");
     expect(content.match(/ship on Tuesdays/g)).toHaveLength(1);
@@ -655,7 +657,8 @@ _(Added automatically as significant achievements are recorded)_
 | 2025-05-02 | Old item | Fix | |
 `);
 
-    expect(await migrateVaultRecordsFile(path, "memory")).toEqual({ placeholders: 1, duplicates: 1 });
+    expect(await migrateVaultRecordsFile(path, "memory"))
+      .toEqual({ placeholders: 1, duplicates: 1, backup: `${path}.pre-dedupe.bak` });
 
     const content = await readFile(path, "utf-8");
     expect(content.match(/fallback path/g)).toHaveLength(1);
@@ -678,7 +681,8 @@ _(Added automatically as significant achievements are recorded)_
 **Current gap:** None - recent entry added
 `);
 
-    expect(await migrateVaultRecordsFile(path, "impact-log")).toEqual({ placeholders: 0, duplicates: 1 });
+    expect(await migrateVaultRecordsFile(path, "impact-log"))
+      .toEqual({ placeholders: 0, duplicates: 1, backup: `${path}.pre-dedupe.bak` });
     const content = await readFile(path, "utf-8");
     expect(content.match(/Search Revamp rollout/g)).toHaveLength(2);
   });
@@ -694,7 +698,8 @@ _(Added automatically as significant achievements are recorded)_
 - Untangles flaky test suites other people avoid
 `);
 
-    expect(await migrateVaultRecordsFile(path, "my-profile")).toEqual({ placeholders: 1, duplicates: 0 });
+    expect(await migrateVaultRecordsFile(path, "my-profile"))
+      .toEqual({ placeholders: 1, duplicates: 0, backup: backupPath });
     const cleaned = await readFile(path, "utf-8");
     await writeFile(backupPath, "sentinel", "utf-8");
 
@@ -968,5 +973,107 @@ describe("work-context stamp", () => {
     // A week later, same result applied again: nothing new to say, nothing to restamp.
     await updateWorkContext(path, updates, new Date("2026-03-15T00:00:00Z"));
     expect(await readFile(path, "utf-8")).toBe(first);
+  });
+});
+
+describe("migration keeps records the scoring normalizer would flatten", () => {
+  const strengthsFile = (bullets: string[]) => `# My Profile
+
+## Key Strengths
+
+${bullets.join("\n")}
+
+---
+
+*Last updated: 2026-02-01*
+`;
+
+  it("keeps two strengths that differ only in a symbol", async () => {
+    const path = join(tmpDir, "my-profile.md");
+    await writeFile(path, strengthsFile(["- Builds C++ toolchains", "- Builds C# toolchains"]));
+
+    expect(await migrateVaultRecordsFile(path, "my-profile")).toBeNull();
+
+    const content = await readFile(path, "utf-8");
+    expect(content).toContain("- Builds C++ toolchains");
+    expect(content).toContain("- Builds C# toolchains");
+  });
+
+  it("keeps two strengths that differ only in an accent", async () => {
+    const path = join(tmpDir, "my-profile.md");
+    await writeFile(path, strengthsFile(["- Runs the cafe rota", "- Runs the café rota"]));
+
+    expect(await migrateVaultRecordsFile(path, "my-profile")).toBeNull();
+    expect(await readFile(path, "utf-8")).toContain("café");
+  });
+
+  it("keeps notes written in a non-Latin script", async () => {
+    const path = join(tmpDir, "my-profile.md");
+    await writeFile(path, strengthsFile(["- 検索基盤の設計をリード", "- オンコール体制を整備"]));
+
+    expect(await migrateVaultRecordsFile(path, "my-profile")).toBeNull();
+
+    const content = await readFile(path, "utf-8");
+    expect(content).toContain("検索基盤の設計をリード");
+    expect(content).toContain("オンコール体制を整備");
+  });
+
+  it("still collapses a repeat that differs only in case and spacing", async () => {
+    const path = join(tmpDir, "my-profile.md");
+    await writeFile(path, strengthsFile(["- Builds C++ toolchains", "-  builds c++   TOOLCHAINS"]));
+
+    const result = await migrateVaultRecordsFile(path, "my-profile");
+    expect(result?.duplicates).toBe(1);
+  });
+});
+
+describe("migration backups", () => {
+  it("never overwrites the backup holding the original file", async () => {
+    const path = join(tmpDir, "my-profile.md");
+    const original = `# My Profile
+
+## Key Strengths
+
+- (none)
+- Untangles flaky test suites other people avoid
+`;
+    await writeFile(path, original);
+
+    const first = await migrateVaultRecordsFile(path, "my-profile");
+    expect(first?.backup).toBe(`${path}.pre-dedupe.bak`);
+
+    // A placeholder arrives some weeks later and triggers a second cleanup.
+    const cleaned = await readFile(path, "utf-8");
+    await writeFile(path, `${cleaned}- (leave blank)\n`);
+
+    const second = await migrateVaultRecordsFile(path, "my-profile");
+    expect(second?.backup).toBe(`${path}.pre-dedupe.2.bak`);
+    expect(await readFile(`${path}.pre-dedupe.bak`, "utf-8")).toBe(original);
+    expect(await readFile(path, "utf-8")).not.toContain("(leave blank)");
+  });
+});
+
+describe("migration placeholder selectors", () => {
+  it("removes an impact row whose achievement is a placeholder", async () => {
+    const path = join(tmpDir, "impact-log.md");
+    await writeFile(path, `# Impact Log
+
+## Impact Timeline
+
+| Date | Achievement | Scope | Core Value | Evidence |
+|------|-------------|-------|------------|----------|
+| 2026-03-05 | (none) | | | |
+| 2026-03-06 | Led the Search Revamp rollout | org | craft | TEAM-1234 |
+
+**Last significant impact:** 2026-03-06
+**Current gap:** None - recent entry added
+`);
+
+    const result = await migrateVaultRecordsFile(path, "impact-log");
+    expect(result?.placeholders).toBe(1);
+
+    const content = await readFile(path, "utf-8");
+    expect(content).not.toContain("(none)");
+    expect(content).toContain("Led the Search Revamp rollout");
   });
 });

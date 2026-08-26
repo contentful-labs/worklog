@@ -499,7 +499,7 @@ export async function runWorklog(opts: {
     if (cleanup) {
       p.log.info(
         `Cleaned ${kind}.md: ${cleanup.placeholders} placeholder rows removed, ` +
-        `${cleanup.duplicates} duplicates collapsed. Backup: ${recordPath}.pre-dedupe.bak`,
+        `${cleanup.duplicates} duplicates collapsed. Backup: ${cleanup.backup}`,
       );
     }
   }

@@ -9,7 +9,8 @@
  * stopped, which also makes applying the same week twice a no-op.
  */
 
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile, rename, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import type { BragBookResult } from "./brag-book";
 
@@ -503,56 +504,70 @@ export type VaultRecordKind = "memory" | "impact-log" | "work-context" | "my-pro
 export interface VaultRecordsMigration {
   placeholders: number;
   duplicates: number;
+  /** Where the file as it was before this run was kept. */
+  backup: string;
 }
 
-interface CleanedRecords extends VaultRecordsMigration {
+interface CleanedRecords {
   content: string;
+  placeholders: number;
+  duplicates: number;
 }
 
-interface RecordMask extends VaultRecordsMigration {
+interface RecordMask {
   /** Whether each record survives, in file order. */
   keep: boolean[];
+  placeholders: number;
+  duplicates: number;
+}
+
+/** One stored record: the text that decides identity, and the text that decides emptiness. */
+interface StoredRecord {
+  identity: string;
+  value: string;
 }
 
 /**
  * Decide which of a file's existing records to keep.
  *
- * Duplicates are judged on exact normalized text here, not on the similarity score the
- * writers use. This runs once over a file the user owns and deletes lines: a wrong
- * merge is not something they can spot afterwards, so the migration only removes what
- * is provably the same record twice.
+ * Two deliberate narrowings, because this deletes lines from a file the user owns and a
+ * wrong deletion is not something they can spot afterwards. Duplicates are judged on
+ * `canonicalText`, which only folds case and whitespace: the scoring normalizer strips
+ * symbols and non-ASCII letters, so it maps "Builds C++ toolchains" and "Builds C#
+ * toolchains" onto one string and every non-Latin note onto "". And a record with no
+ * canonical form at all is never called a repeat.
  */
-function keepMask(keys: readonly string[]): RecordMask {
+function keepMask(records: readonly StoredRecord[]): RecordMask {
   const seen = new Set<string>();
   const keep: boolean[] = [];
   let placeholders = 0;
   let duplicates = 0;
 
-  for (const key of keys) {
-    if (isPlaceholder(key)) {
+  for (const record of records) {
+    if (isPlaceholder(record.value)) {
       placeholders++;
       keep.push(false);
       continue;
     }
-    const normalized = normalizeText(key);
-    if (seen.has(normalized)) {
+    const canonical = canonicalText(record.identity);
+    if (canonical.length > 0 && seen.has(canonical)) {
       duplicates++;
       keep.push(false);
       continue;
     }
-    seen.add(normalized);
+    seen.add(canonical);
     keep.push(true);
   }
 
   return { keep, placeholders, duplicates };
 }
 
-function cleanTable(lines: string[], fromLine: number, keyOf: (row: string) => string): CleanedRecords {
+function cleanTable(lines: string[], fromLine: number, recordOf: (row: string) => StoredRecord): CleanedRecords {
   const table = findTable(lines, fromLine);
   if (!table) return { content: lines.join("\n"), placeholders: 0, duplicates: 0 };
 
   const rows = lines.slice(table.rowStart, table.rowEnd);
-  const { keep, placeholders, duplicates } = keepMask(rows.map(keyOf));
+  const { keep, placeholders, duplicates } = keepMask(rows.map(recordOf));
   const next = [...lines];
   next.splice(table.rowStart, rows.length, ...rows.filter((_, i) => keep[i]));
   return { content: next.join("\n"), placeholders, duplicates };
@@ -566,7 +581,11 @@ function cleanBullets(lines: string[], heading: string, textOf: (bullet: string)
   const bulletIdx: number[] = [];
   for (let i = headingIdx + 1; i < end; i++) if (isBullet(lines[i])) bulletIdx.push(i);
 
-  const { keep, placeholders, duplicates } = keepMask(bulletIdx.map((i) => textOf(lines[i])));
+  const records = bulletIdx.map((i) => {
+    const text = textOf(lines[i]);
+    return { identity: text, value: text };
+  });
+  const { keep, placeholders, duplicates } = keepMask(records);
   const drop = new Set(bulletIdx.filter((_, n) => !keep[n]));
   return {
     content: lines.filter((_, i) => !drop.has(i)).join("\n"),
@@ -580,10 +599,19 @@ function cleanVaultRecords(content: string, kind: VaultRecordKind): CleanedRecor
   switch (kind) {
     case "memory":
       // First table only: the tables below it are archived eras, kept as written.
-      return cleanTable(lines, 0, (row) => rowCell(row, MEMORY_ITEM_COLUMN));
+      return cleanTable(lines, 0, (row) => {
+        const item = rowCell(row, MEMORY_ITEM_COLUMN);
+        return { identity: item, value: item };
+      });
     case "impact-log": {
       const timelineIdx = lines.findIndex((line) => line.startsWith(IMPACT_TIMELINE_HEADING));
-      return cleanTable(lines, timelineIdx === -1 ? 0 : timelineIdx, (row) => `${rowCell(row, 0)} ${rowCell(row, 1)}`);
+      // Identity is the date and the achievement together, but only the achievement
+      // decides whether the row says anything: a date in front of "(none)" would
+      // otherwise make the placeholder row look like real content.
+      return cleanTable(lines, timelineIdx === -1 ? 0 : timelineIdx, (row) => ({
+        identity: `${rowCell(row, 0)} ${rowCell(row, 1)}`,
+        value: rowCell(row, 1),
+      }));
     }
     case "work-context":
       return cleanBullets(lines, ORG_NOTES_HEADING, orgNoteText);
@@ -593,9 +621,32 @@ function cleanVaultRecords(content: string, kind: VaultRecordKind): CleanedRecor
 }
 
 /**
+ * Where to keep the file as it was. The first backup holds the original, so it is never
+ * overwritten: a later run cleaning up a newly arrived placeholder would otherwise
+ * replace the only copy of what the file looked like before any of this ran.
+ */
+function nextBackupPath(path: string): string {
+  const first = `${path}.pre-dedupe.bak`;
+  if (!existsSync(first)) return first;
+
+  for (let n = 2; n < 100; n++) {
+    const candidate = `${path}.pre-dedupe.${n}.bak`;
+    if (!existsSync(candidate)) return candidate;
+  }
+  return `${path}.pre-dedupe.${Date.now()}.bak`;
+}
+
+/** Write through a temp file, so an interrupted run cannot leave the vault file torn. */
+async function writeFileAtomic(path: string, content: string): Promise<void> {
+  const temp = `${path}.${randomUUID()}.tmp`;
+  await writeFile(temp, content, "utf-8");
+  await rename(temp, path);
+}
+
+/**
  * One-off cleanup of the damage the ungated writers did: placeholder rows and repeated
  * records. Keeps a backup, and returns null when there is nothing to change so a second
- * run neither rewrites the file nor overwrites the backup.
+ * run neither rewrites the file nor writes another backup.
  */
 export async function migrateVaultRecordsFile(
   path: string,
@@ -607,7 +658,8 @@ export async function migrateVaultRecordsFile(
   const cleaned = cleanVaultRecords(content, kind);
   if (cleaned.placeholders === 0 && cleaned.duplicates === 0) return null;
 
-  await writeFile(`${path}.pre-dedupe.bak`, content, "utf-8");
-  await writeFile(path, cleaned.content, "utf-8");
-  return { placeholders: cleaned.placeholders, duplicates: cleaned.duplicates };
+  const backup = nextBackupPath(path);
+  await writeFile(backup, content, "utf-8");
+  await writeFileAtomic(path, cleaned.content);
+  return { placeholders: cleaned.placeholders, duplicates: cleaned.duplicates, backup };
 }
