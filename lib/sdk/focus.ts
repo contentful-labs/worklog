@@ -340,6 +340,14 @@ export interface FocusMigrationResult {
   assigned: number;
   collapsed: number;
   lapsed: number;
+  /**
+   * Rows kept side by side that read like each other.
+   *
+   * A score cannot tell "Document C++ build process" from "Review C++ build process",
+   * and this pass deletes lines from a file the user owns, so it collapses only rows
+   * that say the same thing and reports the rest for them to judge.
+   */
+  nearDuplicates: NearDuplicateFocusItem[];
 }
 
 /**
@@ -363,27 +371,37 @@ export function migrateFocusTracking(content: string, keepSinceWeek: string = de
 
   const parsed = parseFocusItems(content);
   // An empty legacy table still needs its header rewritten, or it would migrate on every run.
-  if (parsed.length === 0) return { content: stampFormat(rebuildTable(content, [])), assigned: 0, collapsed: 0, lapsed: 0 };
+  if (parsed.length === 0) {
+    return { content: stampFormat(rebuildTable(content, [])), assigned: 0, collapsed: 0, lapsed: 0, nearDuplicates: [] };
+  }
 
   const kept: FocusItem[] = [];
+  const nearDuplicates: NearDuplicateFocusItem[] = [];
   let collapsed = 0;
   let lapsed = 0;
 
   // Pass 1: collapse duplicates while every row still carries its original status, so two
   // stale pending rows compare equal before either of them is lapsed.
   for (const item of parsed) {
-    // Collapse into any similar row that would lose nothing the user typed; a similar row
-    // with a different outcome is not a match, but a later one may be.
+    // Collapse into a row that says the same thing and would lose nothing the user
+    // typed. Same words only: a row that merely reads alike is another commitment.
+    const canonical = canonicalText(item.item);
     const duplicate = kept.find(
       (candidate) =>
         candidate.week === item.week &&
-        textSimilarity(candidate.item, item.item) >= RESTATEMENT_SIMILARITY &&
+        canonicalText(candidate.item) === canonical &&
         carriesNothingBeyond(item, candidate),
     );
     if (duplicate) {
       collapsed++;
       continue;
     }
+
+    const near = kept.find(
+      (candidate) =>
+        candidate.week === item.week && textSimilarity(candidate.item, item.item) >= RESTATEMENT_SIMILARITY,
+    );
+    if (near) nearDuplicates.push({ item: item.item, candidateId: near.id });
     // Mutate rather than copy: the row's source position and extra cells are keyed on identity.
     item.id = nextId(item.week, kept);
     kept.push(item);
@@ -398,7 +416,13 @@ export function migrateFocusTracking(content: string, keepSinceWeek: string = de
     }
   }
 
-  return { content: stampFormat(rebuildTable(content, kept)), assigned: kept.length, collapsed, lapsed };
+  return {
+    content: stampFormat(rebuildTable(content, kept)),
+    assigned: kept.length,
+    collapsed,
+    lapsed,
+    nearDuplicates,
+  };
 }
 
 /** A duplicate row can go only if its outcome, notes and user cells are empty or already on the kept row. */

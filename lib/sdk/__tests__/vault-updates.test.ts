@@ -284,7 +284,7 @@ describe("migrateFocusTrackingFile", () => {
 |------|------------|--------|-------|
 | 2026-W01 | Ancient still open | pending | |
 | 2026-W09 | Recent still open | pending | |
-| 2026-W09 | Recent still open, reworded slightly | pending | |
+| 2026-W09 | recent  STILL open | pending | |
 | 2026-W10 | Newest still open | pending | |
 `);
 

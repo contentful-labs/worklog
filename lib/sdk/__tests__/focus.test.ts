@@ -260,7 +260,7 @@ describe("migrateFocusTracking", () => {
 | 2026-W01 | Ancient open item | pending | |
 | 2026-W01 | Ancient closed item | completed | done |
 | 2026-W09 | Ship the Search Revamp release correctness loop via TEAM-1234 | pending | |
-| 2026-W09 | Ship the Search Revamp release correctness loop through TEAM-1234 | pending | |
+| 2026-W09 | ship the SEARCH REVAMP  release correctness loop via TEAM-1234 | pending | |
 | 2026-W10 | Recent open item | pending | |
 `;
 
@@ -269,7 +269,7 @@ describe("migrateFocusTracking", () => {
     expect(needsFocusMigration(FILE)).toBe(false);
   });
 
-  it("assigns ids, collapses rewordings, and closes the unreviewable backlog", () => {
+  it("assigns ids, collapses repeats, and closes the unreviewable backlog", () => {
     const { content, assigned, collapsed, lapsed } = migrateFocusTracking(legacy, "2026-W09");
     expect(collapsed).toBe(1);
     expect(assigned).toBe(4);
@@ -281,6 +281,35 @@ describe("migrateFocusTracking", () => {
     // older open items become history, resolved statuses are left alone
     expect(content).toContain("| 2026-W01.1 | 2026-W01 | Ancient open item | lapsed |");
     expect(content).toContain("| 2026-W01.2 | 2026-W01 | Ancient closed item | completed |");
+  });
+
+  it("keeps two legacy rows that read alike but are different tasks", () => {
+    const legacyCpp = `| Week | Focus Item | Status | Notes |
+|---|---|---|---|
+| 2026-W09 | Document C++ build process | pending | |
+| 2026-W09 | Review C++ build process | pending | |
+`;
+
+    const { content, assigned, collapsed, nearDuplicates } = migrateFocusTracking(legacyCpp, "2026-W09");
+
+    expect(collapsed).toBe(0);
+    expect(assigned).toBe(2);
+    expect(content).toContain("Document C++ build process");
+    expect(content).toContain("Review C++ build process");
+    expect(nearDuplicates).toEqual([{ item: "Review C++ build process", candidateId: "2026-W09.1" }]);
+  });
+
+  it("keeps an elaboration of a legacy row as its own commitment", () => {
+    const legacyPair = `| Week | Focus Item | Status | Notes |
+|---|---|---|---|
+| 2026-W09 | Ship the Search Revamp release via TEAM-1234 | pending | |
+| 2026-W09 | Ship the Search Revamp release via TEAM-1234 and TEAM-1235 | pending | |
+`;
+
+    const { assigned, collapsed, nearDuplicates } = migrateFocusTracking(legacyPair, "2026-W09");
+
+    expect({ assigned, collapsed }).toEqual({ assigned: 2, collapsed: 0 });
+    expect(nearDuplicates).toHaveLength(1);
   });
 
   it("lapses stale ongoing rows too, not only pending ones", () => {
@@ -438,7 +467,7 @@ describe("user-added columns", () => {
 |---|---|---|---|---|
 | 2026-W09 | Ship the Search Revamp release via TEAM-1234 | pending | first note | Owner A |
 | 2026-W09 | Ship the Search Revamp release through TEAM-1234 | pending | second note | Owner B |
-| 2026-W09 | Ship the Search Revamp release through TEAM-1234 again | pending |  |  |
+| 2026-W09 | ship the search revamp release  THROUGH TEAM-1234 | pending |  |  |
 `;
     const { content, collapsed, assigned } = migrateFocusTracking(legacy, "2026-W09");
     // the empty third row collapses; the second carries its own note and owner, so it stays
@@ -452,8 +481,8 @@ describe("user-added columns", () => {
     const legacy = `| Week | Focus Item | Status | Notes |
 |---|---|---|---|
 | 2026-W09 | Ship the auth PR | completed | |
-| 2026-W09 | Ship auth PR now | pending | |
-| 2026-W09 | Ship the auth PR now | pending | |
+| 2026-W09 | Ship the auth PR | pending | |
+| 2026-W09 | ship the AUTH pr | pending | |
 `;
     const { assigned, collapsed } = migrateFocusTracking(legacy, "2026-W09");
     expect(collapsed).toBe(1);
@@ -464,7 +493,7 @@ describe("user-added columns", () => {
     const legacy = `| Week | Focus Item | Status | Notes |
 |---|---|---|---|
 | 2026-W01 | Ship the auth PR | pending | |
-| 2026-W01 | Ship auth PR now | pending | |
+| 2026-W01 | ship the auth  PR | pending | |
 `;
     const { assigned, collapsed, lapsed } = migrateFocusTracking(legacy, "2026-W09");
     expect({ assigned, collapsed, lapsed }).toEqual({ assigned: 1, collapsed: 1, lapsed: 1 });
@@ -474,12 +503,12 @@ describe("user-added columns", () => {
     const legacy = `| Week | Focus Item | Status | Notes |
 |---|---|---|---|
 | 2026-W09 | Ship the auth PR | pending | |
-| 2026-W09 | Ship auth PR now | completed | |
+| 2026-W09 | ship the auth PR | completed | |
 `;
     const { content, collapsed } = migrateFocusTracking(legacy, "2026-W09");
     expect(collapsed).toBe(0);
     expect(content).toContain("| Ship the auth PR | pending |");
-    expect(content).toContain("| Ship auth PR now | completed |");
+    expect(content).toContain("| ship the auth PR | completed |");
   });
 
   it("survive the legacy migration, header included", () => {
