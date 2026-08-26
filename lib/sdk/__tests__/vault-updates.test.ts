@@ -235,7 +235,27 @@ describe("updateFocusTracking", () => {
     expect(content).toContain("lapsed after 2 reviews");
   });
 
-  it("treats a reworded suggestion as a restatement, not a new row", async () => {
+  it("treats a suggestion re-raised word for word as a restatement, not a new row", async () => {
+    const path = join(tmpDir, "focus.md");
+    await writeFile(path, `| ID | Week | Focus Item | Status | Reviews | Notes |
+|------|------|------|------|------|------|
+| 2026-W09.1 | 2026-W09 | Close the Search Revamp release correctness loop through TEAM-1234 | pending | 1 |  |
+`);
+
+    const result = await updateFocusTracking(path, {
+      focusItems: ["close the search revamp release correctness loop through TEAM-1234"],
+      focusUpdates: [], reviewedIds: [], weekLabel: "2026-W10",
+    });
+
+    const content = await readFile(path, "utf-8");
+    expect(result.restated).toBe(1);
+    expect(result.added).toBe(0);
+    expect(content.match(/2026-W\d\d\.\d/g)).toHaveLength(1);
+    expect(content).toContain("restated 2026-W10");
+    expect(content).toContain("| pending | 0 |");
+  });
+
+  it("records a reworded suggestion as its own item", async () => {
     const path = join(tmpDir, "focus.md");
     await writeFile(path, `| ID | Week | Focus Item | Status | Reviews | Notes |
 |------|------|------|------|------|------|
@@ -247,12 +267,11 @@ describe("updateFocusTracking", () => {
       focusUpdates: [], reviewedIds: [], weekLabel: "2026-W10",
     });
 
-    const content = await readFile(path, "utf-8");
-    expect(result.restated).toBe(1);
-    expect(result.added).toBe(0);
-    expect(content.match(/2026-W\d\d\.\d/g)).toHaveLength(1);
-    expect(content).toContain("restated 2026-W10");
-    expect(content).toContain("| pending | 0 |");
+    expect(result.added).toBe(1);
+    expect(result.restated).toBe(0);
+    expect(result.nearDuplicates).toHaveLength(1);
+    expect(result.nearDuplicates[0].candidateId).toBe("2026-W09.1");
+    expect((await readFile(path, "utf-8")).match(/2026-W\d\d\.\d/g)).toHaveLength(2);
   });
 });
 

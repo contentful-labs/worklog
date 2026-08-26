@@ -668,6 +668,7 @@ export async function runWorklog(opts: {
         lapseAfter: DEFAULT_LAPSE_AFTER,
       });
       log(`Focus: ${focusResult.resolved} resolved, ${focusResult.lapsed} lapsed, ${focusResult.added} added, ${focusResult.restated} restated`);
+      for (const near of focusResult.nearDuplicates) p.log.warn(`added "${near.item}"; looks close to open item ${near.candidateId}`);
     }
 
     const ctxMs = Math.round(performance.now() - ctxStart);

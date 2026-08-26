@@ -191,13 +191,44 @@ describe("applyFocusUpdates", () => {
     expect(result.content.indexOf("Brand new")).toBeLessThan(result.content.indexOf("ARCHIVED"));
   });
 
-  it("restates a reworded suggestion instead of duplicating it, and resets its clock", () => {
+  it("restates a suggestion re-raised word for word, and resets its clock", () => {
     const result = applyFocusUpdates(base, {
-      reviewedIds: [], updates: [], newItems: ["Review the RFC thoroughly"], weekLabel: "2026-W10",
+      reviewedIds: [], updates: [], newItems: ["  review   RFC "], weekLabel: "2026-W10",
     });
     expect(result.restated).toBe(1);
     expect(result.added).toBe(0);
+    expect(result.nearDuplicates).toEqual([]);
     expect(result.content).toContain("| Review RFC | pending | 0 | restated 2026-W10 |");
+  });
+
+  it("adds a reworded suggestion and reports what it reads like", () => {
+    const result = applyFocusUpdates(base, {
+      reviewedIds: [], updates: [], newItems: ["Review the RFC thoroughly"], weekLabel: "2026-W10",
+    });
+    expect(result.added).toBe(1);
+    expect(result.restated).toBe(0);
+    expect(result.nearDuplicates).toEqual([{ item: "Review the RFC thoroughly", candidateId: "2026-W09.2" }]);
+    expect(result.content).toContain("| Review RFC | pending | 1 |");
+    expect(result.content).toContain("| Review the RFC thoroughly | pending | 0 |");
+  });
+
+  it("does not fold a new task into an open one that shares a name", () => {
+    const withCpp = `# Focus Tracking
+
+| ID | Week | Focus Item | Status | Reviews | Notes |
+|------|------|------|------|------|------|
+| 2026-W09.1 | 2026-W09 | Document C++ build process | pending | 0 |  |
+`;
+
+    const result = applyFocusUpdates(withCpp, {
+      reviewedIds: [], updates: [], newItems: ["Review C++ build process"], weekLabel: "2026-W10",
+    });
+
+    expect(result.added).toBe(1);
+    expect(result.restated).toBe(0);
+    expect(result.nearDuplicates).toEqual([{ item: "Review C++ build process", candidateId: "2026-W09.1" }]);
+    expect(result.content).toContain("Document C++ build process");
+    expect(result.content).toContain("Review C++ build process");
   });
 
   it("ignores a status row for an id that does not exist", () => {

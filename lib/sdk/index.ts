@@ -59,7 +59,10 @@ export type { BragBookResult, ReviewInfo } from "./brag-book";
 export { parseBragBookResult, parseReviewCycle, ensureBragBookFrontmatter } from "./brag-book";
 
 // Focus tracking
-export type { FocusItem, FocusStatusUpdate, ApplyFocusOptions, ApplyFocusResult, FocusMigrationResult } from "./focus";
+export type {
+  FocusItem, FocusStatusUpdate, ApplyFocusOptions, ApplyFocusResult, NearDuplicateFocusItem,
+  FocusMigrationResult,
+} from "./focus";
 export {
   FOCUS_OPEN_STATUS, FOCUS_ONGOING_STATUS, FOCUS_LAPSED_STATUS, FOCUS_TRACKING_TEMPLATE,
   DEFAULT_LAPSE_AFTER, DEFAULT_INJECT_CAP, isOpenFocusStatus,

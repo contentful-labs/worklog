@@ -13,7 +13,7 @@
 
 import { isTableSeparator, splitRow, renderRow, appendToFirstTable } from "./markdown-table";
 import { weekIdForDate } from "./week-utils";
-import { SIMILARITY_THRESHOLD, textSimilarity } from "./text-similarity";
+import { SIMILARITY_THRESHOLD, canonicalText, textSimilarity } from "./text-similarity";
 
 // Kept under the focus names so existing callers and the SDK barrel do not move.
 export { normalizeText as normalizeFocusText, textSimilarity as focusSimilarity } from "./text-similarity";
@@ -489,6 +489,13 @@ export interface ApplyFocusOptions {
   lapseAfter?: number;
 }
 
+/** A new item that reads like one already open, recorded for the user to judge. */
+export interface NearDuplicateFocusItem {
+  item: string;
+  /** Id of the open item it reads like. */
+  candidateId: string;
+}
+
 export interface ApplyFocusResult {
   content: string;
   /** Closed with a terminal status this week. */
@@ -498,6 +505,14 @@ export interface ApplyFocusResult {
   lapsed: number;
   added: number;
   restated: number;
+  /**
+   * Items that were added even though an open item scores as similar.
+   *
+   * Reported rather than merged: a score cannot tell "Document C++ build process" from
+   * "Review C++ build process", and folding the second into the first loses a task the
+   * coach asked for. The user decides.
+   */
+  nearDuplicates: NearDuplicateFocusItem[];
 }
 
 /**
@@ -546,19 +561,26 @@ export function applyFocusUpdates(content: string, options: ApplyFocusOptions): 
   }
 
   const created: FocusItem[] = [];
+  const nearDuplicates: NearDuplicateFocusItem[] = [];
   for (const text of newItems) {
     const trimmed = text.trim();
     if (!trimmed) continue;
 
     const open = [...items, ...created].filter((item) => isOpenFocusStatus(item.status));
-    const existing = open.find((item) => textSimilarity(item.item, trimmed) >= RESTATEMENT_SIMILARITY);
+    const canonical = canonicalText(trimmed);
+    const existing = open.find((item) => canonicalText(item.item) === canonical);
     if (existing) {
-      // Re-raised rather than new: keep one row, reset its clock, and record the repeat.
+      // Re-raised word for word: keep one row, reset its clock, and record the repeat.
       existing.reviews = 0;
       existing.notes = appendNote(existing.notes, `restated ${weekLabel}`);
       restated++;
       continue;
     }
+
+    // Anything short of the same text is a new commitment. The score still has
+    // something useful to say about it, so say it rather than act on it.
+    const near = open.find((item) => textSimilarity(item.item, trimmed) >= RESTATEMENT_SIMILARITY);
+    if (near) nearDuplicates.push({ item: trimmed, candidateId: near.id });
 
     created.push({
       id: nextId(weekLabel, [...items, ...created]),
@@ -572,5 +594,5 @@ export function applyFocusUpdates(content: string, options: ApplyFocusOptions): 
 
   let next = writeItemsInPlace(content, items);
   next = appendToFirstTable(next, created.map((item) => renderItem(item)));
-  return { content: next, resolved, carried, lapsed, added: created.length, restated };
+  return { content: next, resolved, carried, lapsed, added: created.length, restated, nearDuplicates };
 }
