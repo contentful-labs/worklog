@@ -83,6 +83,8 @@ const KEY_STRENGTHS_HEADING = "## Key Strengths";
 const LAST_IMPACT_PREFIX = "**Last significant impact:**";
 const CURRENT_GAP_PREFIX = "**Current gap:**";
 const LAST_UPDATED_PREFIX = "*Last updated:";
+/** What the gap line says when the latest impact is this week's. */
+const GAP_CLOSED = "None - recent entry added";
 
 /** Bare words the model writes when it means "nothing to record". */
 const PLACEHOLDER_WORDS = new Set(["none", "n a", "na", "nil", "nothing", "tbd", "todo", "unknown"]);
@@ -537,7 +539,26 @@ function sectionEnd(lines: readonly string[], headingIdx: number): number {
 }
 
 /**
- * Index of the live H2 whose text is exactly `heading`, or -1.
+ * True when a heading is the one this code maintains.
+ *
+ * The text has to match, or match with a single parenthesized qualifier after it and
+ * nothing else. People annotate their own headings: a real vault reads
+ * `## Key Strengths (for coaching context)`, and refusing that left the file neither
+ * written to nor cleaned. `## Key Strengths Archive` and `## Key Strengths: old` are
+ * still somebody else's section.
+ */
+function headingMatches(text: string, target: string): boolean {
+  if (text === target) return true;
+
+  const opener = `${target} (`;
+  if (!text.startsWith(opener) || !text.endsWith(")")) return false;
+
+  const qualifier = text.slice(opener.length, -1);
+  return qualifier.length > 0 && !qualifier.includes("(") && !qualifier.includes(")");
+}
+
+/**
+ * Index of the live H2 that is `heading`, or -1.
  *
  * Used where landing in the wrong section writes or deletes someone else's data:
  * `## Impact Timeline Notes` is not the impact timeline.
@@ -545,7 +566,8 @@ function sectionEnd(lines: readonly string[], headingIdx: number): number {
 function findExactHeading(lines: readonly string[], heading: string, limit: number): number {
   const target = h2Text(heading) ?? canonicalText(heading);
   for (let i = bodyStart(lines); i < limit; i++) {
-    if (h2Text(lines[i]) === target) return i;
+    const text = h2Text(lines[i]);
+    if (text !== null && headingMatches(text, target)) return i;
   }
   return -1;
 }
@@ -926,6 +948,41 @@ export async function updateMemory(
  * "no-section" is the file not having the live heading to write under, which is worth
  * telling the user about: the update existed and had nowhere to go.
  */
+/** How long ago an impact was, in whole weeks, as the gap line says it. */
+function gapText(latest: string, now: Date): string {
+  const weeks = Math.floor((now.getTime() - Date.parse(`${latest}T00:00:00Z`)) / (7 * 24 * 60 * 60 * 1000));
+  if (!Number.isFinite(weeks) || weeks < 1) return GAP_CLOSED;
+  return `${weeks} week${weeks === 1 ? "" : "s"}`;
+}
+
+/**
+ * Point the timeline's status lines at the rows that are still there.
+ *
+ * The cleanup can remove the row those lines were describing: a placeholder row dated
+ * later than every real one left the file claiming an impact on a date it no longer
+ * held. Nothing is rewritten when no dated row survives, since there is then nothing
+ * truthful to say.
+ */
+function refreshImpactStatus(content: string, eol: string, now: Date): string {
+  const lines = toLines(content);
+  const scan = maskFenced(lines);
+  const liveEnd = liveRegionEnd(scan);
+
+  const headingIdx = findExactHeading(scan, IMPACT_TIMELINE_HEADING, liveEnd);
+  if (headingIdx === -1) return content;
+
+  const scope = sectionScope(scan, headingIdx, liveEnd);
+  const table = findTableByHeader(scan, headingIdx, scope, IMPACT_HEADER);
+  if (!table) return content;
+
+  const latest = latestRowDate(lines.slice(table.rowStart, Math.min(table.rowEnd, scope)));
+  if (latest.length === 0) return content;
+
+  replaceFirstLine(lines, scan, headingIdx, scope, LAST_IMPACT_PREFIX, `${LAST_IMPACT_PREFIX} ${latest}`);
+  replaceFirstLine(lines, scan, headingIdx, scope, CURRENT_GAP_PREFIX, `${CURRENT_GAP_PREFIX} ${gapText(latest, now)}`);
+  return lines.join(eol);
+}
+
 /** True for a `YYYY-MM-DD` cell, the only thing worth comparing as a date. */
 function isIsoDate(value: string): boolean {
   if (value.length !== 10 || value[4] !== "-" || value[7] !== "-") return false;
@@ -1005,8 +1062,11 @@ export async function updateImpactLog(
     const shifted = maskFenced(lines);
     const metadataEnd = sectionScope(shifted, headingIdx, liveRegionEnd(shifted));
     changed = replaceFirstLine(lines, shifted, headingIdx, metadataEnd, LAST_IMPACT_PREFIX, `${LAST_IMPACT_PREFIX} ${latest}`) || changed;
-    if (latest === entry.date) {
-      changed = replaceFirstLine(lines, shifted, headingIdx, metadataEnd, CURRENT_GAP_PREFIX, `${CURRENT_GAP_PREFIX} None - recent entry added`) || changed;
+    // Only a row that was actually added closes the gap. Replaying a week that is
+    // already recorded changes nothing, and saying "recent entry added" for it would
+    // erase a gap the user is meant to see.
+    if (counts.added === 1 && latest === entry.date) {
+      changed = replaceFirstLine(lines, shifted, headingIdx, metadataEnd, CURRENT_GAP_PREFIX, `${CURRENT_GAP_PREFIX} ${GAP_CLOSED}`) || changed;
     }
   }
 
@@ -1365,7 +1425,7 @@ function foldNothing(): null {
  * file whose headings do not match is left alone rather than half cleaned, and
  * "## Impact Timeline Notes" is never mistaken for the timeline.
  */
-function cleanVaultRecords(content: string, kind: VaultRecordKind): CleanedRecords {
+function cleanVaultRecords(content: string, kind: VaultRecordKind, now: Date): CleanedRecords {
   const eol = detectEol(content);
   const lines = toLines(content);
   const scan = maskFenced(lines);
@@ -1391,10 +1451,11 @@ function cleanVaultRecords(content: string, kind: VaultRecordKind): CleanedRecor
     case "impact-log": {
       const headingIdx = findExactHeading(scan, IMPACT_TIMELINE_HEADING, liveEnd);
       if (headingIdx === -1) return unchanged(lines, eol);
+      // Assigned below so the status lines can be refreshed once the rows are settled.
       // Identity is the date and the achievement together, but only the achievement
       // decides whether the row says anything: a date in front of "(none)" would
       // otherwise make the placeholder row look like real content.
-      return cleanTable(
+      const cleaned = cleanTable(
         lines,
         scan,
         headingIdx,
@@ -1404,6 +1465,8 @@ function cleanVaultRecords(content: string, kind: VaultRecordKind): CleanedRecor
         (row) => ({ line: row, identity: impactIdentity(row), value: rowCell(row, 1) }),
         foldRowCells([IMPACT_EVIDENCE_COLUMN]),
       );
+      if (cleaned.placeholders === 0 && cleaned.duplicates === 0) return cleaned;
+      return { ...cleaned, content: refreshImpactStatus(cleaned.content, eol, now) };
     }
 
     case "work-context": {
@@ -1473,11 +1536,12 @@ async function writeFileAtomic(path: string, content: string): Promise<void> {
 export async function migrateVaultRecordsFile(
   path: string,
   kind: VaultRecordKind,
+  now: Date = new Date(),
 ): Promise<VaultRecordsMigration | null> {
   if (!existsSync(path)) return null;
 
   const content = await readFile(path, "utf-8");
-  const cleaned = cleanVaultRecords(content, kind);
+  const cleaned = cleanVaultRecords(content, kind, now);
   if (cleaned.placeholders === 0 && cleaned.duplicates === 0) return null;
 
   const backup = nextBackupPath(path);

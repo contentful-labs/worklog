@@ -3100,3 +3100,145 @@ describe("the files the generators seed", () => {
     expect(await readFile(path, "utf-8")).toBe(seeded);
   });
 });
+
+describe("a heading the user has annotated", () => {
+  it("writes to and cleans a Key Strengths section with a qualifier", async () => {
+    const path = join(tmpDir, "my-profile.md");
+    await writeFile(path, `# My Profile
+
+## Key Strengths (for coaching context)
+
+- (none)
+- (none)
+- Untangles flaky test suites other people avoid
+
+---
+
+*Last updated: 2026-02-01*
+`);
+
+    expect(await migrateVaultRecordsFile(path, "my-profile")).toMatchObject({ placeholders: 2, duplicates: 0 });
+    expect(await updateProfile(path, { achievement: "Rollout", bulletPoint: "Runs multi-team rollouts" }))
+      .toMatchObject({ status: "written" });
+
+    const content = await readFile(path, "utf-8");
+    expect(content).not.toContain("(none)");
+    expect(content).toContain("- Runs multi-team rollouts");
+  });
+
+  it("accepts a qualifier on the other two managed headings", async () => {
+    const workContext = join(tmpDir, "work-context.md");
+    await writeFile(workContext, CLEAN_WORK_CONTEXT.replace("## Organizational Notes", "## Organizational Notes (team era)"));
+    expect(await updateWorkContext(workContext, [
+      { category: "team", info: "Support rota rotates fortnightly", source: "TEAM-1400" },
+    ], new Date("2026-03-08T00:00:00Z"))).toMatchObject({ status: "written" });
+
+    const impact = join(tmpDir, "impact-log.md");
+    await writeFile(impact, CLEAN_IMPACT_LOG.replace("## Impact Timeline", "## Impact Timeline (2026)"));
+    expect(await updateImpactLog(impact, IMPACT_ENTRY)).toMatchObject({ status: "written" });
+  });
+
+  it("still refuses a heading that is a different section", async () => {
+    for (const heading of ["## Key Strengths Archive", "## Key Strengths: old", "## Key Strengths (a) (b)"]) {
+      const path = join(tmpDir, `profile-${heading.length}.md`);
+      await writeFile(path, `# My Profile
+
+${heading}
+
+- Something else
+`);
+      expect(await updateProfile(path, { achievement: "Rollout", bulletPoint: "Runs multi-team rollouts" }), heading)
+        .toMatchObject({ status: "no-section" });
+    }
+  });
+});
+
+describe("impact status lines after a cleanup", () => {
+  it("points at the newest surviving row when the latest one was a placeholder", async () => {
+    const path = join(tmpDir, "impact-log.md");
+    await writeFile(path, `# Impact Log
+
+## Impact Timeline
+
+| Date | Achievement | Scope | Core Value | Evidence |
+|------|-------------|-------|------------|----------|
+| 2026-03-01 | Led the Search Revamp rollout | org | craft | TEAM-1234 |
+| 2026-03-08 | (none) | | | |
+
+**Last significant impact:** 2026-03-08
+**Current gap:** None - recent entry added
+`);
+
+    expect(await migrateVaultRecordsFile(path, "impact-log", new Date("2026-03-29T00:00:00Z")))
+      .toMatchObject({ placeholders: 1 });
+
+    const content = await readFile(path, "utf-8");
+    expect(content).not.toContain("(none)");
+    expect(content).toContain("**Last significant impact:** 2026-03-01");
+    expect(content).toContain("**Current gap:** 4 weeks");
+  });
+
+  it("leaves the lines alone when no dated row survives", async () => {
+    const path = join(tmpDir, "impact-log.md");
+    await writeFile(path, `# Impact Log
+
+## Impact Timeline
+
+| Date | Achievement | Scope | Core Value | Evidence |
+|------|-------------|-------|------------|----------|
+| 2026-03-08 | (none) | | | |
+
+**Last significant impact:** 2026-03-08
+**Current gap:** None - recent entry added
+`);
+
+    await migrateVaultRecordsFile(path, "impact-log", new Date("2026-03-29T00:00:00Z"));
+
+    const content = await readFile(path, "utf-8");
+    expect(content).not.toContain("(none)");
+    expect(content).toContain("**Last significant impact:** 2026-03-08");
+  });
+});
+
+describe("replaying a week already recorded", () => {
+  it("leaves both status lines exactly as they were", async () => {
+    const path = join(tmpDir, "impact-log.md");
+    const file = `# Impact Log
+
+## Impact Timeline
+
+| Date | Achievement | Scope | Core Value | Evidence |
+|------|-------------|-------|------------|----------|
+| 2026-03-05 | Led the Search Revamp rollout across three teams | org | craft | TEAM-1234 |
+
+**Last significant impact:** 2026-03-05
+**Current gap:** 25 weeks
+`;
+    await writeFile(path, file);
+
+    // A --force regeneration of a week the file already holds.
+    expect(await updateImpactLog(path, IMPACT_ENTRY)).toMatchObject({ status: "unchanged", added: 0 });
+    expect(await readFile(path, "utf-8")).toBe(file);
+  });
+
+  it("closes the gap when the entry is genuinely new", async () => {
+    const path = join(tmpDir, "impact-log.md");
+    await writeFile(path, `# Impact Log
+
+## Impact Timeline
+
+| Date | Achievement | Scope | Core Value | Evidence |
+|------|-------------|-------|------------|----------|
+| 2026-02-01 | An earlier impact | team | craft | TEAM-1000 |
+
+**Last significant impact:** 2026-02-01
+**Current gap:** 25 weeks
+`);
+
+    expect(await updateImpactLog(path, IMPACT_ENTRY)).toMatchObject({ status: "written", added: 1 });
+
+    const content = await readFile(path, "utf-8");
+    expect(content).toContain("**Last significant impact:** 2026-03-05");
+    expect(content).toContain("**Current gap:** None - recent entry added");
+  });
+});
