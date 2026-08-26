@@ -375,18 +375,32 @@ describe("isPlaceholder", () => {
 });
 
 describe("updateMemory record identity", () => {
-  it("drops a reworded repeat of a row already in the current table", async () => {
+  it("drops a repeat of a row already in the current table", async () => {
     const path = join(tmpDir, "memory.md");
     await writeFile(path, CLEAN_MEMORY);
 
     await updateMemory(path, [
-      "| 2026-03-08 | Wrote a fallback path for the Search Revamp indexer | project | TEAM-1234 |",
+      "| 2026-03-08 |   wrote the FALLBACK path for the Search Revamp indexer | project | TEAM-1234 |",
       "| 2026-03-08 | Reviewed the alert noise backlog with the on-call rota | support |  |",
     ], []);
 
     const content = await readFile(path, "utf-8");
-    expect(content.match(/fallback path/g)).toHaveLength(1);
+    expect(content.match(/fallback path/gi)).toHaveLength(1);
     expect(content).toContain("alert noise backlog");
+  });
+
+  it("writes a row that reads like one already there but is not the same text", async () => {
+    const path = join(tmpDir, "memory.md");
+    await writeFile(path, CLEAN_MEMORY);
+
+    // Similarity would call this the same row. It is not, and only the writer's own
+    // text can decide that: rejecting it loses whatever the second row says.
+    await updateMemory(path, [
+      "| 2026-03-08 | Wrote a second fallback path for the Search Revamp indexer | project | TEAM-1240 |",
+    ], []);
+
+    const content = await readFile(path, "utf-8");
+    expect(content.match(/fallback path/g)).toHaveLength(2);
   });
 
   it("drops placeholder rows the model emits when it has nothing to add", async () => {
@@ -441,17 +455,31 @@ describe("updateWorkContext record identity", () => {
 
     await updateWorkContext(path, [
       { category: "process", info: "(none)", source: "unknown" },
-      { category: "process", info: "Release trains now ship on Tuesdays", source: "TEAM-1200" },
+      { category: "process", info: "Release trains ship on Tuesdays", source: "TEAM-1200" },
       { category: "team", info: "Design review happens on Thursday afternoons", source: "TEAM-1300" },
-      { category: "team", info: "Design review happens Thursday afternoons", source: "TEAM-1301" },
+      { category: "team", info: "design review   happens on THURSDAY afternoons", source: "TEAM-1301" },
     ]);
 
     const content = await readFile(path, "utf-8");
     expect(content).not.toContain("(none)");
+    // The first is the note already in the file, word for word.
     expect(content.match(/ship on Tuesdays/g)).toHaveLength(1);
-    expect(content.match(/Design review happens/g)).toHaveLength(1);
+    expect(content.match(/[Dd]esign review\s+happens/g)).toHaveLength(1);
     // One bullet, but it cites both tickets that reported the same fact.
     expect(content).toContain("_(TEAM-1300, TEAM-1301)_");
+  });
+
+  it("writes a note that reads like one already there but says something else", async () => {
+    const path = join(tmpDir, "work-context.md");
+    await writeFile(path, CLEAN_WORK_CONTEXT);
+
+    await updateWorkContext(path, [
+      { category: "process", info: "Release trains ship on Tuesdays and require manager approval", source: "TEAM-1300" },
+    ], new Date("2026-03-08T00:00:00Z"));
+
+    const content = await readFile(path, "utf-8");
+    expect(content).toContain("- **process:** Release trains ship on Tuesdays _(TEAM-1200)_");
+    expect(content).toContain("require manager approval");
   });
 
   it("keeps new notes inside the Organizational Notes section", async () => {
@@ -475,14 +503,27 @@ describe("updateProfile record identity", () => {
     expect(await readFile(path, "utf-8")).toBe(CLEAN_PROFILE);
   });
 
-  it("rejects a reworded repeat of a strength already listed", async () => {
+  it("rejects a repeat of a strength already listed", async () => {
     const path = join(tmpDir, "my-profile.md");
     await writeFile(path, CLEAN_PROFILE);
-    await updateProfile(path, {
+    expect(await updateProfile(path, {
       achievement: "Test suite cleanup",
-      bulletPoint: "Untangles the flaky test suites that other people avoid",
-    });
+      bulletPoint: "  untangles FLAKY test suites   other people avoid",
+    })).toBe("placeholder");
     expect(await readFile(path, "utf-8")).toBe(CLEAN_PROFILE);
+  });
+
+  it("writes a strength that reads like one already listed but is not the same claim", async () => {
+    const path = join(tmpDir, "my-profile.md");
+    await writeFile(path, CLEAN_PROFILE);
+    expect(await updateProfile(path, {
+      achievement: "Test suite cleanup",
+      bulletPoint: "Untangles the flaky test suites that other people avoid, then teaches the fix",
+    })).toBe("written");
+
+    const content = await readFile(path, "utf-8");
+    expect(content).toContain("- Untangles flaky test suites other people avoid");
+    expect(content).toContain("then teaches the fix");
   });
 
   it("adds a genuinely new strength inside the section", async () => {
@@ -745,7 +786,7 @@ describe("record dedupe threshold", () => {
     expect(content.match(/intake and normalization layer/g)).toHaveLength(1);
   });
 
-  it("still rejects the same fact written a different way", async () => {
+  it("folds the source when the same note arrives again word for word", async () => {
     const path = join(tmpDir, "work-context.md");
     await writeFile(path, `# Work Context
 
@@ -761,7 +802,7 @@ describe("record dedupe threshold", () => {
     await updateWorkContext(path, [
       {
         category: "process",
-        info: "Release readiness reviews now happen on Wednesday, moved from Tuesday",
+        info: "Release readiness reviews moved from Tuesday to Wednesday",
         source: "TEAM-1300",
       },
     ]);
@@ -1169,11 +1210,11 @@ describe("repeats inside one batch", () => {
 
     await updateWorkContext(path, [
       { category: "team", info: "Support rota rotates fortnightly", source: "TEAM-1400" },
-      { category: "team", info: "The support rota rotates fortnightly", source: "TEAM-1401" },
+      { category: "team", info: "support rota   rotates FORTNIGHTLY", source: "TEAM-1401" },
     ], new Date("2026-03-08T00:00:00Z"));
 
     const content = await readFile(path, "utf-8");
-    expect(content.match(/rota rotates fortnightly/g)).toHaveLength(1);
+    expect(content.match(/rota\s+rotates\s+fortnightly/gi)).toHaveLength(1);
     expect(content).toContain("_(TEAM-1400, TEAM-1401)_");
   });
 });
@@ -1354,5 +1395,120 @@ describe("migration section bounds", () => {
 
     expect(await migrateVaultRecordsFile(path, "my-profile")).toBeNull();
     expect(await readFile(path, "utf-8")).toBe(file);
+  });
+});
+
+describe("an ambiguous graduation removes nothing", () => {
+  const TWO_MIGRATIONS = `# Memory
+
+| Date | Item | Category | Notes |
+|------|------|----------|-------|
+| 2026-03-01 | Ship Search Revamp backend migration | project | TEAM-1234 |
+| 2026-03-02 | Ship Search Revamp frontend migration | project | TEAM-1235 |
+`;
+
+  it("leaves both rows when the removal names neither of them clearly", async () => {
+    const path = join(tmpDir, "memory.md");
+    await writeFile(path, TWO_MIGRATIONS);
+
+    await updateMemory(path, [], ["Ship Search Revamp migration (now part of: shipped the migration)"]);
+
+    const content = await readFile(path, "utf-8");
+    expect(content).toContain("backend migration");
+    expect(content).toContain("frontend migration");
+  });
+
+  it("removes the row when the removal names one of them", async () => {
+    const path = join(tmpDir, "memory.md");
+    await writeFile(path, TWO_MIGRATIONS);
+
+    await updateMemory(path, [], ["Shipping the Search Revamp backend migration (now part of: shipped the migration)"]);
+
+    const content = await readFile(path, "utf-8");
+    expect(content).not.toContain("backend migration");
+    expect(content).toContain("frontend migration");
+  });
+
+  it("still removes one of two rows that are the same record twice", async () => {
+    const path = join(tmpDir, "memory.md");
+    await writeFile(path, `# Memory
+
+| Date | Item | Category | Notes |
+|------|------|----------|-------|
+| 2026-03-01 | Reviewed the Search Revamp rollout plan with the platform team | project |  |
+| 2026-03-02 | Reviewed the Search Revamp rollout plan with the platform team | project |  |
+`);
+
+    await updateMemory(path, [], ["Search Revamp rollout plan review with the platform team (now part of: ran the rollout)"]);
+
+    const content = await readFile(path, "utf-8");
+    expect(content.match(/rollout plan/g)).toHaveLength(1);
+  });
+});
+
+describe("evidence is merged as whole values", () => {
+  it("does not let one ticket swallow another with the same prefix", async () => {
+    const path = join(tmpDir, "impact-log.md");
+    await writeFile(path, CLEAN_IMPACT_LOG);
+
+    await updateImpactLog(path, { ...IMPACT_ENTRY, evidence: "TEAM-123" });
+    await updateImpactLog(path, { ...IMPACT_ENTRY, evidence: "TEAM-1234" });
+
+    const content = await readFile(path, "utf-8");
+    expect(content).toContain("| TEAM-123, TEAM-1234 |");
+  });
+
+  it("does not repeat a value that is already listed", async () => {
+    const path = join(tmpDir, "impact-log.md");
+    await writeFile(path, CLEAN_IMPACT_LOG);
+
+    await updateImpactLog(path, { ...IMPACT_ENTRY, evidence: "TEAM-1234, TEAM-1235" });
+    await updateImpactLog(path, { ...IMPACT_ENTRY, evidence: "TEAM-1235; TEAM-1234" });
+
+    const content = await readFile(path, "utf-8");
+    expect(content).toContain("| TEAM-1234, TEAM-1235 |");
+  });
+});
+
+describe("writers require the exact section heading", () => {
+  it("does not file strengths under a section merely named like Key Strengths", async () => {
+    const path = join(tmpDir, "my-profile.md");
+    const file = `# My Profile
+
+## Key Strengths Archive
+
+- Something from a previous role
+`;
+    await writeFile(path, file);
+
+    expect(await updateProfile(path, { achievement: "Rollout", bulletPoint: "Runs multi-team rollouts" }))
+      .toBe("no-section");
+    expect(await readFile(path, "utf-8")).toBe(file);
+  });
+
+  it("does not file notes under a section merely named like Organizational Notes", async () => {
+    const path = join(tmpDir, "work-context.md");
+    const file = `# Work Context
+
+## Organizational Notes Archive
+
+- **process:** Something from a previous era _(TEAM-0001)_
+`;
+    await writeFile(path, file);
+
+    expect(await updateWorkContext(path, [
+      { category: "team", info: "Support rota rotates fortnightly", source: "TEAM-1400" },
+    ], new Date("2026-03-08T00:00:00Z"))).toBe("no-section");
+    expect(await readFile(path, "utf-8")).toBe(file);
+  });
+
+  it("reports a write and a no-op distinctly", async () => {
+    const path = join(tmpDir, "my-profile.md");
+    await writeFile(path, CLEAN_PROFILE);
+
+    expect(await updateProfile(path, { achievement: "Rollout", bulletPoint: "Runs multi-team rollouts" }))
+      .toBe("written");
+    expect(await updateProfile(path, { achievement: "Rollout", bulletPoint: "Runs multi-team rollouts" }))
+      .toBe("placeholder");
   });
 });

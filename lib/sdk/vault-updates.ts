@@ -1,12 +1,20 @@
 /**
  * Writers for the auto-maintained vault files.
  *
- * Every one of these files is written once a week from model output, so two things
- * are true of all of them: the model sometimes has nothing to say and says so with a
- * placeholder, and it re-raises the same point in different words week after week.
- * Left ungated that produced 201 `- (none)` rows in my-profile.md and 24 duplicate
- * bullets in work-context.md. The record gate below is the single place both are
- * stopped, which also makes applying the same week twice a no-op.
+ * Every one of these files is written once a week from model output, so two things are
+ * true of all of them: the model sometimes has nothing to say and says so with a
+ * placeholder, and applying the same week twice must change nothing. Left ungated that
+ * produced 201 `- (none)` rows in my-profile.md and 45 duplicate records elsewhere.
+ *
+ * One rule decides what is already here: **canonical text equality**. Case and spacing
+ * are folded, nothing else. A record that reads like another record but is not the same
+ * string is written. That is deliberate and was arrived at the hard way: four review
+ * rounds each found a new pair that a similarity score called identical and a reader
+ * would not (a fact and its negation, a contraction, C++ against C#, one version
+ * against another, a general statement against a specific one). A repeat costs a line;
+ * a wrong rejection loses something the user will never know was said. Similarity is
+ * kept for lookups, where the model names a record that already exists and the worst
+ * case is not finding it.
  */
 
 import { chmod, lstat, readFile, realpath, rename, stat, writeFile } from "node:fs/promises";
@@ -16,13 +24,7 @@ import type { BragBookResult } from "./brag-book";
 
 import { appendToFirstTable, findTable, renderRow, splitRow } from "./markdown-table";
 import { weekIdForDate } from "./week-utils";
-import {
-  PROSE_SIMILARITY_THRESHOLD,
-  SIMILARITY_THRESHOLD,
-  canonicalText,
-  normalizeText,
-  textSimilarity,
-} from "./text-similarity";
+import { LOOKUP_MARGIN, SIMILARITY_THRESHOLD, canonicalText, normalizeText, textSimilarity } from "./text-similarity";
 import {
   FOCUS_TRACKING_TEMPLATE,
   applyFocusUpdates,
@@ -100,47 +102,68 @@ export function isPlaceholder(text: string): boolean {
   return parenthesised && PLACEHOLDER_PREFIXES.some((prefix) => words.startsWith(prefix));
 }
 
-const NO_EXCLUSIONS: ReadonlySet<number> = new Set<number>();
+/**
+ * Index of the record whose canonical text is the same as `target`, or -1.
+ *
+ * The insert-side test. Exact, after folding case and spacing, so nothing that is
+ * merely similar can stop a new record being written.
+ */
+function findCanonicalIndex(texts: readonly string[], target: string): number {
+  const canonical = canonicalText(target);
+  if (canonical.length === 0) return -1;
+  return texts.findIndex((text) => canonicalText(text) === canonical);
+}
 
 /**
- * Index of the record that is the same as `target`, or -1.
+ * Index of the record the model is naming, or -1.
  *
- * Identity is normalized equality first, then the containment score, because the model
- * rewords its own entries between runs and an exact-string check would let every
- * rewording through as new.
+ * The lookup side, where prose is all there is to go on: the model paraphrases the row
+ * it wants closed. A match has to be both good enough and clearly better than the next
+ * candidate, or "Ship Search Revamp migration" would delete the backend row while the
+ * frontend row scored exactly the same. Rows that are canonically identical are not
+ * rivals: whichever is picked, the outcome is the same.
  */
-function findRecordIndex(
-  texts: readonly string[],
-  target: string,
-  excluded: ReadonlySet<number>,
-  threshold: number,
-): number {
-  const normalizedTarget = normalizeText(target);
-  if (normalizedTarget.length === 0) return -1;
-
-  let best = -1;
-  let bestScore = 0;
-  for (let i = 0; i < texts.length; i++) {
+function findRecordIndex(texts: readonly string[], target: string, excluded: ReadonlySet<number>): number {
+  const scored: Array<{ index: number; score: number; canonical: string }> = [];
+  for (const [i, text] of texts.entries()) {
     if (excluded.has(i)) continue;
-    const candidate = normalizeText(texts[i]);
-    if (candidate.length === 0) continue;
-    if (candidate === normalizedTarget) return i;
-    const score = textSimilarity(candidate, normalizedTarget);
-    if (score >= threshold && score > bestScore) {
-      best = i;
-      bestScore = score;
-    }
+    const score = textSimilarity(text, target);
+    if (score <= 0) continue;
+    scored.push({ index: i, score, canonical: canonicalText(text) });
   }
-  return best;
+
+  let best: { index: number; score: number; canonical: string } | null = null;
+  for (const candidate of scored) {
+    if (!best || candidate.score > best.score) best = candidate;
+  }
+  if (!best || best.score < SIMILARITY_THRESHOLD) return -1;
+
+  let rival = 0;
+  for (const candidate of scored) {
+    if (candidate.canonical === best.canonical) continue;
+    if (candidate.score > rival) rival = candidate.score;
+  }
+  return best.score - rival >= LOOKUP_MARGIN ? best.index : -1;
+}
+
+/** Split a cell into the values it lists. Evidence and sources are comma or semicolon separated. */
+function splitValues(text: string): string[] {
+  return text
+    .split(",")
+    .flatMap((part) => part.split(";"))
+    .map((value) => value.trim())
+    .filter((value) => value.length > 0);
 }
 
 /**
  * Fold a newer value into the stored one without losing either.
  *
  * A rerun of the same week often carries more evidence than the first run did
- * ("TEAM-1234" becoming "TEAM-1234, TEAM-1235"). Dropping the second because the
- * record is already there would throw that away. Folding is stable: once merged, the
- * stored value contains the incoming one and nothing changes again.
+ * ("TEAM-1234" becoming "TEAM-1234, TEAM-1235"). Dropping the second because the record
+ * is already there would throw that away. The two are merged as sets of whole values:
+ * comparing them as substrings made TEAM-123 disappear into TEAM-1234, which is one
+ * ticket swallowing another. Folding is stable, so a second identical run changes
+ * nothing.
  */
 function mergeCell(stored: string, incoming: string): string {
   const kept = stored.trim();
@@ -148,12 +171,19 @@ function mergeCell(stored: string, incoming: string): string {
   if (next.length === 0 || isPlaceholder(next)) return stored;
   if (kept.length === 0) return next;
 
-  const keptCanonical = canonicalText(kept);
-  const nextCanonical = canonicalText(next);
-  if (keptCanonical === nextCanonical) return stored;
-  if (nextCanonical.includes(keptCanonical)) return next;
-  if (keptCanonical.includes(nextCanonical)) return stored;
-  return `${kept}, ${next}`;
+  const values = splitValues(kept);
+  const seen = new Set(values.map(canonicalText));
+  let added = false;
+
+  for (const value of splitValues(next)) {
+    const canonical = canonicalText(value);
+    if (seen.has(canonical)) continue;
+    seen.add(canonical);
+    values.push(value);
+    added = true;
+  }
+
+  return added ? values.join(", ") : stored;
 }
 
 /** Re-render `row` with the named columns folded in, or null when nothing changed. */
@@ -198,14 +228,6 @@ function sectionEnd(lines: readonly string[], headingIdx: number): number {
     if (lines[i].startsWith("## ") || lines[i].trim() === "---") return i;
   }
   return lines.length;
-}
-
-/** Index of the live section whose heading starts with `heading`, or -1. */
-function findSectionHeading(lines: readonly string[], heading: string, limit: number): number {
-  for (let i = 0; i < limit; i++) {
-    if (lines[i].startsWith(heading)) return i;
-  }
-  return -1;
 }
 
 /**
@@ -315,7 +337,7 @@ export async function updateMemory(memoryPath: string, itemsToAdd: string[], ite
   for (const removal of itemsToRemove) {
     const marker = removal.indexOf(GRADUATION_MARKER);
     const target = (marker === -1 ? removal : removal.slice(0, marker)).trim();
-    const idx = findRecordIndex(items, target, graduated, SIMILARITY_THRESHOLD);
+    const idx = findRecordIndex(items, target, graduated);
     if (idx !== -1) graduated.add(idx);
   }
 
@@ -331,7 +353,7 @@ export async function updateMemory(memoryPath: string, itemsToAdd: string[], ite
     const item = incoming[MEMORY_ITEM_COLUMN] ?? "";
     if (isPlaceholder(item)) continue;
 
-    const idx = findRecordIndex(pending, item, NO_EXCLUSIONS, PROSE_SIMILARITY_THRESHOLD);
+    const idx = findCanonicalIndex(pending, item);
     if (idx === -1) {
       newRows.push(row);
       pending.push(item);
@@ -351,19 +373,20 @@ export async function updateMemory(memoryPath: string, itemsToAdd: string[], ite
 }
 
 /**
- * What became of an impact entry.
+ * What became of an update.
  *
- * "placeholder" is the model having nothing worth recording, which is normal and quiet.
- * "no-section" is the file not having a live `## Impact Timeline` to write into, which
- * is worth telling the user about: the entry existed and had nowhere to go.
+ * "placeholder" is nothing worth recording, or nothing that was not already there,
+ * which is normal and quiet. "no-section" is the file not having the live heading to
+ * write under, which is worth telling the user about: the entry existed and had
+ * nowhere to go.
  */
-export type ImpactLogResult = "written" | "placeholder" | "no-section";
+export type VaultWriteResult = "written" | "placeholder" | "no-section";
 
 /** Record one achievement in the impact timeline. */
 export async function updateImpactLog(
   impactLogPath: string,
   entry: BragBookResult["impactLogEntry"],
-): Promise<ImpactLogResult> {
+): Promise<VaultWriteResult> {
   if (!entry || isPlaceholder(entry.achievement)) return "placeholder";
 
   const original = await readFile(impactLogPath, "utf-8");
@@ -389,7 +412,7 @@ export async function updateImpactLog(
   const incoming = [entry.date, entry.achievement, entry.scope, entry.coreValue, entry.evidence];
   // Same achievement on the same date is the same entry, whatever the wording.
   const keys = rows.map((row) => `${rowCell(row, 0)} ${rowCell(row, 1)}`);
-  const idx = findRecordIndex(keys, `${entry.date} ${entry.achievement}`, NO_EXCLUSIONS, PROSE_SIMILARITY_THRESHOLD);
+  const idx = findCanonicalIndex(keys, `${entry.date} ${entry.achievement}`);
 
   if (idx === -1) {
     lines.splice(rowEnd, 0, renderRow(incoming));
@@ -406,16 +429,18 @@ export async function updateWorkContext(
   workContextPath: string,
   updates: BragBookResult["workContextUpdates"],
   now: Date = new Date(),
-): Promise<void> {
-  if (updates.length === 0) return;
+): Promise<VaultWriteResult> {
+  if (updates.length === 0) return "placeholder";
 
   const original = await readFile(workContextPath, "utf-8");
   const eol = detectEol(original);
   const lines = toLines(original);
   const liveEnd = liveRegionEnd(lines);
 
-  const headingIdx = findSectionHeading(lines, ORG_NOTES_HEADING, liveEnd);
-  if (headingIdx === -1) return;
+  // Exact, like the cleanup: a section merely named like this one belongs to someone
+  // else, and notes filed under it are notes the user will not find again.
+  const headingIdx = findExactHeading(lines, ORG_NOTES_HEADING, liveEnd);
+  if (headingIdx === -1) return "no-section";
 
   const end = Math.min(sectionEnd(lines, headingIdx), liveEnd);
   const bulletLines: number[] = [];
@@ -430,7 +455,7 @@ export async function updateWorkContext(
 
   for (const update of updates) {
     if (isPlaceholder(update.info)) continue;
-    const idx = findRecordIndex(notes, update.info, NO_EXCLUSIONS, PROSE_SIMILARITY_THRESHOLD);
+    const idx = findCanonicalIndex(notes, update.info);
 
     if (idx === -1) {
       queued.push({ category: update.category, info: update.info, source: update.source });
@@ -462,31 +487,36 @@ export async function updateWorkContext(
     replaceFirstLine(lines, liveRegionEnd(lines), LAST_UPDATED_PREFIX, `*Last updated: ${stamp}*`);
   }
 
-  if (!changed) return;
+  if (!changed) return "placeholder";
   await writeFile(workContextPath, lines.join(eol), "utf-8");
+  return "written";
 }
 
-export async function updateProfile(profilePath: string, update: BragBookResult["profileUpdate"]): Promise<void> {
-  if (!update || isPlaceholder(update.bulletPoint)) return;
+export async function updateProfile(
+  profilePath: string,
+  update: BragBookResult["profileUpdate"],
+): Promise<VaultWriteResult> {
+  if (!update || isPlaceholder(update.bulletPoint)) return "placeholder";
 
   const original = await readFile(profilePath, "utf-8");
   const eol = detectEol(original);
   const lines = toLines(original);
   const liveEnd = liveRegionEnd(lines);
 
-  const headingIdx = findSectionHeading(lines, KEY_STRENGTHS_HEADING, liveEnd);
-  if (headingIdx === -1) return;
+  const headingIdx = findExactHeading(lines, KEY_STRENGTHS_HEADING, liveEnd);
+  if (headingIdx === -1) return "no-section";
 
   const end = Math.min(sectionEnd(lines, headingIdx), liveEnd);
   const existing: string[] = [];
   for (let i = headingIdx + 1; i < end; i++) if (isBullet(lines[i])) existing.push(lines[i].slice(2));
-  if (findRecordIndex(existing, update.bulletPoint, NO_EXCLUSIONS, PROSE_SIMILARITY_THRESHOLD) !== -1) return;
+  if (findCanonicalIndex(existing, update.bulletPoint) !== -1) return "placeholder";
 
   let insertAt = end;
   while (insertAt > headingIdx + 1 && lines[insertAt - 1].trim() === "") insertAt--;
   lines.splice(insertAt, 0, `- ${update.bulletPoint}`);
 
   await writeFile(profilePath, lines.join(eol), "utf-8");
+  return "written";
 }
 
 export async function updateFocusTracking(
