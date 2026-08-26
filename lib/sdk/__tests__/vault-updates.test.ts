@@ -7,6 +7,8 @@ import {
   updateFocusTracking, migrateFocusTrackingFile, migrateVaultRecordsFile, isPlaceholder,
 } from "../vault-updates";
 import { appendToFirstTable, splitRow } from "../markdown-table";
+import { generateProfileDoc, generateWorkContextDoc } from "../doc-generators";
+import type { WorklogConfig } from "../types";
 
 let tmpDir: string;
 
@@ -2928,5 +2930,173 @@ describe("identity is every cell but the mergeable one", () => {
 
     expect(result).toMatchObject({ status: "written", added: 0, merged: 1 });
     expect(await readFile(path, "utf-8")).toContain("_(TEAM-1200, TEAM-1300)_");
+  });
+});
+
+function makeSeedConfig(): WorklogConfig {
+  return {
+    version: 1,
+    vault: "/tmp/test-vault",
+    atlassian: { url: "https://example.atlassian.net", email: "user@example.com" },
+    githubOrgs: ["example-org"],
+    ai: { provider: "anthropic" },
+    profile: {
+      fullName: "Sam Rivers",
+      displayName: "Sam Rivers",
+      jobTitle: "Senior Software Engineer",
+      level: "IC-5",
+      company: "Example Corp",
+      location: "Berlin, Germany",
+      startDate: "2024-01-15",
+      domain: "Builds the search platform",
+      team: "Search",
+      teamDomain: "Search Platform",
+      ticketPrefixes: ["TEAM-"],
+    },
+    career: {
+      framework: "IC levels",
+      currentLevel: "IC-5",
+      targetLevel: "IC-6",
+      skills: ["TypeScript"],
+      growthAreas: ["system design"],
+      companyValues: ["craft"],
+      reviewCycleDates: [{ type: "Mid-year", date: "2026-06-15" }],
+      careerDocPaths: [],
+    },
+    coaching: { tone: "balanced", focusAreas: ["scope"] },
+  };
+}
+
+describe("identity keeps its cell boundaries", () => {
+  it("does not merge two memory rows that shift a word across a column", async () => {
+    const path = join(tmpDir, "memory.md");
+    const file = `# Memory
+
+| Date | Item | Category | Notes |
+|------|------|----------|-------|
+| 2026-03-01 | Foo | Bar Baz | TEAM-100 |
+| 2026-03-01 | Foo Bar | Baz | TEAM-200 |
+`;
+    await writeFile(path, file);
+
+    expect(await migrateVaultRecordsFile(path, "memory")).toBeNull();
+    expect(await readFile(path, "utf-8")).toBe(file);
+
+    const result = await updateMemory(path, ["| 2026-03-01 | Foo Bar | Baz | TEAM-300 |"], []);
+    expect(result).toMatchObject({ added: 0, merged: 1 });
+    expect(await readFile(path, "utf-8")).toContain("| 2026-03-01 | Foo Bar | Baz | TEAM-200, TEAM-300 |");
+  });
+
+  it("does not merge two impact rows that shift a word across a column", async () => {
+    const path = join(tmpDir, "impact-log.md");
+    const file = `# Impact Log
+
+## Impact Timeline
+
+| Date | Achievement | Scope | Core Value | Evidence |
+|------|-------------|-------|------------|----------|
+| 2026-03-05 | Led the rollout | org wide | craft | TEAM-100 |
+| 2026-03-05 | Led the rollout org | wide | craft | TEAM-200 |
+
+**Last significant impact:** 2026-03-05
+**Current gap:** None - recent entry added
+`;
+    await writeFile(path, file);
+
+    expect(await migrateVaultRecordsFile(path, "impact-log")).toBeNull();
+    expect(await readFile(path, "utf-8")).toBe(file);
+  });
+
+  it("does not merge two notes that shift a word across the label", async () => {
+    const path = join(tmpDir, "work-context.md");
+    await writeFile(path, `# Work Context
+
+## Organizational Notes
+
+- **release process:** ships on Tuesdays _(TEAM-100)_
+
+---
+
+*Last updated: 2026-02-01*
+`);
+
+    // Same words, different split between the label and the note.
+    const result = await updateWorkContext(path, [
+      { category: "release", info: "process ships on Tuesdays", source: "TEAM-200" },
+    ], new Date("2026-03-08T00:00:00Z"));
+
+    expect(result).toMatchObject({ added: 1, merged: 0 });
+    const content = await readFile(path, "utf-8");
+    expect(content).toContain("- **release process:** ships on Tuesdays _(TEAM-100)_");
+    expect(content).toContain("- **release:** process ships on Tuesdays _(TEAM-200)_");
+  });
+});
+
+describe("the files the generators seed", () => {
+  const config = makeSeedConfig();
+
+  it("takes the same work-context update twice without writing it twice", async () => {
+    const path = join(tmpDir, "work-context.md");
+    await writeFile(path, generateWorkContextDoc(config, new Date("2026-03-01T00:00:00Z")));
+
+    const updates = [{ category: "process", info: "Release trains ship on Tuesdays", source: "TEAM-1200" }];
+    const now = new Date("2026-03-08T00:00:00Z");
+
+    const first = await updateWorkContext(path, updates, now);
+    expect(first).toMatchObject({ status: "written", added: 1 });
+    const afterFirst = await readFile(path, "utf-8");
+
+    const second = await updateWorkContext(path, updates, now);
+    expect(second).toMatchObject({ status: "unchanged", added: 0 });
+    expect(await readFile(path, "utf-8")).toBe(afterFirst);
+
+    expect(afterFirst).toContain("- **process:** Release trains ship on Tuesdays _(TEAM-1200)_");
+    expect(afterFirst).toContain("_(Added automatically as new information is discovered)_");
+  });
+
+  it("takes the same profile update twice without writing it twice", async () => {
+    const path = join(tmpDir, "my-profile.md");
+    await writeFile(path, generateProfileDoc(config, new Date("2026-03-01T00:00:00Z")));
+
+    const update = { achievement: "Search Revamp rollout", bulletPoint: "Runs multi-team rollouts without a rollback" };
+
+    const first = await updateProfile(path, update);
+    expect(first).toMatchObject({ status: "written", added: 1 });
+    const afterFirst = await readFile(path, "utf-8");
+
+    const second = await updateProfile(path, update);
+    expect(second).toMatchObject({ status: "unchanged", added: 0 });
+    expect(await readFile(path, "utf-8")).toBe(afterFirst);
+
+    expect(afterFirst).toContain("- Runs multi-team rollouts without a rollback");
+    expect(afterFirst).toContain("_(Added automatically as significant achievements are recorded)_");
+  });
+
+  it("keeps the hint out of the note's identity across a second update", async () => {
+    const path = join(tmpDir, "work-context.md");
+    await writeFile(path, generateWorkContextDoc(config, new Date("2026-03-01T00:00:00Z")));
+    const now = new Date("2026-03-08T00:00:00Z");
+
+    await updateWorkContext(path, [
+      { category: "process", info: "Release trains ship on Tuesdays", source: "TEAM-1200" },
+    ], now);
+    // A different note next week, then the first one again: still one of each.
+    await updateWorkContext(path, [
+      { category: "team", info: "Support rota rotates fortnightly", source: "TEAM-1400" },
+      { category: "process", info: "Release trains ship on Tuesdays", source: "TEAM-1200" },
+    ], now);
+
+    const content = await readFile(path, "utf-8");
+    expect(content.match(/ship on Tuesdays/g)).toHaveLength(1);
+    expect(content.match(/rota rotates fortnightly/g)).toHaveLength(1);
+  });
+
+  it("cleans a seeded file without touching its hint", async () => {
+    const path = join(tmpDir, "my-profile.md");
+    const seeded = generateProfileDoc(config, new Date("2026-03-01T00:00:00Z"));
+    await writeFile(path, seeded);
+
+    expect(await migrateVaultRecordsFile(path, "my-profile")).toBeNull();
+    expect(await readFile(path, "utf-8")).toBe(seeded);
   });
 });

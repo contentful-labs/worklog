@@ -173,19 +173,33 @@ export function isPlaceholder(text: string): boolean {
 const NO_EXCLUSIONS: ReadonlySet<number> = new Set<number>();
 
 /**
- * Index of the record whose canonical text is the same as `target`, or -1.
+ * A record's identity: its cells, canonicalized, kept apart from one another.
+ *
+ * A tuple rather than a joined string, because joining loses the boundaries: with a
+ * space between them, `| Foo | Bar Baz |` and `| Foo Bar | Baz |` read as one record
+ * and the second was merged into the first.
+ */
+function identityOf(cells: readonly string[]): string {
+  const canonical = cells.map(canonicalText);
+  return canonical.every((cell) => cell.length === 0) ? NO_IDENTITY : JSON.stringify(canonical);
+}
+
+/** A record with nothing in any of its cells identifies nothing, and matches nothing. */
+const NO_IDENTITY = "";
+
+/**
+ * Index of the record whose identity is the same as `target`, or -1.
  *
  * The insert-side test. Exact, after folding case and spacing, so nothing that is
  * merely similar can stop a new record being written.
  */
-function findCanonicalIndex(
-  texts: readonly string[],
+function findIdentityIndex(
+  identities: readonly string[],
   target: string,
   excluded: ReadonlySet<number> = NO_EXCLUSIONS,
 ): number {
-  const canonical = canonicalText(target);
-  if (canonical.length === 0) return -1;
-  return texts.findIndex((text, i) => !excluded.has(i) && canonicalText(text) === canonical);
+  if (target === NO_IDENTITY) return -1;
+  return identities.findIndex((identity, i) => !excluded.has(i) && identity === target);
 }
 
 /**
@@ -324,7 +338,7 @@ function findTableByHeader(
 
 /** A row's identity: every cell that is not the one designated mergeable. */
 function rowIdentity(row: string, columns: readonly number[]): string {
-  return columns.map((column) => rowCell(row, column)).join(" ");
+  return identityOf(columns.map((column) => rowCell(row, column)));
 }
 
 /**
@@ -550,6 +564,18 @@ function sectionScope(lines: readonly string[], headingIdx: number, limit: numbe
 }
 
 /**
+ * Insert bullets at `at`, keeping a blank line between them and whatever follows.
+ *
+ * Without it the seeded hint line ends up directly under the last inserted bullet,
+ * where the next run reads it as part of that bullet.
+ */
+function insertBullets(lines: string[], at: number, bullets: readonly string[]): void {
+  const following = lines[at];
+  const needsGap = following !== undefined && following.trim().length > 0 && !following.startsWith(BULLET_MARKER);
+  lines.splice(at, 0, ...bullets, ...(needsGap ? [""] : []));
+}
+
+/**
  * Rewrite the first line starting with `prefix` between `from` and `to`.
  *
  * Both bounds matter: scanning from the top of the file rewrote a status line under a
@@ -624,7 +650,10 @@ function readBullets(lines: readonly string[], from: number, to: number): Bullet
       items.push(open);
       continue;
     }
-    if (line.trim().length === 0 || endsBullet(line)) {
+    // The seeded files put their own hint directly under the heading, and a hint read
+    // as a lazy continuation changes the identity of the note above it, so the same
+    // note would be written again every week.
+    if (line.trim().length === 0 || endsBullet(line) || isPlaceholder(line)) {
       open = null;
       continue;
     }
@@ -702,12 +731,12 @@ function parseOrgNote(body: string): OrgNote {
  * arrived first keep its label and swallow the other.
  */
 function generatedNoteIdentity(category: string, info: string): string {
-  return `${category}: ${info}`;
+  return identityOf([category, info]);
 }
 
 function orgNoteIdentity(body: string): string {
   const note = parseOrgNote(body);
-  return note.generated ? generatedNoteIdentity(note.category, note.text) : `${FREEFORM_NOTE}${note.text}`;
+  return note.generated ? generatedNoteIdentity(note.category, note.text) : identityOf([FREEFORM_NOTE, note.text]);
 }
 
 /** What decides whether a note says anything at all. */
@@ -861,7 +890,7 @@ export async function updateMemory(
     }
 
     const identity = rowIdentity(row, MEMORY_IDENTITY_COLUMNS);
-    const idx = findCanonicalIndex(pending, identity);
+    const idx = findIdentityIndex(pending, identity);
     if (idx === -1) {
       newRows.push(row);
       pending.push(identity);
@@ -946,7 +975,7 @@ export async function updateImpactLog(
   // The same claim on the same date is the same entry; a different scope or value is a
   // different claim, not more evidence for this one.
   const keys = rows.map(impactIdentity);
-  const idx = findCanonicalIndex(keys, IMPACT_IDENTITY_COLUMNS.map((column) => incoming[column]).join(" "));
+  const idx = findIdentityIndex(keys, identityOf(IMPACT_IDENTITY_COLUMNS.map((column) => incoming[column])));
 
   let changed = false;
   const counts = { added: 0, removed: 0, merged: 0, skipped: 0 };
@@ -1023,7 +1052,7 @@ export async function updateWorkContext(
       continue;
     }
     const identity = generatedNoteIdentity(update.category, update.info);
-    const idx = findCanonicalIndex(notes, identity);
+    const idx = findIdentityIndex(notes, identity);
 
     if (idx === -1) {
       queued.push({ category: update.category, info: update.info, source: update.source });
@@ -1055,7 +1084,7 @@ export async function updateWorkContext(
   if (queued.length > 0) {
     let insertAt = headingIdx + 1;
     if (lines[insertAt]?.trim() === "") insertAt++;
-    lines.splice(insertAt, 0, ...queued.map((note) => `- **${note.category}:** ${note.info} _(${note.source})_`));
+    insertBullets(lines, insertAt, queued.map((note) => `- **${note.category}:** ${note.info} _(${note.source})_`));
     changed = true;
     // The stamp says when a note was last added, so it only moves when one was. Moving
     // it on every run made a rerun of the same week differ from the first run.
@@ -1088,13 +1117,14 @@ export async function updateProfile(
   const end = Math.min(sectionEnd(scan, headingIdx), liveEnd);
   const bullets = readBullets(scan, headingIdx + 1, end);
   if (!bullets) return writeResult("no-section", { skipped: 1 });
-  if (findCanonicalIndex(bullets.map((bullet) => bullet.text), update.bulletPoint) !== -1) {
+  const strengths = bullets.map((bullet) => identityOf([bullet.text]));
+  if (findIdentityIndex(strengths, identityOf([update.bulletPoint])) !== -1) {
     return writeResult("unchanged", { skipped: 1 });
   }
 
   let insertAt = end;
   while (insertAt > headingIdx + 1 && lines[insertAt - 1].trim() === "") insertAt--;
-  lines.splice(insertAt, 0, `- ${update.bulletPoint}`);
+  insertBullets(lines, insertAt, [`- ${update.bulletPoint}`]);
 
   await writeFile(profilePath, lines.join(eol), "utf-8");
   return writeResult("written", { added: 1 });
@@ -1227,8 +1257,9 @@ function keepMask(records: readonly StoredRecord[], fold: FoldRecord): RecordMas
       continue;
     }
 
-    const canonical = canonicalText(record.identity);
-    const survivor = canonical.length > 0 ? survivors.get(canonical) : undefined;
+    // The identity is already canonical; a record that identifies nothing is never a
+    // repeat of another one.
+    const survivor = record.identity === NO_IDENTITY ? undefined : survivors.get(record.identity);
     if (survivor !== undefined) {
       duplicates++;
       keep.push(false);
@@ -1237,7 +1268,7 @@ function keepMask(records: readonly StoredRecord[], fold: FoldRecord): RecordMas
       continue;
     }
 
-    survivors.set(canonical, i);
+    survivors.set(record.identity, i);
     keep.push(true);
   }
 
@@ -1384,8 +1415,17 @@ function cleanVaultRecords(content: string, kind: VaultRecordKind): CleanedRecor
     case "my-profile": {
       const headingIdx = findExactHeading(scan, KEY_STRENGTHS_HEADING, liveEnd);
       if (headingIdx === -1) return unchanged(lines, eol);
-      const itself = (text: string) => text;
-      return cleanBullets(lines, scan, headingIdx, liveEnd, eol, itself, itself, foldNothing);
+      // A strength is only its text, so that text is both its identity and its content.
+      return cleanBullets(
+        lines,
+        scan,
+        headingIdx,
+        liveEnd,
+        eol,
+        (text) => identityOf([text]),
+        (text) => text,
+        foldNothing,
+      );
     }
   }
 }
