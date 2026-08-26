@@ -1012,12 +1012,12 @@ describe("merging new evidence into a record already there", () => {
     await writeFile(path, CLEAN_MEMORY);
 
     await updateMemory(path, [
-      "| 2026-03-01 | Wrote the fallback path for the Search Revamp indexer | project | TEAM-1234, follow-up in TEAM-1240 |",
+      "| 2026-03-01 | Wrote the fallback path for the Search Revamp indexer | project | follow-up in TEAM-1240 |",
     ], []);
 
     const content = await readFile(path, "utf-8");
     expect(content.match(/fallback path/g)).toHaveLength(1);
-    expect(content).toContain("TEAM-1234, follow-up in TEAM-1240");
+    expect(content).toContain("TEAM-1234; follow-up in TEAM-1240");
   });
 
   it("escapes a pipe in the evidence instead of adding a column", async () => {
@@ -1243,7 +1243,7 @@ describe("migration carries evidence out of the rows it drops", () => {
 
     const content = await readFile(path, "utf-8");
     expect(content.match(/fallback path/g)).toHaveLength(1);
-    expect(content).toContain("TEAM-1234, follow-up in TEAM-1240");
+    expect(content).toContain("TEAM-1234; follow-up in TEAM-1240");
   });
 });
 
@@ -1282,7 +1282,7 @@ describe("repeats inside one batch", () => {
 
     const content = await readFile(path, "utf-8");
     expect(content.match(/search index rebuild/g)).toHaveLength(1);
-    expect(content).toContain("TEAM-1234, follow-up in TEAM-1240");
+    expect(content).toContain("TEAM-1234; follow-up in TEAM-1240");
   });
 
   it("folds the sources of a note the model reported twice", async () => {
@@ -1999,12 +1999,12 @@ ${row}
 
       // Same record, more evidence: the Notes cell changes and nothing else may.
       const result = await updateMemory(path, [
-        `| 2026-03-01 | Wrote the fallback path | ${cell} | TEAM-1234, TEAM-1240 |`,
+        `| 2026-03-01 | Wrote the fallback path | ${cell} | TEAM-1240 |`,
       ], []);
       expect(result.merged).toBe(1);
 
       const written = (await readFile(path, "utf-8")).split("\n").find((line) => line.includes("fallback path")) ?? "";
-      expect(written).toBe(row.replace("| TEAM-1234 |", "| TEAM-1234, TEAM-1240 |"));
+      expect(written).toBe(row.replace("| TEAM-1234 |", "| TEAM-1234; TEAM-1240 |"));
     });
   }
 
@@ -2022,7 +2022,7 @@ ${survivor}
     expect((await migrateVaultRecordsFile(path, "memory"))?.duplicates).toBe(1);
 
     const content = await readFile(path, "utf-8");
-    expect(content).toContain("| \\*literal\\* | TEAM-1234, TEAM-1240 |");
+    expect(content).toContain("| \\*literal\\* | TEAM-1234; TEAM-1240 |");
     expect(content).not.toContain("\\\\*literal");
   });
 });
@@ -2114,7 +2114,7 @@ describe("a table this code does not own", () => {
     // The settings table keeps both its rows and its "none" value.
     expect(content.match(/\| Retention \| none \|/g)).toHaveLength(2);
     expect(content.match(/fallback path/g)).toHaveLength(1);
-    expect(content).toContain("TEAM-1234, TEAM-1240");
+    expect(content).toContain("TEAM-1234; TEAM-1240");
   });
 
   it("refuses to write when the memory table is not there at all", async () => {
@@ -2167,7 +2167,7 @@ ${row}
     expect(result.merged).toBe(1);
 
     const content = await readFile(path, "utf-8");
-    expect(content).toContain("| \\*literal\\*, TEAM-1240 |");
+    expect(content).toContain("| \\*literal\\*; TEAM-1240 |");
     expect(content).not.toContain("\\\\*literal");
   });
 
@@ -2204,7 +2204,7 @@ ${row}
     await updateMemory(path, ["| 2026-03-01 | Wrote the fallback path | project | TEAM-1240 |"], []);
 
     const row = (await readFile(path, "utf-8")).split("\n").find((line) => line.includes("fallback path")) ?? "";
-    expect(splitRow(row)[3]).toBe("C:\\Users\\example, TEAM-1240");
+    expect(splitRow(row)[3]).toBe("C:\\Users\\example; TEAM-1240");
   });
 
   it("does not grow the escapes when the same week is applied twice", async () => {
@@ -2838,7 +2838,7 @@ describe("identity is every cell but the mergeable one", () => {
     ], []);
 
     expect(result).toMatchObject({ status: "written", added: 0, merged: 1 });
-    expect(await readFile(path, "utf-8")).toContain("| support | TEAM-100, TEAM-200 |");
+    expect(await readFile(path, "utf-8")).toContain("| support | TEAM-100; TEAM-200 |");
   });
 
   it("writes an impact entry that claims a different scope", async () => {
@@ -2984,7 +2984,7 @@ describe("identity keeps its cell boundaries", () => {
 
     const result = await updateMemory(path, ["| 2026-03-01 | Foo Bar | Baz | TEAM-300 |"], []);
     expect(result).toMatchObject({ added: 0, merged: 1 });
-    expect(await readFile(path, "utf-8")).toContain("| 2026-03-01 | Foo Bar | Baz | TEAM-200, TEAM-300 |");
+    expect(await readFile(path, "utf-8")).toContain("| 2026-03-01 | Foo Bar | Baz | TEAM-200; TEAM-300 |");
   });
 
   it("does not merge two impact rows that shift a word across a column", async () => {
@@ -3178,7 +3178,7 @@ describe("impact status lines after a cleanup", () => {
     expect(content).toContain("**Current gap:** 4 weeks");
   });
 
-  it("leaves the lines alone when no dated row survives", async () => {
+  it("says so plainly when no dated row survives", async () => {
     const path = join(tmpDir, "impact-log.md");
     await writeFile(path, `# Impact Log
 
@@ -3196,7 +3196,10 @@ describe("impact status lines after a cleanup", () => {
 
     const content = await readFile(path, "utf-8");
     expect(content).not.toContain("(none)");
-    expect(content).toContain("**Last significant impact:** 2026-03-08");
+    // The date it used to name belonged to the row that was just deleted.
+    expect(content).not.toContain("2026-03-08");
+    expect(content).toContain("**Last significant impact:** none recorded");
+    expect(content).toContain("**Current gap:** no significant impact recorded");
   });
 });
 
@@ -3240,5 +3243,193 @@ describe("replaying a week already recorded", () => {
     const content = await readFile(path, "utf-8");
     expect(content).toContain("**Last significant impact:** 2026-03-05");
     expect(content).toContain("**Current gap:** None - recent entry added");
+  });
+});
+
+describe("values that carry their own punctuation", () => {
+  const evidenceRow = (evidence: string) => `# Impact Log
+
+## Impact Timeline
+
+| Date | Achievement | Scope | Core Value | Evidence |
+|------|-------------|-------|------------|----------|
+| 2026-03-05 | Led the Search Revamp rollout across three teams | org | craft | ${evidence} |
+
+**Last significant impact:** 2026-03-05
+**Current gap:** None - recent entry added
+`;
+
+  it("keeps a comma inside an incoming link destination", async () => {
+    const path = join(tmpDir, "impact-log.md");
+    const link = "[dashboard](https://example.com/explore?q=a,b)";
+    await writeFile(path, evidenceRow("TEAM-1234"));
+
+    await updateImpactLog(path, { ...IMPACT_ENTRY, evidence: link });
+
+    const content = await readFile(path, "utf-8");
+    expect(content).toContain(`TEAM-1234, ${link}`);
+    expect(content).not.toContain("?q=a, b");
+  });
+
+  it("keeps a semicolon inside an incoming link destination", async () => {
+    const path = join(tmpDir, "impact-log.md");
+    const link = "[trace](https://example.com/t?ids=1;2)";
+    await writeFile(path, evidenceRow("TEAM-1234"));
+
+    await updateImpactLog(path, { ...IMPACT_ENTRY, evidence: link });
+
+    const content = await readFile(path, "utf-8");
+    expect(content).toContain(`TEAM-1234, ${link}`);
+    expect(content).not.toContain("ids=1; 2");
+  });
+
+  it("keeps a stored link whole when something is appended after it", async () => {
+    const path = join(tmpDir, "impact-log.md");
+    const link = "[dashboard](https://example.com/explore?q=a,b)";
+    await writeFile(path, evidenceRow(link));
+
+    await updateImpactLog(path, { ...IMPACT_ENTRY, evidence: "TEAM-1240" });
+
+    const content = await readFile(path, "utf-8");
+    expect(content).toContain(`${link}, TEAM-1240`);
+  });
+
+  it("does not re-add a link that is already listed", async () => {
+    const path = join(tmpDir, "impact-log.md");
+    const link = "[dashboard](https://example.com/explore?q=a,b)";
+    await writeFile(path, evidenceRow(link));
+
+    expect(await updateImpactLog(path, { ...IMPACT_ENTRY, evidence: link }))
+      .toMatchObject({ status: "unchanged" });
+  });
+
+  it("keeps a prose note whole, commas and all", async () => {
+    const path = join(tmpDir, "memory.md");
+    const note = "Paired with the on-call engineer, then wrote it up; see the runbook";
+    await writeFile(path, `# Memory
+
+| Date | Item | Category | Notes |
+|------|------|----------|-------|
+| 2026-03-01 | Reviewed the incident runbook | support | ${note} |
+`);
+
+    await updateMemory(path, ["| 2026-03-01 | Reviewed the incident runbook | support | follow-up in TEAM-1240 |"], []);
+
+    const content = await readFile(path, "utf-8");
+    expect(content).toContain(`${note}; follow-up in TEAM-1240`);
+  });
+
+  it("does not re-add a note it already holds", async () => {
+    const path = join(tmpDir, "memory.md");
+    const note = "Paired with the on-call engineer, then wrote it up";
+    await writeFile(path, `# Memory
+
+| Date | Item | Category | Notes |
+|------|------|----------|-------|
+| 2026-03-01 | Reviewed the incident runbook | support | ${note} |
+`);
+
+    expect(await updateMemory(path, [`| 2026-03-01 | Reviewed the incident runbook | support | ${note} |`], []))
+      .toMatchObject({ status: "unchanged" });
+  });
+});
+
+describe("sentinels a real file turned out to hold", () => {
+  it("treats none this week and none yet as placeholders", () => {
+    for (const text of ["(none this week)", "none this week", "(none yet)", "None Yet"]) {
+      expect(isPlaceholder(text), text).toBe(true);
+    }
+    expect(isPlaceholder("None this week, but the design landed")).toBe(false);
+  });
+
+  it("removes them from Key Strengths", async () => {
+    const path = join(tmpDir, "my-profile.md");
+    await writeFile(path, `# My Profile
+
+## Key Strengths
+
+- (none this week)
+- (none yet)
+- Untangles flaky test suites other people avoid
+`);
+
+    expect(await migrateVaultRecordsFile(path, "my-profile")).toMatchObject({ placeholders: 2 });
+    expect(await readFile(path, "utf-8")).not.toContain("none");
+  });
+});
+
+describe("the gap line goes stale on its own", () => {
+  it("is recomputed from the clock whenever the cleanup runs", async () => {
+    const path = join(tmpDir, "impact-log.md");
+    await writeFile(path, `# Impact Log
+
+## Impact Timeline
+
+| Date | Achievement | Scope | Core Value | Evidence |
+|------|-------------|-------|------------|----------|
+| 2026-08-03 | Led the Search Revamp rollout | org | craft | TEAM-1234 |
+| 2026-08-10 | (none) | | | |
+
+**Last significant impact:** 2026-08-03
+**Current gap:** None - recent entry added
+`);
+
+    await migrateVaultRecordsFile(path, "impact-log", new Date("2026-08-26T00:00:00Z"));
+
+    const content = await readFile(path, "utf-8");
+    expect(content).toContain("**Last significant impact:** 2026-08-03");
+    expect(content).toContain("**Current gap:** 3 weeks");
+  });
+
+  it("finds the status lines when they sit below a heading of their own", async () => {
+    const path = join(tmpDir, "impact-log.md");
+    await writeFile(path, `# Impact Log
+
+## Impact Timeline
+
+| Date | Achievement | Scope | Core Value | Evidence |
+|------|-------------|-------|------------|----------|
+| 2026-08-03 | Led the Search Revamp rollout | org | craft | TEAM-1234 |
+| 2026-08-10 | (none) | | | |
+
+## Status
+
+**Last significant impact:** 2026-08-10
+**Current gap:** None - recent entry added
+`);
+
+    await migrateVaultRecordsFile(path, "impact-log", new Date("2026-08-26T00:00:00Z"));
+
+    const content = await readFile(path, "utf-8");
+    expect(content).toContain("**Last significant impact:** 2026-08-03");
+    expect(content).toContain("**Current gap:** 3 weeks");
+  });
+
+  it("does not touch a status line above the timeline", async () => {
+    const path = join(tmpDir, "impact-log.md");
+    await writeFile(path, `# Impact Log
+
+## Summary
+
+**Last significant impact:** 2026-01-01
+**Current gap:** a long time
+
+## Impact Timeline
+
+| Date | Achievement | Scope | Core Value | Evidence |
+|------|-------------|-------|------------|----------|
+| 2026-08-03 | Led the Search Revamp rollout | org | craft | TEAM-1234 |
+| 2026-08-10 | (none) | | | |
+
+**Last significant impact:** 2026-08-10
+**Current gap:** None - recent entry added
+`);
+
+    await migrateVaultRecordsFile(path, "impact-log", new Date("2026-08-26T00:00:00Z"));
+
+    const content = await readFile(path, "utf-8");
+    expect(content).toContain("**Last significant impact:** 2026-01-01");
+    expect(content).toContain("**Current gap:** a long time");
+    expect(content).toContain("**Current gap:** 3 weeks");
   });
 });

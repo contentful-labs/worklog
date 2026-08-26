@@ -85,9 +85,16 @@ const CURRENT_GAP_PREFIX = "**Current gap:**";
 const LAST_UPDATED_PREFIX = "*Last updated:";
 /** What the gap line says when the latest impact is this week's. */
 const GAP_CLOSED = "None - recent entry added";
+/** What the two status lines say when the timeline holds nothing dated at all. */
+const NO_IMPACT_RECORDED = "none recorded";
+const NO_GAP_RECORDED = "no significant impact recorded";
 
 /** Bare words the model writes when it means "nothing to record". */
-const PLACEHOLDER_WORDS = new Set(["none", "n a", "na", "nil", "nothing", "tbd", "todo", "unknown"]);
+const PLACEHOLDER_WORDS = new Set([
+  "none", "n a", "na", "nil", "nothing", "tbd", "todo", "unknown",
+  // Whole values a real vault turned out to hold.
+  "none this week", "none yet",
+]);
 
 /**
  * The parenthesised asides the prompt and the seed templates use, matched as whole
@@ -237,12 +244,54 @@ function findRecordIndex(texts: readonly string[], target: string, excluded: Rea
 }
 
 /** Split a cell into the values it lists. Evidence and sources are comma or semicolon separated. */
-function splitValues(text: string): string[] {
-  return text
-    .split(",")
-    .flatMap((part) => part.split(";"))
-    .map((value) => value.trim())
-    .filter((value) => value.length > 0);
+/**
+ * How a particular cell lists what it holds.
+ *
+ * Evidence and sources are lists of short references, so a comma or a semicolon
+ * between them separates two of them. A note is prose: a comma inside it is
+ * punctuation, and only a semicolon has ever been used to join two notes.
+ */
+interface MergeStyle {
+  separators: ReadonlySet<string>;
+  joiner: string;
+}
+
+const REFERENCE_LIST: MergeStyle = { separators: new Set([",", ";"]), joiner: ", " };
+const PROSE_NOTES: MergeStyle = { separators: new Set([";"]), joiner: "; " };
+
+/**
+ * Split a cell into the values it lists, ignoring separators inside markdown syntax.
+ *
+ * A link destination carries its own commas: splitting
+ * `[dashboard](https://example.com/explore?q=a,b)` on every comma tore the URL in half
+ * and put a space in the middle of it. Only a separator outside every bracket, paren
+ * and code span divides one value from the next.
+ */
+function splitValues(text: string, style: MergeStyle): string[] {
+  const values: string[] = [];
+  let current = "";
+  let brackets = 0;
+  let parens = 0;
+  let inCode = false;
+
+  for (const char of text) {
+    if (char === "`") inCode = !inCode;
+    else if (!inCode) {
+      if (char === "[") brackets++;
+      else if (char === "]" && brackets > 0) brackets--;
+      else if (char === "(") parens++;
+      else if (char === ")" && parens > 0) parens--;
+      else if (style.separators.has(char) && brackets === 0 && parens === 0) {
+        values.push(current);
+        current = "";
+        continue;
+      }
+    }
+    current += char;
+  }
+  values.push(current);
+
+  return values.map((value) => value.trim()).filter((value) => value.length > 0);
 }
 
 /**
@@ -253,13 +302,13 @@ function splitValues(text: string): string[] {
  * is already there would throw that away. Comparison is by whole value: as substrings,
  * TEAM-123 disappeared into TEAM-1234, which is one ticket swallowing another.
  */
-function mergeValues(stored: string, incoming: string): string[] {
+function mergeValues(stored: string, incoming: string, style: MergeStyle): string[] {
   const next = incoming.trim();
   if (next.length === 0 || isPlaceholder(next)) return [];
 
-  const seen = new Set(splitValues(stored).map(canonicalText));
+  const seen = new Set(splitValues(stored, style).map(canonicalText));
   const additions: string[] = [];
-  for (const value of splitValues(next)) {
+  for (const value of splitValues(next, style)) {
     const canonical = canonicalText(value);
     if (seen.has(canonical)) continue;
     seen.add(canonical);
@@ -269,11 +318,12 @@ function mergeValues(stored: string, incoming: string): string[] {
 }
 
 /** Fold a newer value into the stored one. Stable: merging twice adds nothing twice. */
-function mergeCell(stored: string, incoming: string): string {
-  const additions = mergeValues(stored, incoming);
+function mergeCell(stored: string, incoming: string, style: MergeStyle): string {
+  const additions = mergeValues(stored, incoming, style);
   if (additions.length === 0) return stored;
   const kept = stored.trim();
-  return kept.length === 0 ? additions.join(", ") : `${kept}, ${additions.join(", ")}`;
+  const added = additions.join(style.joiner);
+  return kept.length === 0 ? added : `${kept}${style.joiner}${added}`;
 }
 
 /**
@@ -285,28 +335,28 @@ function mergeCell(stored: string, incoming: string): string {
  * backslash again, so the cell would gain one every week it was merged into. Only what
  * is genuinely new gets escaped, and only once.
  */
-function mergeRowCells(row: string, incoming: readonly string[], columns: readonly number[]): string | null {
+function mergeRowCells(
+  row: string,
+  incoming: readonly string[],
+  column: number,
+  style: MergeStyle,
+): string | null {
   const scanned = scanRow(row);
-  let changed = false;
-
-  for (const column of columns) {
-    while (scanned.values.length <= column) {
-      scanned.values.push("");
-      scanned.raw.push("");
-    }
-
-    const value = incoming[column] ?? "";
-    const additions = mergeValues(scanned.values[column], value);
-    if (additions.length === 0) continue;
-
-    const escaped = escapeCell(additions.join(", "));
-    const source = scanned.raw[column].trimEnd();
-    scanned.raw[column] = source.trim().length === 0 ? ` ${escaped} ` : `${source}, ${escaped} `;
-    scanned.values[column] = mergeCell(scanned.values[column], value);
-    changed = true;
+  while (scanned.values.length <= column) {
+    scanned.values.push("");
+    scanned.raw.push("");
   }
 
-  return changed ? renderScannedRow(scanned) : null;
+  const value = incoming[column] ?? "";
+  const additions = mergeValues(scanned.values[column], value, style);
+  if (additions.length === 0) return null;
+
+  const escaped = escapeCell(additions.join(style.joiner));
+  const source = scanned.raw[column].trimEnd();
+  scanned.raw[column] = source.trim().length === 0 ? ` ${escaped} ` : `${source}${style.joiner}${escaped} `;
+  scanned.values[column] = mergeCell(scanned.values[column], value, style);
+
+  return renderScannedRow(scanned);
 }
 
 /** True when a line is the header row this code expects. */
@@ -603,6 +653,13 @@ function insertBullets(lines: string[], at: number, bullets: readonly string[]):
  * Both bounds matter: scanning from the top of the file rewrote a status line under a
  * summary section above the timeline and left the timeline's own line stale.
  */
+function findLineWithPrefix(scan: readonly string[], from: number, to: number, prefix: string): number {
+  for (let i = Math.max(from, 0); i < to; i++) {
+    if (scan[i].startsWith(prefix)) return i;
+  }
+  return -1;
+}
+
 function replaceFirstLine(
   lines: string[],
   scan: readonly string[],
@@ -611,13 +668,10 @@ function replaceFirstLine(
   prefix: string,
   replacement: string,
 ): boolean {
-  for (let i = Math.max(from, 0); i < to; i++) {
-    if (!scan[i].startsWith(prefix)) continue;
-    if (lines[i] === replacement) return false;
-    lines[i] = replacement;
-    return true;
-  }
-  return false;
+  const idx = findLineWithPrefix(scan, from, to, prefix);
+  if (idx === -1 || lines[idx] === replacement) return false;
+  lines[idx] = replacement;
+  return true;
 }
 
 /** A file last edited on Windows keeps its CRLF endings, so generated lines must match. */
@@ -789,7 +843,7 @@ function mergeNoteSource(bullet: string, source: string): string | null {
   if (start === -1) return `${trimmed} _(${value})_`;
 
   const stored = trimmed.slice(start + 2, trimmed.length - 2);
-  const merged = mergeCell(stored, value);
+  const merged = mergeCell(stored, value, REFERENCE_LIST);
   return merged === stored ? null : `${trimmed.slice(0, start)}_(${merged})_`;
 }
 
@@ -921,7 +975,7 @@ export async function updateMemory(
 
     const target = idx < kept.length ? kept : newRows;
     const offset = idx < kept.length ? idx : idx - kept.length;
-    const folded = mergeRowCells(target[offset], incoming, [MEMORY_NOTES_COLUMN]);
+    const folded = mergeRowCells(target[offset], incoming, MEMORY_NOTES_COLUMN, PROSE_NOTES);
     if (folded) {
       target[offset] = folded;
       merged++;
@@ -956,6 +1010,29 @@ function gapText(latest: string, now: Date): string {
 }
 
 /**
+ * Rewrite one of the timeline's status lines, wherever the user keeps it.
+ *
+ * Inside the section first, because a copy above the heading belongs to whatever
+ * section is up there. Failing that, anywhere below the heading in the live region:
+ * a real vault keeps these lines under a heading of their own further down, and
+ * bounding the search to the section left them saying something no longer true.
+ */
+function setStatusLine(
+  lines: string[],
+  scan: readonly string[],
+  headingIdx: number,
+  scope: number,
+  liveEnd: number,
+  prefix: string,
+  replacement: string,
+): boolean {
+  if (findLineWithPrefix(scan, headingIdx, scope, prefix) !== -1) {
+    return replaceFirstLine(lines, scan, headingIdx, scope, prefix, replacement);
+  }
+  return replaceFirstLine(lines, scan, headingIdx, liveEnd, prefix, replacement);
+}
+
+/**
  * Point the timeline's status lines at the rows that are still there.
  *
  * The cleanup can remove the row those lines were describing: a placeholder row dated
@@ -976,10 +1053,13 @@ function refreshImpactStatus(content: string, eol: string, now: Date): string {
   if (!table) return content;
 
   const latest = latestRowDate(lines.slice(table.rowStart, Math.min(table.rowEnd, scope)));
-  if (latest.length === 0) return content;
+  const impact = latest.length === 0 ? NO_IMPACT_RECORDED : latest;
+  const gap = latest.length === 0 ? NO_GAP_RECORDED : gapText(latest, now);
 
-  replaceFirstLine(lines, scan, headingIdx, scope, LAST_IMPACT_PREFIX, `${LAST_IMPACT_PREFIX} ${latest}`);
-  replaceFirstLine(lines, scan, headingIdx, scope, CURRENT_GAP_PREFIX, `${CURRENT_GAP_PREFIX} ${gapText(latest, now)}`);
+  // Both lines are rewritten on every cleanup, not only when the date moved: the gap
+  // is measured from today, so it goes stale on its own even when the rows do not.
+  setStatusLine(lines, scan, headingIdx, scope, liveEnd, LAST_IMPACT_PREFIX, `${LAST_IMPACT_PREFIX} ${impact}`);
+  setStatusLine(lines, scan, headingIdx, scope, liveEnd, CURRENT_GAP_PREFIX, `${CURRENT_GAP_PREFIX} ${gap}`);
   return lines.join(eol);
 }
 
@@ -1042,7 +1122,7 @@ export async function updateImpactLog(
     counts.added = 1;
     changed = true;
   } else {
-    const folded = mergeRowCells(rows[idx], incoming, [IMPACT_EVIDENCE_COLUMN]);
+    const folded = mergeRowCells(rows[idx], incoming, IMPACT_EVIDENCE_COLUMN, REFERENCE_LIST);
     if (folded) {
       lines[table.rowStart + idx] = folded;
       rows[idx] = folded;
@@ -1060,13 +1140,14 @@ export async function updateImpactLog(
   if (latest.length > 0) {
     // Recomputed: inserting the row moved every line below it, including these.
     const shifted = maskFenced(lines);
-    const metadataEnd = sectionScope(shifted, headingIdx, liveRegionEnd(shifted));
-    changed = replaceFirstLine(lines, shifted, headingIdx, metadataEnd, LAST_IMPACT_PREFIX, `${LAST_IMPACT_PREFIX} ${latest}`) || changed;
+    const shiftedLive = liveRegionEnd(shifted);
+    const metadataEnd = sectionScope(shifted, headingIdx, shiftedLive);
+    changed = setStatusLine(lines, shifted, headingIdx, metadataEnd, shiftedLive, LAST_IMPACT_PREFIX, `${LAST_IMPACT_PREFIX} ${latest}`) || changed;
     // Only a row that was actually added closes the gap. Replaying a week that is
     // already recorded changes nothing, and saying "recent entry added" for it would
     // erase a gap the user is meant to see.
     if (counts.added === 1 && latest === entry.date) {
-      changed = replaceFirstLine(lines, shifted, headingIdx, metadataEnd, CURRENT_GAP_PREFIX, `${CURRENT_GAP_PREFIX} ${GAP_CLOSED}`) || changed;
+      changed = setStatusLine(lines, shifted, headingIdx, metadataEnd, shiftedLive, CURRENT_GAP_PREFIX, `${CURRENT_GAP_PREFIX} ${GAP_CLOSED}`) || changed;
     }
   }
 
@@ -1135,7 +1216,7 @@ export async function updateWorkContext(
     }
 
     const note = queued[idx - bullets.length];
-    const source = mergeCell(note.source, update.source);
+    const source = mergeCell(note.source, update.source, REFERENCE_LIST);
     if (source === note.source) skipped++;
     else merged++;
     note.source = source;
@@ -1403,8 +1484,8 @@ function cleanBullets(
 }
 
 /** Fold the given columns of a duplicate row into the row that survives it. */
-function foldRowCells(columns: readonly number[]): FoldRecord {
-  return (survivor, duplicate) => mergeRowCells(survivor, splitRow(duplicate), columns);
+function foldRowCells(column: number, style: MergeStyle): FoldRecord {
+  return (survivor, duplicate) => mergeRowCells(survivor, splitRow(duplicate), column, style);
 }
 
 /** Fold a duplicate note's source into the note that survives it. */
@@ -1445,7 +1526,7 @@ function cleanVaultRecords(content: string, kind: VaultRecordKind, now: Date): C
         // Identity is the date and the item together; only the item decides whether
         // the row says anything.
         (row) => ({ line: row, identity: memoryIdentity(row), value: rowCell(row, MEMORY_ITEM_COLUMN) }),
-        foldRowCells([MEMORY_NOTES_COLUMN]),
+        foldRowCells(MEMORY_NOTES_COLUMN, PROSE_NOTES),
       );
 
     case "impact-log": {
@@ -1463,7 +1544,7 @@ function cleanVaultRecords(content: string, kind: VaultRecordKind, now: Date): C
         eol,
         IMPACT_HEADER,
         (row) => ({ line: row, identity: impactIdentity(row), value: rowCell(row, 1) }),
-        foldRowCells([IMPACT_EVIDENCE_COLUMN]),
+        foldRowCells(IMPACT_EVIDENCE_COLUMN, REFERENCE_LIST),
       );
       if (cleaned.placeholders === 0 && cleaned.duplicates === 0) return cleaned;
       return { ...cleaned, content: refreshImpactStatus(cleaned.content, eol, now) };
