@@ -70,7 +70,11 @@ export {
 
 // Markdown tables
 export type { TableBounds } from "./markdown-table";
-export { isTableSeparator, splitRow, escapeCell, renderRow, appendToFirstTable, findTable } from "./markdown-table";
+export type { ScannedRow } from "./markdown-table";
+export {
+  isTableSeparator, splitRow, scanRow, escapeCell, renderRow, renderScannedRow,
+  appendToFirstTable, findTable,
+} from "./markdown-table";
 
 // Text similarity
 export { SIMILARITY_THRESHOLD, LOOKUP_MARGIN, canonicalText, normalizeText, textSimilarity } from "./text-similarity";
@@ -83,7 +87,10 @@ export {
 } from "./prep";
 
 // Vault updates
-export type { FocusFileMigration, VaultWriteResult, VaultWriteStatus, VaultRecordKind, VaultRecordsMigration } from "./vault-updates";
+export type {
+  FocusFileMigration, VaultWriteResult, VaultWriteStatus, MemoryWriteResult, UnmatchedGraduation,
+  VaultRecordKind, VaultRecordsMigration,
+} from "./vault-updates";
 export {
   updateMemory, updateImpactLog, updateWorkContext, updateProfile,
   updateFocusTracking, migrateFocusTrackingFile, migrateVaultRecordsFile, isPlaceholder,

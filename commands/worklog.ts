@@ -646,6 +646,10 @@ export async function runWorklog(opts: {
 
     const memoryResult = await updateMemory(paths.memory, itemsToAdd, itemsToRemove);
     if (memoryResult.status === "no-section") p.log.warn("memory.md has no live table above its archived sections; items not written");
+    for (const missed of memoryResult.unmatchedGraduations) {
+      const closest = missed.candidate ? `; closest memory row is "${missed.candidate}"` : "";
+      p.log.warn(`could not graduate "${missed.requested}"${closest}`);
+    }
     const impactResult = await updateImpactLog(paths.impactLog, impactLogEntry);
     if (impactResult.status === "no-section") p.log.warn("impact-log.md has no `## Impact Timeline` section; entry not written");
     const workContextResult = await updateWorkContext(paths.workContext, workContextUpdates);
