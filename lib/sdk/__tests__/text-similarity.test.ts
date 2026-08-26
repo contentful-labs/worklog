@@ -63,6 +63,21 @@ describe("thresholds", () => {
     expect(score).toBeLessThan(PROSE_SIMILARITY_THRESHOLD);
   });
 
+  it("scores a fact and its negation as unrelated", () => {
+    // "not" used to be a stopword, so these tokenized identically and the correction
+    // was rejected as a duplicate of the note it corrects.
+    expect(textSimilarity("Release trains ship on Tuesdays", "Release trains do not ship on Tuesdays")).toBe(0);
+    expect(textSimilarity("The rota covers weekends", "The rota never covers weekends")).toBe(0);
+  });
+
+  it("still matches two negated statements of the same fact", () => {
+    const score = textSimilarity(
+      "Release trains do not ship on Tuesdays any more",
+      "Release trains no longer ship on Tuesdays",
+    );
+    expect(score).toBeGreaterThan(0);
+  });
+
   it("scores a genuine rewording above the prose threshold", () => {
     const score = textSimilarity(
       "Release readiness reviews moved from Tuesday to Wednesday",
