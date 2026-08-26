@@ -30,6 +30,19 @@ function stripLinkTargets(text: string): string {
   return result;
 }
 
+/**
+ * Case-folded text with runs of whitespace collapsed and nothing else touched.
+ *
+ * The lossless counterpart to `normalizeText`, for deciding that two stored records
+ * are literally the same. `normalizeText` drops every symbol and non-ASCII letter, so
+ * "Builds C++ toolchains" and "Builds C# toolchains" collapse onto the same string and
+ * two notes written in a non-Latin script both collapse to "". Deleting on that basis
+ * loses records that were never duplicates.
+ */
+export function canonicalText(text: string): string {
+  return text.trim().toLowerCase().split(/\s+/).join(" ");
+}
+
 /** Strip markdown down to comparable words. */
 export function normalizeText(text: string): string {
   // Bracket syntax is left to the alphanumeric filter below; only the URL has to go,
@@ -46,16 +59,28 @@ export function normalizeText(text: string): string {
  */
 const STOP_WORDS = new Set([
   "the", "and", "for", "with", "that", "this", "from", "into", "your", "you", "are", "was",
-  "were", "has", "have", "had", "its", "our", "their", "them", "then", "than", "but", "not",
+  "were", "has", "have", "had", "its", "our", "their", "them", "then", "than", "but",
   "all", "any", "can", "out", "off", "per", "via", "get", "through", "before", "after",
 ]);
+
+/**
+ * Negation is the whole point of a corrective note, so these are never stopwords and
+ * never fall under the length filter. "Release trains ship on Tuesdays" and "Release
+ * trains do not ship on Tuesdays" are opposite facts, not one fact reworded.
+ */
+const NEGATIONS = new Set(["not", "no", "never", "nor", "cannot", "without"]);
 
 function tokenSet(text: string): Set<string> {
   return new Set(
     normalizeText(text)
       .split(" ")
-      .filter((token) => token.length > 2 && !STOP_WORDS.has(token)),
+      .filter((token) => NEGATIONS.has(token) || (token.length > 2 && !STOP_WORDS.has(token))),
   );
+}
+
+function isNegated(tokens: ReadonlySet<string>): boolean {
+  for (const negation of NEGATIONS) if (tokens.has(negation)) return true;
+  return false;
 }
 
 /** Below this many significant words, containment is too easy to hit by accident. */
@@ -96,6 +121,10 @@ export function textSimilarity(a: string, b: string): number {
   const left = tokenSet(a);
   const right = tokenSet(b);
   if (left.size === 0 || right.size === 0) return 0;
+
+  // Keeping the negation as a token is not enough on its own: the affirmative token set
+  // is a subset of the negated one, so containment would still score them identical.
+  if (isNegated(left) !== isNegated(right)) return 0;
 
   let shared = 0;
   for (const token of left) if (right.has(token)) shared++;
