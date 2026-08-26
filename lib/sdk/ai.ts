@@ -1,7 +1,7 @@
 import { streamText, stepCountIs } from "ai";
 import { createOpenAI, type OpenAIProvider } from "@ai-sdk/openai";
 import { resolveOpenAIAuth, refreshCodexToken, type OpenAIAuthResolution } from "../openai-auth";
-import { buildResearchTools } from "../ai-tools";
+import { buildResearchTools, buildResearchMcpServer, RESEARCH_MCP_SERVER_NAME, RESEARCH_MCP_TOOL_IDS } from "../ai-tools";
 import type { WorklogConfig } from "./types";
 import type { Logger } from "./logger";
 
@@ -30,25 +30,30 @@ export async function aiQuery(options: AIQueryOptions): Promise<string> {
   let raw: string;
   if (provider === "anthropic") {
     log("Querying Anthropic via Claude Agent SDK...");
-    raw = await queryAnthropic(prompt);
+    raw = await queryAnthropic(config, model, prompt);
   } else {
     log(`Querying OpenAI via Vercel AI SDK (model: ${model || "gpt-5"})...`);
-    raw = await queryOpenAI(config, model, prompt);
+    raw = await queryOpenAI(config, model, prompt, log);
   }
 
   log(`Raw AI response: ${raw.length} chars`);
   return postProcess(raw);
 }
 
-async function queryAnthropic(prompt: string): Promise<string> {
+async function queryAnthropic(config: WorklogConfig, model: string | undefined, prompt: string): Promise<string> {
   const { query } = await import("@anthropic-ai/claude-agent-sdk");
+  const researchServer = await buildResearchMcpServer(config);
 
   let result = "";
   try {
     for await (const message of query({
       prompt,
       options: {
-        allowedTools: ["Bash", "Read", "Glob", "Grep"],
+        model,
+        // Same six research tools as the OpenAI path, served in-process. No
+        // filesystem/shell tools: vault access goes through readVaultNote/searchVault.
+        mcpServers: { [RESEARCH_MCP_SERVER_NAME]: researchServer },
+        allowedTools: RESEARCH_MCP_TOOL_IDS,
         maxTurns: 6,
         cwd: process.cwd(),
       },
@@ -100,7 +105,7 @@ function resolveOpenAIAuthOrThrow(): Exclude<OpenAIAuthResolution, { source: "no
   return auth;
 }
 
-async function queryOpenAI(config: WorklogConfig, modelOverride: string | undefined, prompt: string): Promise<string> {
+async function queryOpenAI(config: WorklogConfig, modelOverride: string | undefined, prompt: string, log: Logger): Promise<string> {
   const auth = resolveOpenAIAuthOrThrow();
   const model = modelOverride || "gpt-5";
 
@@ -123,6 +128,12 @@ async function queryOpenAI(config: WorklogConfig, modelOverride: string | undefi
     prompt,
     tools: buildResearchTools(config),
     stopWhen: stepCountIs(6),
+    onStepFinish: (step) => {
+      for (const call of step.toolCalls) {
+        log(`tool call: ${call.toolName}(${JSON.stringify(call.input).slice(0, 160)})`);
+      }
+      log(`step done: ${step.finishReason}, ${step.usage.totalTokens ?? "?"} tokens`);
+    },
     providerOptions: {
       openai: {
         instructions:
@@ -143,8 +154,10 @@ export function postProcess(raw: string): string {
   const firstFrontmatter = result.indexOf("---");
   const firstCodeBlock = result.indexOf("```");
   const firstHeading = result.indexOf("# ");
+  // Index 0 counts: frontmatter at the very start must win over a later heading,
+  // otherwise the frontmatter gets sliced off.
   const candidates = [firstFrontmatter, firstCodeBlock, firstHeading].filter(
-    (i) => i > 0
+    (i) => i >= 0
   );
   if (candidates.length > 0) {
     const startIdx = Math.min(...candidates);

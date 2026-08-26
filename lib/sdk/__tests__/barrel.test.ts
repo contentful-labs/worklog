@@ -50,7 +50,6 @@ describe("SDK barrel exports", () => {
 
   it("exports brag book parsing", () => {
     expect(sdk.parseBragBookResult).toBeTypeOf("function");
-    expect(sdk.getPendingFocusItems).toBeTypeOf("function");
     expect(sdk.parseReviewCycle).toBeTypeOf("function");
   });
 
@@ -72,6 +71,17 @@ describe("SDK barrel exports", () => {
     expect(sdk.updateWorkContext).toBeTypeOf("function");
     expect(sdk.updateProfile).toBeTypeOf("function");
     expect(sdk.updateFocusTracking).toBeTypeOf("function");
+    expect(sdk.migrateFocusTrackingFile).toBeTypeOf("function");
+  });
+
+  it("exports focus tracking utilities", () => {
+    expect(sdk.selectOpenFocusItems).toBeTypeOf("function");
+    expect(sdk.applyFocusUpdates).toBeTypeOf("function");
+    expect(sdk.migrateFocusTracking).toBeTypeOf("function");
+    expect(sdk.needsFocusMigration).toBeTypeOf("function");
+    expect(sdk.summarizeFocusHistory).toBeTypeOf("function");
+    expect(sdk.focusSimilarity).toBeTypeOf("function");
+    expect(sdk.appendToFirstTable).toBeTypeOf("function");
   });
 
   it("exports data fetching functions", () => {

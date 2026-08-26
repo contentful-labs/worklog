@@ -2,6 +2,15 @@ import { readFile, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import type { BragBookResult } from "./brag-book";
 
+import { appendToFirstTable } from "./markdown-table";
+import {
+  FOCUS_TRACKING_TEMPLATE,
+  applyFocusUpdates,
+  migrateFocusTracking,
+  needsFocusMigration,
+  type ApplyFocusResult,
+} from "./focus";
+
 export async function updateMemory(memoryPath: string, itemsToAdd: string[], itemsToRemove: string[]): Promise<void> {
   let content: string;
 
@@ -23,12 +32,7 @@ Contributions here are waiting to accumulate into something brag-worthy.
     content = lines.filter(line => !line.includes(item.split("(now part of")[0].trim())).join("\n");
   }
 
-  // Add new items (append to table)
-  for (const row of itemsToAdd) {
-    if (row.includes("|")) {
-      content = content.trimEnd() + "\n" + row;
-    }
-  }
+  content = appendToFirstTable(content, itemsToAdd.filter((row) => row.includes("|")));
 
   await writeFile(memoryPath, content, "utf-8");
 }
@@ -87,37 +91,43 @@ export async function updateProfile(profilePath: string, update: BragBookResult[
 
 export async function updateFocusTracking(
   focusTrackingPath: string,
-  focusItems: string[],
-  focusUpdates: BragBookResult["focusUpdates"],
-  weekLabel: string,
-): Promise<void> {
-  let content: string;
+  options: {
+    focusItems: string[];
+    focusUpdates: BragBookResult["focusUpdates"];
+    reviewedIds: string[];
+    weekLabel: string;
+    lapseAfter?: number;
+  },
+): Promise<ApplyFocusResult> {
+  const content = existsSync(focusTrackingPath)
+    ? await readFile(focusTrackingPath, "utf-8")
+    : FOCUS_TRACKING_TEMPLATE;
 
-  if (existsSync(focusTrackingPath)) {
-    content = await readFile(focusTrackingPath, "utf-8");
-  } else {
-    content = `# Focus Tracking
+  const result = applyFocusUpdates(content, {
+    reviewedIds: options.reviewedIds,
+    updates: options.focusUpdates,
+    newItems: options.focusItems,
+    weekLabel: options.weekLabel,
+    lapseAfter: options.lapseAfter,
+  });
 
-Tracks focus items from coaching sessions. Pending items are reviewed in subsequent weeks.
+  await writeFile(focusTrackingPath, result.content, "utf-8");
+  return result;
+}
 
-| Week | Focus Item | Status | Notes |
-|------|------------|--------|-------|
-`;
-  }
+/**
+ * Bring a pre-id focus-tracking file up to the current shape, keeping a one-time backup
+ * because the file is owned by the user, not by us.
+ */
+export async function migrateFocusTrackingFile(
+  focusTrackingPath: string,
+): Promise<{ assigned: number; collapsed: number; lapsed: number } | null> {
+  if (!existsSync(focusTrackingPath)) return null;
+  const content = await readFile(focusTrackingPath, "utf-8");
+  if (!needsFocusMigration(content)) return null;
 
-  // Update status of existing items
-  for (const update of focusUpdates) {
-    const escapedItem = update.item.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const regex = new RegExp(`\\|\\s*${update.week}\\s*\\|\\s*${escapedItem}\\s*\\|\\s*pending\\s*\\|`, "i");
-    content = content.replace(regex, `| ${update.week} | ${update.item} | ${update.status} | ${update.notes} |`);
-  }
-
-  // Add new focus items
-  for (const item of focusItems) {
-    if (item && !content.includes(item)) {
-      content = content.trimEnd() + `\n| ${weekLabel} | ${item} | pending | |`;
-    }
-  }
-
-  await writeFile(focusTrackingPath, content, "utf-8");
+  await writeFile(`${focusTrackingPath}.pre-ids.bak`, content, "utf-8");
+  const { content: migrated, assigned, collapsed, lapsed } = migrateFocusTracking(content);
+  await writeFile(focusTrackingPath, migrated, "utf-8");
+  return { assigned, collapsed, lapsed };
 }

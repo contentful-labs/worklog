@@ -44,11 +44,12 @@ export function getExpectedBragBookWeeks(
   weeks: number,
   sinceDate?: string,
   untilDate?: string,
+  now: Date = new Date(),
 ): string[] {
-  const end = untilDate ? new Date(untilDate) : new Date();
+  const end = untilDate ? new Date(untilDate) : new Date(now);
   const result: string[] = [];
 
-  const currentWeekId = weekIdForDate(new Date());
+  const currentWeekId = weekIdForDate(now);
   const sinceWeekId = sinceDate ? weekIdForDate(new Date(sinceDate)) : undefined;
 
   for (let i = 0; i < weeks; i++) {

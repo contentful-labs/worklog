@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import {
   buildVaultPaths,
   readFileOrDefault,
+  dropDatedRowsBefore,
   readMemory,
   readProfile,
   readWorkContext,
@@ -85,6 +86,27 @@ describe("buildVaultPaths", () => {
     const cfg = { ...mockConfig, career: { ...mockConfig.career, careerDocPaths: ["/a.md", "/b.md"] } };
     const p = buildVaultPaths(cfg, "/tmp/timeline.json");
     expect(p.careerDocs).toEqual(["/a.md", "/b.md"]);
+  });
+});
+
+describe("dropDatedRowsBefore", () => {
+  it("removes dated rows before the cutoff and keeps structure", () => {
+    const content = `# Memory
+
+## Era
+
+| Date | Item | Category | Notes |
+|------|------|----------|-------|
+| 2025-05-01 | Old | Fix | |
+| 2026-02-01 | New | Fix | |
+| not-a-date | Keep me | Fix | |`;
+
+    const out = dropDatedRowsBefore(content, "2026-01-01");
+    expect(out).not.toContain("| Old |");
+    expect(out).toContain("| New |");
+    expect(out).toContain("Keep me");
+    expect(out).toContain("## Era");
+    expect(out).toContain("| Date | Item |");
   });
 });
 

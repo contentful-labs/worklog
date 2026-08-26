@@ -1,4 +1,5 @@
 import type { WorklogConfig } from "./types";
+import { fillTemplate, buildConfigContext } from "./template";
 
 export const PREP_TYPES = ["1on1", "skip-level", "self-review", "promotion", "resume"] as const;
 export type PrepType = (typeof PREP_TYPES)[number];
@@ -62,8 +63,6 @@ export function buildPrepPrompt(
   context: PrepContext,
   promptTemplate: string,
 ): string {
-  // Build config context inline (same as buildConfigContext but explicit)
-  const { fillTemplate, buildConfigContext } = require("./template");
   const configContext = buildConfigContext(config);
 
   const dateRange = getDateRange(options.weeks, options.sinceDate, options.untilDate);

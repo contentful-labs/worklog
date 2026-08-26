@@ -4,7 +4,7 @@ import { setupServer } from "msw/node";
 import { mkdtemp, writeFile, rm, } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { buildResearchTools } from "../ai-tools";
+import { buildResearchTools, buildResearchMcpServer, RESEARCH_TOOL_NAMES, RESEARCH_MCP_TOOL_IDS } from "../ai-tools";
 import type { WorklogConfig } from "../config";
 
 const BASE_URL = "https://test.atlassian.net";
@@ -143,6 +143,18 @@ describe("buildResearchTools — Atlassian API", () => {
     const result = await exec(tools.searchConfluence, { query: "test" });
     const parsed = JSON.parse(result);
     expect(parsed.results).toHaveLength(2);
+  });
+});
+
+describe("buildResearchMcpServer — Anthropic adapter", () => {
+  it("exposes the same tool set as the Vercel adapter", async () => {
+    const vercelNames = Object.keys(buildResearchTools(mockConfig)).sort();
+    expect(vercelNames).toEqual([...RESEARCH_TOOL_NAMES].sort());
+    expect(RESEARCH_MCP_TOOL_IDS).toEqual(RESEARCH_TOOL_NAMES.map((n) => `mcp__worklog__${n}`));
+
+    const server = await buildResearchMcpServer(mockConfig);
+    expect(server.type).toBe("sdk");
+    expect(server.name).toBe("worklog");
   });
 });
 

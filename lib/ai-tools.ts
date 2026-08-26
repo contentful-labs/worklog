@@ -1,4 +1,4 @@
-import { tool } from "ai";
+import { tool as aiTool } from "ai";
 import { z } from "zod";
 import { join } from "node:path";
 import { readFile } from "node:fs/promises";
@@ -37,17 +37,40 @@ function extractConfluencePageId(input: string): string {
   return input;
 }
 
-export function buildResearchTools(config?: WorklogConfig | null) {
+/**
+ * Provider-neutral tool definition. Both the Vercel AI SDK (OpenAI) and the
+ * Claude Agent SDK (Anthropic) adapters are built from these, so the model
+ * sees the same six tools regardless of provider.
+ */
+interface ResearchToolSpec<Shape extends z.ZodRawShape> {
+  description: string;
+  input: Shape;
+  execute: (args: z.infer<z.ZodObject<Shape>>) => Promise<string>;
+}
+
+function defineTool<Shape extends z.ZodRawShape>(spec: ResearchToolSpec<Shape>): ResearchToolSpec<Shape> {
+  return spec;
+}
+
+export const RESEARCH_TOOL_NAMES = [
+  "fetchJiraTicket",
+  "fetchConfluencePage",
+  "searchConfluence",
+  "searchJira",
+  "readVaultNote",
+  "searchVault",
+] as const;
+
+export type ResearchToolName = (typeof RESEARCH_TOOL_NAMES)[number];
+
+function buildResearchToolSpecs(config?: WorklogConfig | null) {
   const atlassian = config ? buildAtlassianAuth(config) : null;
   const vaultPath = config?.vault;
 
   return {
-    fetchJiraTicket: tool({
-      description:
-        "Fetch details of a Jira ticket by its key (e.g. TEAM-1234)",
-      inputSchema: z.object({
-        ticketKey: z.string().describe("Jira ticket key, e.g. TEAM-1234"),
-      }),
+    fetchJiraTicket: defineTool({
+      description: "Fetch details of a Jira ticket by its key (e.g. TEAM-1234)",
+      input: { ticketKey: z.string().describe("Jira ticket key, e.g. TEAM-1234") },
       execute: async ({ ticketKey }) => {
         if (!atlassian)
           return "Error: Atlassian auth not configured (set ATLASSIAN_API_TOKEN)";
@@ -60,13 +83,9 @@ export function buildResearchTools(config?: WorklogConfig | null) {
       },
     }),
 
-    fetchConfluencePage: tool({
+    fetchConfluencePage: defineTool({
       description: "Fetch a Confluence page by its page ID or URL",
-      inputSchema: z.object({
-        pageIdOrUrl: z
-          .string()
-          .describe("Confluence page ID or full URL"),
-      }),
+      input: { pageIdOrUrl: z.string().describe("Confluence page ID or full URL") },
       execute: async ({ pageIdOrUrl }) => {
         if (!atlassian)
           return "Error: Atlassian auth not configured (set ATLASSIAN_API_TOKEN)";
@@ -80,11 +99,9 @@ export function buildResearchTools(config?: WorklogConfig | null) {
       },
     }),
 
-    searchConfluence: tool({
+    searchConfluence: defineTool({
       description: "Search Confluence for pages matching a text query",
-      inputSchema: z.object({
-        query: z.string().describe("Search query text"),
-      }),
+      input: { query: z.string().describe("Search query text") },
       execute: async ({ query }) => {
         if (!atlassian)
           return "Error: Atlassian auth not configured (set ATLASSIAN_API_TOKEN)";
@@ -98,11 +115,9 @@ export function buildResearchTools(config?: WorklogConfig | null) {
       },
     }),
 
-    searchJira: tool({
+    searchJira: defineTool({
       description: "Search Jira for tickets matching a text query",
-      inputSchema: z.object({
-        query: z.string().describe("Search query text"),
-      }),
+      input: { query: z.string().describe("Search query text") },
       execute: async ({ query }) => {
         if (!atlassian)
           return "Error: Atlassian auth not configured (set ATLASSIAN_API_TOKEN)";
@@ -123,12 +138,9 @@ export function buildResearchTools(config?: WorklogConfig | null) {
       },
     }),
 
-    readVaultNote: tool({
-      description:
-        "Read a note from the vault by name (without .md extension)",
-      inputSchema: z.object({
-        noteName: z.string().describe("Note name without .md extension"),
-      }),
+    readVaultNote: defineTool({
+      description: "Read a note from the vault by name (without .md extension)",
+      input: { noteName: z.string().describe("Note name without .md extension") },
       execute: async ({ noteName }) => {
         if (!vaultPath) return "Error: no vault path configured";
         const filePath = join(vaultPath, `${noteName}.md`);
@@ -140,12 +152,9 @@ export function buildResearchTools(config?: WorklogConfig | null) {
       },
     }),
 
-    searchVault: tool({
-      description:
-        "Search the vault for markdown files containing a keyword",
-      inputSchema: z.object({
-        keyword: z.string().describe("Keyword to search for"),
-      }),
+    searchVault: defineTool({
+      description: "Search the vault for markdown files containing a keyword",
+      input: { keyword: z.string().describe("Keyword to search for") },
       execute: async ({ keyword }) => {
         if (!vaultPath) return "Error: no vault path configured";
         try {
@@ -160,4 +169,50 @@ export function buildResearchTools(config?: WorklogConfig | null) {
       },
     }),
   };
+}
+
+/** Research tools as a Vercel AI SDK tool set (OpenAI provider). */
+export function buildResearchTools(config?: WorklogConfig | null) {
+  const specs = buildResearchToolSpecs(config);
+  const toVercel = <S extends z.ZodRawShape>(spec: ResearchToolSpec<S>) =>
+    aiTool({ description: spec.description, inputSchema: z.object(spec.input), execute: spec.execute });
+
+  return {
+    fetchJiraTicket: toVercel(specs.fetchJiraTicket),
+    fetchConfluencePage: toVercel(specs.fetchConfluencePage),
+    searchConfluence: toVercel(specs.searchConfluence),
+    searchJira: toVercel(specs.searchJira),
+    readVaultNote: toVercel(specs.readVaultNote),
+    searchVault: toVercel(specs.searchVault),
+  };
+}
+
+export const RESEARCH_MCP_SERVER_NAME = "worklog";
+
+/** Tool identifiers the Claude Agent SDK expects in `allowedTools` for the research MCP server. */
+export const RESEARCH_MCP_TOOL_IDS = RESEARCH_TOOL_NAMES.map(
+  (name) => `mcp__${RESEARCH_MCP_SERVER_NAME}__${name}`,
+);
+
+/** Research tools as an in-process MCP server (Anthropic provider). */
+export async function buildResearchMcpServer(config?: WorklogConfig | null) {
+  const { createSdkMcpServer, tool } = await import("@anthropic-ai/claude-agent-sdk");
+  const specs = buildResearchToolSpecs(config);
+  const toMcp = <S extends z.ZodRawShape>(name: ResearchToolName, spec: ResearchToolSpec<S>) =>
+    tool(name, spec.description, spec.input, async (args) => ({
+      content: [{ type: "text" as const, text: await spec.execute(args as z.infer<z.ZodObject<S>>) }],
+    }));
+
+  return createSdkMcpServer({
+    name: RESEARCH_MCP_SERVER_NAME,
+    version: "1.0.0",
+    tools: [
+      toMcp("fetchJiraTicket", specs.fetchJiraTicket),
+      toMcp("fetchConfluencePage", specs.fetchConfluencePage),
+      toMcp("searchConfluence", specs.searchConfluence),
+      toMcp("searchJira", specs.searchJira),
+      toMcp("readVaultNote", specs.readVaultNote),
+      toMcp("searchVault", specs.searchVault),
+    ],
+  });
 }

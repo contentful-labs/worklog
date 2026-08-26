@@ -130,7 +130,7 @@ describe("generateWorkContextDoc", () => {
       profile: { ...makeConfig().profile, ticketPrefixes: [] },
     });
     const doc = generateWorkContextDoc(config, fixedDate);
-    expect(doc).toContain("<!-- TODO: add your Jira ticket prefixes");
+    expect(doc).toContain("<!-- TODO: add your Jira project keys");
   });
 });
 

@@ -6,7 +6,8 @@ export interface BragBookResult {
   workContextUpdates: Array<{ category: string; info: string; source: string }>;
   profileUpdate: { achievement: string; bulletPoint: string } | null;
   focusItems: string[];
-  focusUpdates: Array<{ week: string; item: string; status: string; notes: string }>;
+  /** Status rows keyed by focus item id. Prose is never used to identify an item. */
+  focusUpdates: Array<{ id: string; status: string; notes: string }>;
 }
 
 export interface ReviewInfo {
@@ -39,8 +40,7 @@ export function parseBragBookResult(raw: string): BragBookResult {
   const memoryMarkerEnd = "<!-- /MEMORY_UPDATE -->";
   const contextMarkerStart = "<!-- CONTEXT_UPDATES -->";
   const contextMarkerEnd = "<!-- /CONTEXT_UPDATES -->";
-  const coachingMarkerStart = "<!-- COACHING_SESSION -->";
-  const coachingMarkerEnd = "<!-- /COACHING_SESSION -->";
+  // COACHING_SESSION is deliberately left in the brag book for the reader and is not parsed.
   const focusMarkerStart = "<!-- FOCUS_UPDATE -->";
   const focusMarkerEnd = "<!-- /FOCUS_UPDATE -->";
 
@@ -122,21 +122,9 @@ export function parseBragBookResult(raw: string): BragBookResult {
     }
   }
 
-  // Parse COACHING_SESSION for focus items
-  const coachingStartIdx = raw.indexOf(coachingMarkerStart);
-  const coachingEndIdx = raw.indexOf(coachingMarkerEnd);
-
-  if (coachingStartIdx !== -1 && coachingEndIdx !== -1) {
-    const coachingSection = raw.substring(coachingStartIdx + coachingMarkerStart.length, coachingEndIdx);
-
-    const focusMatch = coachingSection.match(/### Focus for Next Week[\s\S]*?(?=###|$)/);
-    if (focusMatch) {
-      const focusLines = focusMatch[0].split("\n").filter(line => line.match(/^[-\d]/));
-      focusItems = focusLines.map(line => line.replace(/^(?:[-*]\s+|\d+[.)]\s*)/, "").trim()).filter(Boolean);
-    }
-  }
-
-  // Parse FOCUS_UPDATE section
+  // FOCUS_UPDATE is the only machine-read source of focus items. The coaching section
+  // states the same suggestions in prose for the reader; parsing both is what used to
+  // turn two suggestions into four rows a week.
   const focusStartIdx = raw.indexOf(focusMarkerStart);
   const focusEndIdx = raw.indexOf(focusMarkerEnd);
 
@@ -146,45 +134,36 @@ export function parseBragBookResult(raw: string): BragBookResult {
     const statusRows = extractTableRows(focusSection, /## (?:\[\[focus-tracking\]\]|Focus Items) Status/);
     for (const row of statusRows) {
       const parts = row.split("|").map(p => p.trim()).filter(Boolean);
-      if (parts.length >= 3 && parts[0] && parts[1] && parts[2]) {
-        focusUpdates.push({
-          week: parts[0],
-          item: parts[1],
-          status: parts[2],
-          notes: parts[3] || "",
-        });
+      const [id, status, notes] = parts;
+      if (FOCUS_ID_PATTERN.test(id ?? "") && status) {
+        focusUpdates.push({ id, status, notes: notes || "" });
       }
     }
 
     const newFocusMatch = focusSection.match(/## New Focus Items[\s\S]*?$/);
     if (newFocusMatch) {
       const newFocusLines = newFocusMatch[0].split("\n").filter(line => line.startsWith("-"));
-      const newItems = newFocusLines.map(line => line.replace(/^-\s*/, "").trim()).filter(Boolean);
-      focusItems = [...focusItems, ...newItems];
+      focusItems = newFocusLines
+        .map(line => line.replace(/^-\s*/, "").trim())
+        .filter(item => item && !item.startsWith("(") && !FOCUS_ID_PATTERN.test(item));
     }
   }
 
   return { bragBookContent, itemsToAdd, itemsToRemove, impactLogEntry, workContextUpdates, profileUpdate, focusItems, focusUpdates };
 }
 
-/** Extract pending focus items from focus tracking markdown table. */
-export function getPendingFocusItems(focusContent: string): Array<{ week: string; item: string }> {
-  const lines = focusContent.split("\n");
-  const pending: Array<{ week: string; item: string }> = [];
+const BRAG_BOOK_FRONTMATTER = "---\ntags:\n  - areas/work\n  - areas/work/brag-book\n---\n\n";
 
-  for (const line of lines) {
-    if (line.startsWith("|") && line.includes("pending")) {
-      const parts = line.split("|").map(p => p.trim()).filter(Boolean);
-      if (parts.length >= 3) {
-        pending.push({ week: parts[0], item: parts[1] });
-      }
-    }
-  }
-  return pending;
+/** The prompt asks for frontmatter, but models drop it often enough that we add it ourselves. */
+export function ensureBragBookFrontmatter(content: string): string {
+  return content.startsWith("---") ? content : BRAG_BOOK_FRONTMATTER + content;
 }
 
+/** Focus item ids look like `2026-W35.1`. See lib/sdk/focus.ts. */
+const FOCUS_ID_PATTERN = /^\d{4}-W\d{2}\.\d+$/;
+
 /** Parse review cycle info from work context markdown. */
-export function parseReviewCycle(workContext: string): ReviewInfo | null {
+export function parseReviewCycle(workContext: string, today: Date = new Date()): ReviewInfo | null {
   const reviewSectionMatch = workContext.match(/## Review Cycle\n([^#]|#(?!#))*/);
 
   if (!reviewSectionMatch) return null;
@@ -192,7 +171,6 @@ export function parseReviewCycle(workContext: string): ReviewInfo | null {
   const section = reviewSectionMatch[0];
   const rows = section.split("\n").filter(line => line.startsWith("|") && !line.includes("---") && !line.includes("Review Type"));
 
-  const today = new Date();
   let nearestReview: { type: string; date: Date } | null = null;
 
   for (const row of rows) {

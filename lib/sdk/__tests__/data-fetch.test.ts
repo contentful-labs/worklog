@@ -7,6 +7,7 @@ import {
   getGitHubUsername,
   searchConfluence,
   fetchDataForWeek,
+  buildTeamSprintJql,
   type FetchCredentials,
   type WeekInfo,
 } from "../data-fetch";
@@ -197,7 +198,30 @@ describe("searchConfluence", () => {
   });
 });
 
+describe("buildTeamSprintJql", () => {
+  it("builds a project-in clause from bare project keys", () => {
+    const jql = buildTeamSprintJql(["CORE", "OPS"], "user@test.com");
+    expect(jql).toContain('project in (CORE, OPS)');
+    expect(jql).toContain('NOT (assignee = "user@test.com" OR reporter = "user@test.com")');
+  });
+});
+
 describe("fetchDataForWeek", () => {
+  it("sends the sprint query with dash-stripped project keys", async () => {
+    const seenJql: string[] = [];
+    server.use(
+      http.post(`${BASE_URL}/rest/api/3/search/jql`, async ({ request }) => {
+        const body = await request.json() as { jql: string };
+        seenJql.push(body.jql);
+        return HttpResponse.json({ issues: [] });
+      }),
+    );
+    const config = { ...mockConfig, profile: { ...mockConfig.profile, ticketPrefixes: ["CORE-"] } };
+    await fetchDataForWeek(config, buildHeaders(mockConfig, mockCreds), "abc123", "testuser", weekInfo);
+    const sprintJql = seenJql.find((j) => j.includes("openSprints"));
+    expect(sprintJql).toContain("project in (CORE)");
+  });
+
   it("fetches all data sources for a week", async () => {
     const h = buildHeaders(mockConfig, mockCreds);
     const data = await fetchDataForWeek(mockConfig, h, "abc123", "testuser", weekInfo);

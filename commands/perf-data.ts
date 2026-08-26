@@ -6,6 +6,10 @@ import {
   buildHeaders,
   getAccountId,
   getGitHubUsername,
+  fetchJiraIssues,
+  fetchGitHubPRs,
+  searchConfluence,
+  JIRA_ISSUE_FIELDS,
 } from "../lib/sdk/data-fetch";
 
 export async function runPerfData(opts: { since: string; output: string }): Promise<void> {
@@ -34,10 +38,19 @@ export async function runPerfData(opts: { since: string; output: string }): Prom
   console.log(`Atlassian Account ID: ${accountId}`);
   console.log(`GitHub Username: ${githubUsername}`);
 
+  const email = config.atlassian.email;
+  const jql = `(assignee = "${email}" OR reporter = "${email}") AND updated >= "${startDate}" ORDER BY updated DESC`;
+  const cql = `(creator = "${accountId}" OR mention = "${accountId}") AND lastModified >= "${startDate}"`;
+  const orgFilter = config.githubOrgs.map((o) => `org:${o}`).join(" ");
+  const ghQuery = `type:pr author:${githubUsername} ${orgFilter} created:>=${startDate}`;
+
+  console.log("Fetching Jira issues, Confluence pages, and GitHub PRs...");
   const [issues, pages, prs] = await Promise.all([
-    fetchJiraIssues(config, headers, startDate),
-    fetchConfluencePages(config, headers, accountId, startDate),
-    fetchGitHubPRs(config, headers, githubUsername, startDate),
+    fetchJiraIssues(config, headers, jql, JIRA_ISSUE_FIELDS, {
+      onPage: (n) => console.log(`  Jira: ${n} issues so far`),
+    }),
+    searchConfluence<ConfluencePage>(config, headers, cql, "space,history,history.lastUpdated"),
+    fetchGitHubPRs(headers, ghQuery, "created", (n, total) => console.log(`  GitHub: ${n}/${total} PRs`)),
   ]);
 
   const markdown = generateMarkdown(config, issues, pages, prs, startDate);
@@ -47,89 +60,6 @@ export async function runPerfData(opts: { since: string; output: string }): Prom
   console.log(`  - ${issues.length} Jira tasks`);
   console.log(`  - ${pages.length} Confluence documents`);
   console.log(`  - ${prs.length} GitHub PRs`);
-}
-
-async function fetchJiraIssues(
-  config: ReturnType<typeof requireConfig>,
-  headers: ReturnType<typeof buildHeaders>,
-  startDate: string,
-): Promise<JiraIssue[]> {
-  const jql = `(assignee = "${config.atlassian.email}" OR reporter = "${config.atlassian.email}") AND updated >= "${startDate}" ORDER BY updated DESC`;
-  const fields = ["summary", "status", "created", "updated", "resolutiondate", "description", "priority", "labels", "components", "timetracking", "comment"];
-
-  let allIssues: JiraIssue[] = [];
-  let nextPageToken: string | undefined;
-
-  console.log("Fetching Jira issues...");
-  while (true) {
-    const body: Record<string, unknown> = { jql, fields, maxResults: 100 };
-    if (nextPageToken) body.nextPageToken = nextPageToken;
-
-    const res = await fetch(`${config.atlassian.url}/rest/api/3/search/jql`, {
-      method: "POST",
-      headers: headers.atlassian,
-      body: JSON.stringify(body),
-    });
-    if (!res.ok) throw new Error(`Jira API error ${res.status}: ${await res.text()}`);
-    const data = await res.json();
-    allIssues = allIssues.concat(data.issues || []);
-    console.log(`  Fetched ${allIssues.length} issues so far...`);
-    if (!data.nextPageToken) break;
-    nextPageToken = data.nextPageToken;
-  }
-
-  return allIssues;
-}
-
-async function fetchConfluencePages(
-  config: ReturnType<typeof requireConfig>,
-  headers: ReturnType<typeof buildHeaders>,
-  accountId: string,
-  startDate: string,
-): Promise<ConfluencePage[]> {
-  const cql = `(creator = "${accountId}" OR mention = "${accountId}") AND lastModified >= "${startDate}"`;
-  let allPages: ConfluencePage[] = [];
-  let start = 0;
-
-  console.log("Fetching Confluence pages...");
-  while (true) {
-    const url = `${config.atlassian.url}/wiki/rest/api/content/search?cql=${encodeURIComponent(cql)}&expand=space,history,history.lastUpdated&start=${start}&limit=50`;
-    const res = await fetch(url, { headers: headers.atlassian });
-    if (!res.ok) throw new Error(`Confluence API error ${res.status}: ${await res.text()}`);
-    const data = await res.json();
-    allPages = allPages.concat(data.results || []);
-    console.log(`  Fetched ${allPages.length}/${data.totalSize || allPages.length} pages`);
-    if (!data._links?.next) break;
-    start += 50;
-  }
-
-  return allPages;
-}
-
-async function fetchGitHubPRs(
-  config: ReturnType<typeof requireConfig>,
-  headers: ReturnType<typeof buildHeaders>,
-  githubUsername: string,
-  startDate: string,
-): Promise<GitHubPR[]> {
-  const orgFilter = config.githubOrgs.map((o) => `org:${o}`).join(" ");
-  const query = `type:pr author:${githubUsername} ${orgFilter} created:>=${startDate}`;
-  let allPRs: GitHubPR[] = [];
-  let page = 1;
-
-  console.log("Fetching GitHub PRs...");
-  while (true) {
-    const url = `https://api.github.com/search/issues?q=${encodeURIComponent(query)}&per_page=100&page=${page}&sort=created&order=desc`;
-    const res = await fetch(url, { headers: headers.github });
-    if (!res.ok) throw new Error(`GitHub API error ${res.status}: ${await res.text()}`);
-    const data = await res.json();
-    allPRs = allPRs.concat(data.items || []);
-    console.log(`  Fetched ${allPRs.length}/${data.total_count} PRs`);
-    if (allPRs.length >= data.total_count) break;
-    page++;
-  }
-
-  return allPRs;
 }
 
 function generateMarkdown(
