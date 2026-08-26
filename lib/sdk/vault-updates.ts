@@ -22,7 +22,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import type { BragBookResult } from "./brag-book";
 
-import { findTable, renderRow, splitRow } from "./markdown-table";
+import { escapeCell, findTable, renderRow, renderScannedRow, scanRow, splitRow } from "./markdown-table";
 import { weekIdForDate } from "./week-utils";
 import { LOOKUP_MARGIN, SIMILARITY_THRESHOLD, canonicalText, normalizeText, textSimilarity } from "./text-similarity";
 import {
@@ -73,6 +73,9 @@ const PLACEHOLDER_WORDS = new Set(["none", "n a", "na", "nil", "nothing", "tbd",
  */
 const PLACEHOLDER_PHRASES = ["leave blank", "added automatically", "none configured"];
 
+/** How every hint `doc-generators.ts` leaves in a seeded file opens. */
+const TEMPLATE_HINT_PREFIX = "<!-- TODO:";
+
 /** True when `words` opens with `phrase` and the phrase ends on a word boundary. */
 function opensWithPhrase(words: string, phrase: string): boolean {
   if (!words.startsWith(phrase)) return false;
@@ -101,7 +104,9 @@ function stripDecoration(text: string): string {
 export function isPlaceholder(text: string): boolean {
   const core = stripDecoration(text);
   if (core.length === 0) return true;
-  if (core.startsWith("<!--") && core.endsWith("-->")) return true;
+  // Only the hint the seed templates write. Any other comment is something the user
+  // put there on purpose, and deleting a note to self is not this code's business.
+  if (core.startsWith(TEMPLATE_HINT_PREFIX)) return true;
 
   const parenthesised = core.startsWith("(") && core.endsWith(")");
   const inner = parenthesised ? core.slice(1, -1) : core;
@@ -115,16 +120,22 @@ export function isPlaceholder(text: string): boolean {
   return parenthesised && PLACEHOLDER_PHRASES.some((phrase) => opensWithPhrase(words, phrase));
 }
 
+const NO_EXCLUSIONS: ReadonlySet<number> = new Set<number>();
+
 /**
  * Index of the record whose canonical text is the same as `target`, or -1.
  *
  * The insert-side test. Exact, after folding case and spacing, so nothing that is
  * merely similar can stop a new record being written.
  */
-function findCanonicalIndex(texts: readonly string[], target: string): number {
+function findCanonicalIndex(
+  texts: readonly string[],
+  target: string,
+  excluded: ReadonlySet<number> = NO_EXCLUSIONS,
+): number {
   const canonical = canonicalText(target);
   if (canonical.length === 0) return -1;
-  return texts.findIndex((text) => canonicalText(text) === canonical);
+  return texts.findIndex((text, i) => !excluded.has(i) && canonicalText(text) === canonical);
 }
 
 /**
@@ -199,20 +210,31 @@ function mergeCell(stored: string, incoming: string): string {
   return added ? values.join(", ") : stored;
 }
 
-/** Re-render `row` with the named columns folded in, or null when nothing changed. */
+/**
+ * Fold the named columns of `incoming` into `row`, or null when nothing changed.
+ *
+ * Only the cells that actually change are re-rendered. The others are put back exactly
+ * as they were written, because escaping a cell is not the inverse of reading one: a
+ * cell holding `\*literal\*` comes back from the scan with its backslashes and would
+ * leave `escapeCell` as `\\*literal\\*`, which means something else.
+ */
 function mergeRowCells(row: string, incoming: readonly string[], columns: readonly number[]): string | null {
-  const cells = splitRow(row);
+  const scanned = scanRow(row);
   let changed = false;
 
   for (const column of columns) {
-    while (cells.length <= column) cells.push("");
-    const merged = mergeCell(cells[column], incoming[column] ?? "");
-    if (merged === cells[column]) continue;
-    cells[column] = merged;
+    while (scanned.values.length <= column) {
+      scanned.values.push("");
+      scanned.raw.push("");
+    }
+    const merged = mergeCell(scanned.values[column], incoming[column] ?? "");
+    if (merged === scanned.values[column]) continue;
+    scanned.values[column] = merged;
+    scanned.raw[column] = ` ${escapeCell(merged)} `;
     changed = true;
   }
 
-  return changed ? renderRow(cells) : null;
+  return changed ? renderScannedRow(scanned) : null;
 }
 
 /** Cell of a table row, or "" when the row is shorter than expected. */
@@ -244,7 +266,15 @@ function parseHeading(line: string): Heading | null {
   const rest = line.slice(i + level);
   // `##text` is not a heading; `##` alone is an empty one.
   if (rest.length > 0 && rest[0] !== " " && rest[0] !== "\t") return null;
-  return { level, text: canonicalText(rest) };
+
+  // ATX headings may close with their own run of hashes: `## Impact Timeline ##`.
+  let end = rest.length;
+  while (end > 0 && (rest[end - 1] === " " || rest[end - 1] === "\t")) end--;
+  let hashes = end;
+  while (hashes > 0 && rest[hashes - 1] === "#") hashes--;
+  const closes = hashes < end && (hashes === 0 || rest[hashes - 1] === " " || rest[hashes - 1] === "\t");
+
+  return { level, text: canonicalText(rest.slice(0, closes ? hashes : end)) };
 }
 
 /** The text of an H2 heading line, or null when the line is not one. */
@@ -419,11 +449,31 @@ function writeResult(status: VaultWriteStatus, counts: Partial<Omit<VaultWriteRe
   return { status, added: 0, removed: 0, merged: 0, skipped: 0, ...counts };
 }
 
+/** A removal that named no row exactly, and the row it came closest to. */
+export interface UnmatchedGraduation {
+  requested: string;
+  /** The nearest row by wording, or "" when nothing came close. */
+  candidate: string;
+}
+
+export interface MemoryWriteResult extends VaultWriteResult {
+  /**
+   * Removals that were not carried out.
+   *
+   * Closing a memory item deletes a line, so it takes an exact match. The model
+   * paraphrases, and a paraphrase is not evidence: "Disable service billing alerts"
+   * scores 0.83 against a row that says "Enable service billing alerts", with nothing
+   * else close enough to make it ambiguous. Deleting on that is a wrong delete the
+   * user cannot see. The near miss is reported instead, for them to settle by hand.
+   */
+  unmatchedGraduations: UnmatchedGraduation[];
+}
+
 export async function updateMemory(
   memoryPath: string,
   itemsToAdd: string[],
   itemsToRemove: string[],
-): Promise<VaultWriteResult> {
+): Promise<MemoryWriteResult> {
   const original = existsSync(memoryPath) ? await readFile(memoryPath, "utf-8") : MEMORY_TEMPLATE;
   const eol = detectEol(original);
   const lines = toLines(original);
@@ -433,22 +483,32 @@ export async function updateMemory(
   // archived heading has no live table: appending there would file this week's work
   // under a team the user left, and a graduation would delete a row from that record.
   const table = findTable(lines);
-  if (!table || table.rowStart - 1 >= liveEnd) return writeResult("no-section", { skipped: itemsToAdd.length });
+  if (!table || table.rowStart - 1 >= liveEnd) {
+    const skipped = itemsToAdd.length + itemsToRemove.length;
+    const requested = itemsToRemove.map((removal) => ({ requested: removal, candidate: "" }));
+    return { ...writeResult("no-section", { skipped }), unmatchedGraduations: requested };
+  }
 
   const rowEnd = Math.min(table.rowEnd, liveEnd);
   const rows = lines.slice(table.rowStart, rowEnd);
   const items = rows.map((row) => rowCell(row, MEMORY_ITEM_COLUMN));
 
-  // Graduation. The model paraphrases the row it is closing, so matching by
-  // `includes()` on its prose almost never landed: 17 hits in 27 weeks. This is a
-  // lookup of a row the model named, so it scores, and it takes the match only when
-  // that match is clearly the best one.
+  // Graduation deletes a line, so it takes the row's own text. The scored lookup is
+  // still run, but only to name the row the model probably meant, for the caller to
+  // pass on to the user.
   const graduated = new Set<number>();
+  const unmatchedGraduations: UnmatchedGraduation[] = [];
   for (const removal of itemsToRemove) {
     const marker = removal.indexOf(GRADUATION_MARKER);
     const target = (marker === -1 ? removal : removal.slice(0, marker)).trim();
-    const idx = findRecordIndex(items, target, graduated);
-    if (idx !== -1) graduated.add(idx);
+
+    const exact = findCanonicalIndex(items, target, graduated);
+    if (exact !== -1) {
+      graduated.add(exact);
+      continue;
+    }
+    const nearest = findRecordIndex(items, target, graduated);
+    unmatchedGraduations.push({ requested: target, candidate: nearest === -1 ? "" : items[nearest] });
   }
 
   const kept = rows.filter((_, i) => !graduated.has(i));
@@ -491,12 +551,12 @@ export async function updateMemory(
 
   const counts = { added: newRows.length, removed: graduated.size, merged, skipped };
   if (counts.added === 0 && counts.removed === 0 && counts.merged === 0) {
-    return writeResult("unchanged", counts);
+    return { ...writeResult("unchanged", counts), unmatchedGraduations };
   }
 
   lines.splice(table.rowStart, rows.length, ...kept, ...newRows);
   await writeFile(memoryPath, lines.join(eol), "utf-8");
-  return writeResult("written", counts);
+  return { ...writeResult("written", counts), unmatchedGraduations };
 }
 
 /**

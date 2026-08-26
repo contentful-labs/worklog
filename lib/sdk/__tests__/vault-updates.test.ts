@@ -410,17 +410,54 @@ describe("updateMemory record identity", () => {
     expect(await readFile(path, "utf-8")).toBe(CLEAN_MEMORY);
   });
 
-  it("graduates the row the coach paraphrased", async () => {
+  it("graduates the row the coach quoted", async () => {
     const path = join(tmpDir, "memory.md");
     await writeFile(path, CLEAN_MEMORY);
 
     await updateMemory(path, [], [
-      "Fallback path work for the Search Revamp indexer (now part of: shipped indexer resilience)",
+      "Wrote the fallback path for the Search Revamp indexer (now part of: shipped indexer resilience)",
     ]);
 
     const content = await readFile(path, "utf-8");
     expect(content).not.toContain("fallback path");
     expect(content).toContain("| Date | Item | Category | Notes |");
+  });
+
+  it("reports rather than deletes when the coach paraphrases the row", async () => {
+    const path = join(tmpDir, "memory.md");
+    await writeFile(path, CLEAN_MEMORY);
+
+    const result = await updateMemory(path, [], [
+      "Fallback path work for the Search Revamp indexer (now part of: shipped indexer resilience)",
+    ]);
+
+    expect(result.removed).toBe(0);
+    expect(result.unmatchedGraduations).toEqual([
+      {
+        requested: "Fallback path work for the Search Revamp indexer",
+        candidate: "Wrote the fallback path for the Search Revamp indexer",
+      },
+    ]);
+    expect(await readFile(path, "utf-8")).toBe(CLEAN_MEMORY);
+  });
+
+  it("does not delete a row that says the opposite of the removal", async () => {
+    const path = join(tmpDir, "memory.md");
+    const file = `# Memory
+
+| Date | Item | Category | Notes |
+|------|------|----------|-------|
+| 2026-03-01 | Enable service billing alerts for platform teams | project | TEAM-1234 |
+`;
+    await writeFile(path, file);
+
+    const result = await updateMemory(path, [], [
+      "Disable service billing alerts for platform teams (now part of: billing cleanup)",
+    ]);
+
+    expect(result.removed).toBe(0);
+    expect(result.unmatchedGraduations[0].candidate).toBe("Enable service billing alerts for platform teams");
+    expect(await readFile(path, "utf-8")).toBe(file);
   });
 
   it("graduates one row per removal, not every row that reads alike", async () => {
@@ -433,7 +470,7 @@ describe("updateMemory record identity", () => {
 | 2026-03-02 | Reviewed the Search Revamp rollout plan with the platform team | project |  |
 `);
 
-    await updateMemory(path, [], ["Search Revamp rollout plan review with the platform team (now part of: ran the rollout)"]);
+    await updateMemory(path, [], ["Reviewed the Search Revamp rollout plan with the platform team (now part of: ran the rollout)"]);
 
     const content = await readFile(path, "utf-8");
     expect(content.match(/rollout plan/g)).toHaveLength(1);
@@ -813,15 +850,17 @@ describe("record dedupe threshold", () => {
     expect(content).toContain("_(TEAM-1200, TEAM-1300)_");
   });
 
-  it("finds the row a graduation names even when the wording drifts below the prose threshold", async () => {
+  it("names the row a graduation probably meant without acting on the guess", async () => {
     const path = join(tmpDir, "memory.md");
     await writeFile(path, CLEAN_MEMORY);
 
-    // 0.83 similarity: too low to reject an insert, high enough to identify a row the
-    // model has explicitly asked to close.
-    await updateMemory(path, [], ["Fallback path work for the Search Revamp indexer (now part of: shipped indexer resilience)"]);
+    // 0.83 similarity: close enough to name the row, nowhere near enough to delete it.
+    const result = await updateMemory(path, [], [
+      "Fallback path work for the Search Revamp indexer (now part of: shipped indexer resilience)",
+    ]);
 
-    expect(await readFile(path, "utf-8")).not.toContain("fallback path");
+    expect(result.unmatchedGraduations).toHaveLength(1);
+    expect(await readFile(path, "utf-8")).toContain("fallback path");
   });
 });
 
@@ -1422,7 +1461,7 @@ describe("an ambiguous graduation removes nothing", () => {
     const path = join(tmpDir, "memory.md");
     await writeFile(path, TWO_MIGRATIONS);
 
-    await updateMemory(path, [], ["Shipping the Search Revamp backend migration (now part of: shipped the migration)"]);
+    await updateMemory(path, [], ["Ship Search Revamp backend migration (now part of: shipped the migration)"]);
 
     const content = await readFile(path, "utf-8");
     expect(content).not.toContain("backend migration");
@@ -1439,7 +1478,7 @@ describe("an ambiguous graduation removes nothing", () => {
 | 2026-03-02 | Reviewed the Search Revamp rollout plan with the platform team | project |  |
 `);
 
-    await updateMemory(path, [], ["Search Revamp rollout plan review with the platform team (now part of: ran the rollout)"]);
+    await updateMemory(path, [], ["Reviewed the Search Revamp rollout plan with the platform team (now part of: ran the rollout)"]);
 
     const content = await readFile(path, "utf-8");
     expect(content.match(/rollout plan/g)).toHaveLength(1);
@@ -1856,7 +1895,7 @@ describe("what a batch did", () => {
       "| 2026-03-08 | (none) | project |  |",
     ], []);
 
-    expect(result).toEqual({ status: "written", added: 1, removed: 0, merged: 1, skipped: 1 });
+    expect(result).toEqual({ status: "written", added: 1, removed: 0, merged: 1, skipped: 1, unmatchedGraduations: [] });
   });
 
   it("counts the rows a graduation took out", async () => {
@@ -1864,7 +1903,7 @@ describe("what a batch did", () => {
     await writeFile(path, CLEAN_MEMORY);
 
     const result = await updateMemory(path, [], [
-      "Fallback path work for the Search Revamp indexer (now part of: shipped indexer resilience)",
+      "Wrote the fallback path for the Search Revamp indexer (now part of: shipped indexer resilience)",
     ]);
 
     expect(result).toMatchObject({ status: "written", added: 0, removed: 1 });
@@ -1891,5 +1930,105 @@ describe("what a batch did", () => {
       achievement: "Test suite cleanup",
       bulletPoint: "Untangles flaky test suites other people avoid",
     })).toEqual({ status: "unchanged", added: 0, removed: 0, merged: 0, skipped: 1 });
+  });
+});
+
+describe("markdown escapes survive a merge", () => {
+  const CELLS: Array<[string, string]> = [
+    ["an escaped asterisk", "\\*literal\\*"],
+    ["an escaped underscore", "\\_literal\\_"],
+    ["an escaped bracket", "\\[literal\\]"],
+    ["a Windows path", "C:\\\\Users\\\\example\\\\notes"],
+    ["an escaped pipe", "before \\| after"],
+  ];
+
+  for (const [label, cell] of CELLS) {
+    it(`leaves ${label} in another cell byte-identical`, async () => {
+      const path = join(tmpDir, "memory.md");
+      const row = `| 2026-03-01 | Wrote the fallback path | ${cell} | TEAM-1234 |`;
+      await writeFile(path, `# Memory
+
+| Date | Item | Category | Notes |
+|------|------|----------|-------|
+${row}
+`);
+
+      // Same item, more evidence: the Notes cell changes and nothing else may.
+      const result = await updateMemory(path, [
+        `| 2026-03-08 | Wrote the fallback path | ignored | TEAM-1234, TEAM-1240 |`,
+      ], []);
+      expect(result.merged).toBe(1);
+
+      const written = (await readFile(path, "utf-8")).split("\n").find((line) => line.includes("fallback path")) ?? "";
+      expect(written).toBe(row.replace("| TEAM-1234 |", "| TEAM-1234, TEAM-1240 |"));
+    });
+  }
+
+  it("keeps them through a migration that collapses a duplicate", async () => {
+    const path = join(tmpDir, "memory.md");
+    const survivor = "| 2026-03-01 | Wrote the fallback path | \\*literal\\* | TEAM-1234 |";
+    await writeFile(path, `# Memory
+
+| Date | Item | Category | Notes |
+|------|------|----------|-------|
+${survivor}
+| 2026-03-02 | Wrote the fallback path | \\*literal\\* | TEAM-1240 |
+`);
+
+    expect((await migrateVaultRecordsFile(path, "memory"))?.duplicates).toBe(1);
+
+    const content = await readFile(path, "utf-8");
+    expect(content).toContain("| \\*literal\\* | TEAM-1234, TEAM-1240 |");
+    expect(content).not.toContain("\\\\*literal");
+  });
+});
+
+describe("comments the user wrote", () => {
+  it("keeps a note to self and drops only the generated hint", async () => {
+    expect(isPlaceholder("<!-- Revisit promotion evidence after Q4 -->")).toBe(false);
+    expect(isPlaceholder("<!-- TODO: add your technical skills -->")).toBe(true);
+  });
+
+  it("leaves a user comment alone through insert and migration", async () => {
+    const path = join(tmpDir, "my-profile.md");
+    const file = `# My Profile
+
+## Key Strengths
+
+- <!-- Revisit promotion evidence after Q4 -->
+- Untangles flaky test suites other people avoid
+`;
+    await writeFile(path, file);
+
+    expect(await migrateVaultRecordsFile(path, "my-profile")).toBeNull();
+    expect(await readFile(path, "utf-8")).toBe(file);
+  });
+});
+
+describe("closing-hash headings", () => {
+  it("matches all three section headings written with a closing run", async () => {
+    const profile = join(tmpDir, "my-profile.md");
+    await writeFile(profile, CLEAN_PROFILE.replace("## Key Strengths", "## Key Strengths ##"));
+    expect(await updateProfile(profile, { achievement: "Rollout", bulletPoint: "Runs multi-team rollouts" }))
+      .toMatchObject({ status: "written" });
+
+    const workContext = join(tmpDir, "work-context.md");
+    await writeFile(workContext, CLEAN_WORK_CONTEXT.replace("## Organizational Notes", "## Organizational Notes ##"));
+    expect(await updateWorkContext(workContext, [
+      { category: "team", info: "Support rota rotates fortnightly", source: "TEAM-1400" },
+    ], new Date("2026-03-08T00:00:00Z"))).toMatchObject({ status: "written" });
+
+    const impact = join(tmpDir, "impact-log.md");
+    await writeFile(impact, CLEAN_IMPACT_LOG.replace("## Impact Timeline", "## Impact Timeline ###"));
+    expect(await updateImpactLog(impact, IMPACT_ENTRY)).toMatchObject({ status: "written" });
+  });
+
+  it("does not mistake a hash inside the heading text for a closing run", async () => {
+    const path = join(tmpDir, "my-profile.md");
+    const file = CLEAN_PROFILE.replace("## Key Strengths", "## Key Strengths #1");
+    await writeFile(path, file);
+
+    expect(await updateProfile(path, { achievement: "Rollout", bulletPoint: "Runs multi-team rollouts" }))
+      .toMatchObject({ status: "no-section" });
   });
 });
