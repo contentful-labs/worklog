@@ -9,7 +9,7 @@
  * stopped, which also makes applying the same week twice a no-op.
  */
 
-import { readFile, rename, writeFile } from "node:fs/promises";
+import { chmod, lstat, readFile, realpath, rename, stat, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import type { BragBookResult } from "./brag-book";
@@ -200,12 +200,39 @@ function sectionEnd(lines: readonly string[], headingIdx: number): number {
   return lines.length;
 }
 
-/** Index of the live `## ` heading that starts with `heading`, or -1. */
-function findHeading(lines: readonly string[], heading: string, limit: number): number {
+/** Index of the live section whose heading starts with `heading`, or -1. */
+function findSectionHeading(lines: readonly string[], heading: string, limit: number): number {
   for (let i = 0; i < limit; i++) {
     if (lines[i].startsWith(heading)) return i;
   }
   return -1;
+}
+
+/**
+ * Index of the live heading whose text is exactly `heading`, or -1.
+ *
+ * Used where landing in the wrong section writes a row into someone else's table:
+ * `## Impact Timeline Notes` is not the impact timeline.
+ */
+function findExactHeading(lines: readonly string[], heading: string, limit: number): number {
+  const target = normalizeText(heading);
+  for (let i = 0; i < limit; i++) {
+    if (lines[i].startsWith("#") && normalizeText(lines[i]) === target) return i;
+  }
+  return -1;
+}
+
+/**
+ * Where a section's content stops, for edits that must stay inside it.
+ *
+ * Unlike `sectionEnd` this runs past a `---` rule, because the impact log keeps its
+ * status lines below one and they are part of the section.
+ */
+function sectionScope(lines: readonly string[], headingIdx: number, limit: number): number {
+  for (let i = headingIdx + 1; i < limit; i++) {
+    if (lines[i].startsWith("## ")) return i;
+  }
+  return limit;
 }
 
 /** Rewrite the first live line starting with `prefix`. Returns whether anything changed. */
@@ -251,6 +278,14 @@ function orgNoteText(bullet: string): string {
   return trimmed;
 }
 
+/** The `_(source)_` suffix of an organizational note, or "" when it has none. */
+function orgNoteSource(bullet: string): string {
+  const trimmed = bullet.trimEnd();
+  if (!trimmed.endsWith(")_")) return "";
+  const start = trimmed.lastIndexOf("_(");
+  return start === -1 ? "" : trimmed.slice(start + 2, trimmed.length - 2);
+}
+
 /** Fold a source into the `_(...)_` suffix of an existing note, or null when unchanged. */
 function mergeNoteSource(bullet: string, source: string): string | null {
   const trimmed = bullet.trimEnd();
@@ -285,8 +320,10 @@ export async function updateMemory(memoryPath: string, itemsToAdd: string[], ite
   }
 
   const kept = rows.filter((_, i) => !graduated.has(i));
-  const keptItems = kept.map((row) => rowCell(row, MEMORY_ITEM_COLUMN));
   const newRows: string[] = [];
+  // Rows already in the file, then rows queued by this batch, so a repeat inside one
+  // batch is folded into the row queued moments earlier rather than added twice.
+  const pending = kept.map((row) => rowCell(row, MEMORY_ITEM_COLUMN));
 
   for (const row of itemsToAdd) {
     if (!row.includes("|")) continue;
@@ -294,14 +331,17 @@ export async function updateMemory(memoryPath: string, itemsToAdd: string[], ite
     const item = incoming[MEMORY_ITEM_COLUMN] ?? "";
     if (isPlaceholder(item)) continue;
 
-    const idx = findRecordIndex(keptItems, item, NO_EXCLUSIONS, PROSE_SIMILARITY_THRESHOLD);
+    const idx = findRecordIndex(pending, item, NO_EXCLUSIONS, PROSE_SIMILARITY_THRESHOLD);
     if (idx === -1) {
       newRows.push(row);
-      keptItems.push(item);
+      pending.push(item);
       continue;
     }
-    const merged = mergeRowCells(kept[idx], incoming, [MEMORY_NOTES_COLUMN]);
-    if (merged) kept[idx] = merged;
+
+    const target = idx < kept.length ? kept : newRows;
+    const offset = idx < kept.length ? idx : idx - kept.length;
+    const merged = mergeRowCells(target[offset], incoming, [MEMORY_NOTES_COLUMN]);
+    if (merged) target[offset] = merged;
   }
 
   if (table) lines.splice(table.rowStart, table.rowEnd - table.rowStart, ...kept);
@@ -325,17 +365,20 @@ export async function updateImpactLog(impactLogPath: string, entry: BragBookResu
   const lines = toLines(original);
   const liveEnd = liveRegionEnd(lines);
 
-  const headingIdx = findHeading(lines, IMPACT_TIMELINE_HEADING, liveEnd);
+  const headingIdx = findExactHeading(lines, IMPACT_TIMELINE_HEADING, liveEnd);
   if (headingIdx === -1) return false;
+
+  // Everything this function touches lives between the heading and the next one. A
+  // table further down the file belongs to another section, and an archived era's
+  // status lines record what was true when that era ended.
+  const scope = sectionScope(lines, headingIdx, liveEnd);
   const table = findTable(lines, headingIdx);
-  if (!table || table.rowStart > liveEnd) return false;
+  if (!table || table.rowStart - 1 >= scope) return false;
 
-  // The status lines are rewritten first, and only the live copy of each: an archived
-  // era carries its own, and those record what was true when that era ended.
-  replaceFirstLine(lines, liveEnd, LAST_IMPACT_PREFIX, `${LAST_IMPACT_PREFIX} ${entry.date}`);
-  replaceFirstLine(lines, liveEnd, CURRENT_GAP_PREFIX, `${CURRENT_GAP_PREFIX} None - recent entry added`);
+  replaceFirstLine(lines, scope, LAST_IMPACT_PREFIX, `${LAST_IMPACT_PREFIX} ${entry.date}`);
+  replaceFirstLine(lines, scope, CURRENT_GAP_PREFIX, `${CURRENT_GAP_PREFIX} None - recent entry added`);
 
-  const rowEnd = Math.min(table.rowEnd, liveEnd);
+  const rowEnd = Math.min(table.rowEnd, scope);
   const rows = lines.slice(table.rowStart, rowEnd);
   const incoming = [entry.date, entry.achievement, entry.scope, entry.coreValue, entry.evidence];
   // Same achievement on the same date is the same entry, whatever the wording.
@@ -365,15 +408,18 @@ export async function updateWorkContext(
   const lines = toLines(original);
   const liveEnd = liveRegionEnd(lines);
 
-  const headingIdx = findHeading(lines, ORG_NOTES_HEADING, liveEnd);
+  const headingIdx = findSectionHeading(lines, ORG_NOTES_HEADING, liveEnd);
   if (headingIdx === -1) return;
 
   const end = Math.min(sectionEnd(lines, headingIdx), liveEnd);
   const bulletLines: number[] = [];
   for (let i = headingIdx + 1; i < end; i++) if (isBullet(lines[i])) bulletLines.push(i);
-  const notes = bulletLines.map((i) => orgNoteText(lines[i]));
 
-  const bullets: string[] = [];
+  // Notes already in the file, then notes queued by this batch. Queued notes stay
+  // structured so a later update naming the same fact folds its source into them
+  // instead of being dropped.
+  const queued: Array<{ category: string; info: string; source: string }> = [];
+  const notes = bulletLines.map((i) => orgNoteText(lines[i]));
   let changed = false;
 
   for (const update of updates) {
@@ -381,24 +427,28 @@ export async function updateWorkContext(
     const idx = findRecordIndex(notes, update.info, NO_EXCLUSIONS, PROSE_SIMILARITY_THRESHOLD);
 
     if (idx === -1) {
-      bullets.push(`- **${update.category}:** ${update.info} _(${update.source})_`);
+      queued.push({ category: update.category, info: update.info, source: update.source });
       notes.push(update.info);
       continue;
     }
-    // Beyond that range the match is a note queued in this same batch, which carries
-    // its own source already.
-    if (idx >= bulletLines.length) continue;
-    const merged = mergeNoteSource(lines[bulletLines[idx]], update.source);
-    if (merged) {
-      lines[bulletLines[idx]] = merged;
-      changed = true;
+
+    if (idx < bulletLines.length) {
+      const merged = mergeNoteSource(lines[bulletLines[idx]], update.source);
+      if (merged) {
+        lines[bulletLines[idx]] = merged;
+        changed = true;
+      }
+      continue;
     }
+
+    const note = queued[idx - bulletLines.length];
+    note.source = mergeCell(note.source, update.source);
   }
 
-  if (bullets.length > 0) {
+  if (queued.length > 0) {
     let insertAt = headingIdx + 1;
     if (lines[insertAt]?.trim() === "") insertAt++;
-    lines.splice(insertAt, 0, ...bullets);
+    lines.splice(insertAt, 0, ...queued.map((note) => `- **${note.category}:** ${note.info} _(${note.source})_`));
     changed = true;
     // The stamp says when a note was last added, so it only moves when one was. Moving
     // it on every run made a rerun of the same week differ from the first run.
@@ -418,7 +468,7 @@ export async function updateProfile(profilePath: string, update: BragBookResult[
   const lines = toLines(original);
   const liveEnd = liveRegionEnd(lines);
 
-  const headingIdx = findHeading(lines, KEY_STRENGTHS_HEADING, liveEnd);
+  const headingIdx = findSectionHeading(lines, KEY_STRENGTHS_HEADING, liveEnd);
   if (headingIdx === -1) return;
 
   const end = Math.min(sectionEnd(lines, headingIdx), liveEnd);
@@ -517,63 +567,88 @@ interface CleanedRecords {
 interface RecordMask {
   /** Whether each record survives, in file order. */
   keep: boolean[];
+  /** The surviving lines, with dropped duplicates folded in. */
+  lines: string[];
   placeholders: number;
   duplicates: number;
 }
 
-/** One stored record: the text that decides identity, and the text that decides emptiness. */
+/** One stored record: the line, the text that decides identity, and what makes it empty. */
 interface StoredRecord {
+  line: string;
   identity: string;
   value: string;
 }
 
+/** Fold a duplicate into the record that survives it, or null when there is nothing to add. */
+type FoldRecord = (survivor: string, duplicate: string) => string | null;
+
 /**
- * Decide which of a file's existing records to keep.
+ * Decide which of a file's existing records to keep, and carry the dropped ones'
+ * evidence into the records that survive them.
  *
- * Two deliberate narrowings, because this deletes lines from a file the user owns and a
- * wrong deletion is not something they can spot afterwards. Duplicates are judged on
+ * Three deliberate narrowings, because this deletes lines from a file the user owns and
+ * a wrong deletion is not something they can spot afterwards. Duplicates are judged on
  * `canonicalText`, which only folds case and whitespace: the scoring normalizer strips
  * symbols and non-ASCII letters, so it maps "Builds C++ toolchains" and "Builds C#
- * toolchains" onto one string and every non-Latin note onto "". And a record with no
- * canonical form at all is never called a repeat.
+ * toolchains" onto one string and every non-Latin note onto "". A record with no
+ * canonical form at all is never called a repeat. And a duplicate's sources, evidence
+ * and notes are merged into the survivor first, so collapsing two rows never costs the
+ * ticket that only one of them cited.
  */
-function keepMask(records: readonly StoredRecord[]): RecordMask {
-  const seen = new Set<string>();
+function keepMask(records: readonly StoredRecord[], fold: FoldRecord): RecordMask {
+  const survivors = new Map<string, number>();
+  const lines = records.map((record) => record.line);
   const keep: boolean[] = [];
   let placeholders = 0;
   let duplicates = 0;
 
-  for (const record of records) {
+  for (const [i, record] of records.entries()) {
     if (isPlaceholder(record.value)) {
       placeholders++;
       keep.push(false);
       continue;
     }
+
     const canonical = canonicalText(record.identity);
-    if (canonical.length > 0 && seen.has(canonical)) {
+    const survivor = canonical.length > 0 ? survivors.get(canonical) : undefined;
+    if (survivor !== undefined) {
       duplicates++;
       keep.push(false);
+      const folded = fold(lines[survivor], record.line);
+      if (folded) lines[survivor] = folded;
       continue;
     }
-    seen.add(canonical);
+
+    survivors.set(canonical, i);
     keep.push(true);
   }
 
-  return { keep, placeholders, duplicates };
+  return { keep, lines, placeholders, duplicates };
 }
 
-function cleanTable(lines: string[], fromLine: number, recordOf: (row: string) => StoredRecord): CleanedRecords {
+function cleanTable(
+  lines: string[],
+  fromLine: number,
+  recordOf: (row: string) => StoredRecord,
+  fold: FoldRecord,
+): CleanedRecords {
   const table = findTable(lines, fromLine);
   if (!table) return { content: lines.join("\n"), placeholders: 0, duplicates: 0 };
 
   const rows = lines.slice(table.rowStart, table.rowEnd);
-  const { keep, placeholders, duplicates } = keepMask(rows.map(recordOf));
+  const mask = keepMask(rows.map(recordOf), fold);
   const next = [...lines];
-  next.splice(table.rowStart, rows.length, ...rows.filter((_, i) => keep[i]));
-  return { content: next.join("\n"), placeholders, duplicates };
+  next.splice(table.rowStart, rows.length, ...mask.lines.filter((_, i) => mask.keep[i]));
+  return { content: next.join("\n"), placeholders: mask.placeholders, duplicates: mask.duplicates };
 }
 
-function cleanBullets(lines: string[], heading: string, textOf: (bullet: string) => string): CleanedRecords {
+function cleanBullets(
+  lines: string[],
+  heading: string,
+  textOf: (bullet: string) => string,
+  fold: FoldRecord,
+): CleanedRecords {
   const headingIdx = lines.findIndex((line) => line.startsWith(heading));
   if (headingIdx === -1) return { content: lines.join("\n"), placeholders: 0, duplicates: 0 };
 
@@ -581,17 +656,37 @@ function cleanBullets(lines: string[], heading: string, textOf: (bullet: string)
   const bulletIdx: number[] = [];
   for (let i = headingIdx + 1; i < end; i++) if (isBullet(lines[i])) bulletIdx.push(i);
 
-  const records = bulletIdx.map((i) => {
-    const text = textOf(lines[i]);
-    return { identity: text, value: text };
-  });
-  const { keep, placeholders, duplicates } = keepMask(records);
-  const drop = new Set(bulletIdx.filter((_, n) => !keep[n]));
+  const mask = keepMask(
+    bulletIdx.map((i) => {
+      const text = textOf(lines[i]);
+      return { line: lines[i], identity: text, value: text };
+    }),
+    fold,
+  );
+
+  const next = [...lines];
+  for (const [n, i] of bulletIdx.entries()) next[i] = mask.lines[n];
+  const drop = new Set(bulletIdx.filter((_, n) => !mask.keep[n]));
   return {
-    content: lines.filter((_, i) => !drop.has(i)).join("\n"),
-    placeholders,
-    duplicates,
+    content: next.filter((_, i) => !drop.has(i)).join("\n"),
+    placeholders: mask.placeholders,
+    duplicates: mask.duplicates,
   };
+}
+
+/** Fold the given columns of a duplicate row into the row that survives it. */
+function foldRowCells(columns: readonly number[]): FoldRecord {
+  return (survivor, duplicate) => mergeRowCells(survivor, splitRow(duplicate), columns);
+}
+
+/** Fold a duplicate note's source into the note that survives it. */
+function foldNoteSource(survivor: string, duplicate: string): string | null {
+  return mergeNoteSource(survivor, orgNoteSource(duplicate));
+}
+
+/** Nothing to carry over: a strength is only its text. */
+function foldNothing(): null {
+  return null;
 }
 
 function cleanVaultRecords(content: string, kind: VaultRecordKind): CleanedRecords {
@@ -599,24 +694,35 @@ function cleanVaultRecords(content: string, kind: VaultRecordKind): CleanedRecor
   switch (kind) {
     case "memory":
       // First table only: the tables below it are archived eras, kept as written.
-      return cleanTable(lines, 0, (row) => {
-        const item = rowCell(row, MEMORY_ITEM_COLUMN);
-        return { identity: item, value: item };
-      });
+      return cleanTable(
+        lines,
+        0,
+        (row) => {
+          const item = rowCell(row, MEMORY_ITEM_COLUMN);
+          return { line: row, identity: item, value: item };
+        },
+        foldRowCells([MEMORY_NOTES_COLUMN]),
+      );
     case "impact-log": {
       const timelineIdx = lines.findIndex((line) => line.startsWith(IMPACT_TIMELINE_HEADING));
       // Identity is the date and the achievement together, but only the achievement
       // decides whether the row says anything: a date in front of "(none)" would
       // otherwise make the placeholder row look like real content.
-      return cleanTable(lines, timelineIdx === -1 ? 0 : timelineIdx, (row) => ({
-        identity: `${rowCell(row, 0)} ${rowCell(row, 1)}`,
-        value: rowCell(row, 1),
-      }));
+      return cleanTable(
+        lines,
+        timelineIdx === -1 ? 0 : timelineIdx,
+        (row) => ({
+          line: row,
+          identity: `${rowCell(row, 0)} ${rowCell(row, 1)}`,
+          value: rowCell(row, 1),
+        }),
+        foldRowCells([IMPACT_SCOPE_COLUMN, IMPACT_VALUE_COLUMN, IMPACT_EVIDENCE_COLUMN]),
+      );
     }
     case "work-context":
-      return cleanBullets(lines, ORG_NOTES_HEADING, orgNoteText);
+      return cleanBullets(lines, ORG_NOTES_HEADING, orgNoteText, foldNoteSource);
     case "my-profile":
-      return cleanBullets(lines, KEY_STRENGTHS_HEADING, (bullet) => bullet.slice(2));
+      return cleanBullets(lines, KEY_STRENGTHS_HEADING, (bullet) => bullet.slice(2), foldNothing);
   }
 }
 
@@ -636,11 +742,23 @@ function nextBackupPath(path: string): string {
   return `${path}.pre-dedupe.${Date.now()}.bak`;
 }
 
-/** Write through a temp file, so an interrupted run cannot leave the vault file torn. */
+/**
+ * Write through a temp file so an interrupted run cannot leave the vault file torn.
+ *
+ * A vault file is often a symlink into somewhere else, and renaming over the link would
+ * replace it with a regular file, quietly detaching it from whatever it pointed at. The
+ * link is resolved first and the target's mode carried over, so the file the user set up
+ * is still the file they have afterwards.
+ */
 async function writeFileAtomic(path: string, content: string): Promise<void> {
-  const temp = `${path}.${randomUUID()}.tmp`;
+  const link = await lstat(path).catch(() => null);
+  const target = link?.isSymbolicLink() ? await realpath(path) : path;
+  const existing = await stat(target).catch(() => null);
+
+  const temp = `${target}.${randomUUID()}.tmp`;
   await writeFile(temp, content, "utf-8");
-  await rename(temp, path);
+  if (existing) await chmod(temp, existing.mode & 0o777);
+  await rename(temp, target);
 }
 
 /**

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtemp, writeFile, readFile, rm } from "node:fs/promises";
+import { mkdtemp, writeFile, readFile, rm, chmod, lstat, stat, symlink } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -450,7 +450,8 @@ describe("updateWorkContext record identity", () => {
     expect(content).not.toContain("(none)");
     expect(content.match(/ship on Tuesdays/g)).toHaveLength(1);
     expect(content.match(/Design review happens/g)).toHaveLength(1);
-    expect(content).toContain("_(TEAM-1300)_");
+    // One bullet, but it cites both tickets that reported the same fact.
+    expect(content).toContain("_(TEAM-1300, TEAM-1301)_");
   });
 
   it("keeps new notes inside the Organizational Notes section", async () => {
@@ -633,6 +634,8 @@ _(Added automatically as significant achievements are recorded)_
 
     const content = await readFile(path, "utf-8");
     expect(content.match(/ship on Tuesdays/g)).toHaveLength(1);
+    // Collapsing the repeats keeps the ticket that only the third one cited.
+    expect(content).toContain("- **process:** Release trains ship on Tuesdays _(TEAM-1200, TEAM-1201)_");
     expect(content).toContain("Design review happens on Thursday afternoons");
     expect(content).not.toContain("(none)");
   });
@@ -1075,5 +1078,172 @@ describe("migration placeholder selectors", () => {
     const content = await readFile(path, "utf-8");
     expect(content).not.toContain("(none)");
     expect(content).toContain("Led the Search Revamp rollout");
+  });
+});
+
+describe("migration carries evidence out of the rows it drops", () => {
+  it("keeps the evidence of a collapsed impact row", async () => {
+    const path = join(tmpDir, "impact-log.md");
+    await writeFile(path, `# Impact Log
+
+## Impact Timeline
+
+| Date | Achievement | Scope | Core Value | Evidence |
+|------|-------------|-------|------------|----------|
+| 2026-03-05 | Led the Search Revamp rollout | org | craft | TEAM-1234 |
+| 2026-03-05 | Led the Search Revamp rollout | | | TEAM-1235 |
+
+**Last significant impact:** 2026-03-05
+**Current gap:** None - recent entry added
+`);
+
+    const result = await migrateVaultRecordsFile(path, "impact-log");
+    expect(result?.duplicates).toBe(1);
+
+    const content = await readFile(path, "utf-8");
+    expect(content.match(/Search Revamp rollout/g)).toHaveLength(1);
+    expect(content).toContain("TEAM-1234, TEAM-1235");
+    expect(content).toContain("| org | craft |");
+  });
+
+  it("keeps the notes of a collapsed memory row", async () => {
+    const path = join(tmpDir, "memory.md");
+    await writeFile(path, `# Memory
+
+| Date | Item | Category | Notes |
+|------|------|----------|-------|
+| 2026-03-01 | Wrote the fallback path for the indexer | project | TEAM-1234 |
+| 2026-03-02 | Wrote the fallback path for the indexer | project | follow-up in TEAM-1240 |
+`);
+
+    const result = await migrateVaultRecordsFile(path, "memory");
+    expect(result?.duplicates).toBe(1);
+
+    const content = await readFile(path, "utf-8");
+    expect(content.match(/fallback path/g)).toHaveLength(1);
+    expect(content).toContain("TEAM-1234, follow-up in TEAM-1240");
+  });
+});
+
+describe("migration and symlinked vault files", () => {
+  it("writes through the link and keeps the file's mode", async () => {
+    const target = join(tmpDir, "real-profile.md");
+    const link = join(tmpDir, "my-profile.md");
+    await writeFile(target, `# My Profile
+
+## Key Strengths
+
+- (none)
+- Untangles flaky test suites other people avoid
+`);
+    await chmod(target, 0o640);
+    await symlink(target, link);
+
+    const result = await migrateVaultRecordsFile(link, "my-profile");
+    expect(result?.placeholders).toBe(1);
+
+    expect((await lstat(link)).isSymbolicLink()).toBe(true);
+    expect(await readFile(target, "utf-8")).not.toContain("(none)");
+    expect((await stat(target)).mode & 0o777).toBe(0o640);
+  });
+});
+
+describe("repeats inside one batch", () => {
+  it("folds a memory item the model listed twice into one row", async () => {
+    const path = join(tmpDir, "memory.md");
+    await writeFile(path, CLEAN_MEMORY);
+
+    await updateMemory(path, [
+      "| 2026-03-08 | Cut the search index rebuild from 40 to 12 minutes | project | TEAM-1234 |",
+      "| 2026-03-08 | Cut the search index rebuild from 40 to 12 minutes | project | follow-up in TEAM-1240 |",
+    ], []);
+
+    const content = await readFile(path, "utf-8");
+    expect(content.match(/search index rebuild/g)).toHaveLength(1);
+    expect(content).toContain("TEAM-1234, follow-up in TEAM-1240");
+  });
+
+  it("folds the sources of a note the model reported twice", async () => {
+    const path = join(tmpDir, "work-context.md");
+    await writeFile(path, CLEAN_WORK_CONTEXT);
+
+    await updateWorkContext(path, [
+      { category: "team", info: "Support rota rotates fortnightly", source: "TEAM-1400" },
+      { category: "team", info: "The support rota rotates fortnightly", source: "TEAM-1401" },
+    ], new Date("2026-03-08T00:00:00Z"));
+
+    const content = await readFile(path, "utf-8");
+    expect(content.match(/rota rotates fortnightly/g)).toHaveLength(1);
+    expect(content).toContain("_(TEAM-1400, TEAM-1401)_");
+  });
+});
+
+describe("impact heading is matched exactly", () => {
+  it("does not treat a longer heading as the impact timeline", async () => {
+    const path = join(tmpDir, "impact-log.md");
+    const file = `# Impact Log
+
+## Impact Timeline Notes
+
+| Date | Note |
+|------|------|
+| 2026-01-01 | Not the timeline |
+`;
+    await writeFile(path, file);
+
+    expect(await updateImpactLog(path, IMPACT_ENTRY)).toBe(false);
+    expect(await readFile(path, "utf-8")).toBe(file);
+  });
+
+  it("does not reach past the section into the next table", async () => {
+    const path = join(tmpDir, "impact-log.md");
+    const file = `# Impact Log
+
+## Impact Timeline
+
+Nothing recorded yet.
+
+## Metrics
+
+| Metric | Value |
+|--------|-------|
+| Reviews | 4 |
+`;
+    await writeFile(path, file);
+
+    expect(await updateImpactLog(path, IMPACT_ENTRY)).toBe(false);
+    expect(await readFile(path, "utf-8")).toBe(file);
+  });
+
+  it("still matches a heading written with extra spacing", async () => {
+    const path = join(tmpDir, "impact-log.md");
+    await writeFile(path, CLEAN_IMPACT_LOG.replace("## Impact Timeline", "##  Impact  Timeline"));
+
+    expect(await updateImpactLog(path, IMPACT_ENTRY)).toBe(true);
+    expect(await readFile(path, "utf-8")).toContain("Led the Search Revamp rollout");
+  });
+});
+
+describe("contracted negations", () => {
+  it("keeps a correction written with an apostrophe", async () => {
+    const path = join(tmpDir, "work-context.md");
+    await writeFile(path, `# Work Context
+
+## Organizational Notes
+
+- **process:** Release trains ship on Tuesdays _(TEAM-1200)_
+
+---
+
+*Last updated: 2026-02-01*
+`);
+
+    await updateWorkContext(path, [
+      { category: "process", info: "Release trains don't ship on Tuesdays any more", source: "TEAM-1300" },
+    ], new Date("2026-03-08T00:00:00Z"));
+
+    const content = await readFile(path, "utf-8");
+    expect(content).toContain("- **process:** Release trains ship on Tuesdays _(TEAM-1200)_");
+    expect(content).toContain("don't ship on Tuesdays any more");
   });
 });
