@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.0.1](https://github.com/contentful-labs/worklog/compare/v2.0.0...v2.0.1) (2026-08-26)
+
+
+### Bug Fixes
+
+* ongoing focus items stay open ([a713bb6](https://github.com/contentful-labs/worklog/commit/a713bb617bd2cbd062f68e24fb4af7c2655373d8))
+
 ## [2.0.0](https://github.com/contentful-labs/worklog/compare/v1.6.1...v2.0.0) (2026-08-26)
 
 
