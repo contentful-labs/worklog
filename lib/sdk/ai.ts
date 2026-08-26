@@ -189,17 +189,40 @@ function resolveOpenAIAuthOrThrow(): Exclude<OpenAIAuthResolution, { source: "no
   return auth;
 }
 
-async function createConfiguredOpenAI(): Promise<OpenAIProvider> {
+type OpenAIAuthSource = Exclude<OpenAIAuthResolution, { source: "none" }>["source"];
+
+/**
+ * Default model per auth source. They differ because the Codex backend refuses `gpt-5`
+ * for a ChatGPT account ("The 'gpt-5' model is not supported when using Codex with a
+ * ChatGPT account", HTTP 400), while a plain API key has no Codex-served model. An
+ * explicit config.ai.model always wins over both.
+ */
+const DEFAULT_OPENAI_MODEL = {
+  "codex-subscription": "gpt-5.6-sol",
+  env: "gpt-5",
+} satisfies Record<OpenAIAuthSource, string>;
+
+interface ConfiguredOpenAI {
+  provider: OpenAIProvider;
+  defaultModel: string;
+}
+
+async function createConfiguredOpenAI(): Promise<ConfiguredOpenAI> {
   const auth = resolveOpenAIAuthOrThrow();
+  const defaultModel = DEFAULT_OPENAI_MODEL[auth.source];
+
   if (auth.source === "codex-subscription") {
     const freshToken = (await refreshCodexToken()) ?? auth.apiKey;
-    return createOpenAI({
-      baseURL: "https://chatgpt.com/backend-api/codex",
-      apiKey: freshToken,
-      headers: auth.accountId ? { "ChatGPT-Account-Id": auth.accountId } : {},
-    });
+    return {
+      defaultModel,
+      provider: createOpenAI({
+        baseURL: "https://chatgpt.com/backend-api/codex",
+        apiKey: freshToken,
+        headers: auth.accountId ? { "ChatGPT-Account-Id": auth.accountId } : {},
+      }),
+    };
   }
-  return createOpenAI({ apiKey: auth.apiKey });
+  return { defaultModel, provider: createOpenAI({ apiKey: auth.apiKey }) };
 }
 
 type ResearchTools = ReturnType<typeof buildResearchTools>;
@@ -215,10 +238,10 @@ function logOpenAIStep(log: Logger) {
 }
 
 async function queryOpenAI(config: WorklogConfig, modelOverride: string | undefined, prompt: string, log: Logger): Promise<string> {
-  const openaiProvider = await createConfiguredOpenAI();
+  const { provider, defaultModel } = await createConfiguredOpenAI();
 
   const result = streamText({
-    model: openaiProvider.responses(modelOverride || "gpt-5"),
+    model: provider.responses(modelOverride || defaultModel),
     prompt,
     tools: buildResearchTools(config),
     stopWhen: stepCountIs(MAX_STEPS),
@@ -237,10 +260,10 @@ async function queryOpenAIStructured(
   schemaName: string,
   log: Logger,
 ): Promise<unknown> {
-  const openaiProvider = await createConfiguredOpenAI();
+  const { provider, defaultModel } = await createConfiguredOpenAI();
 
   const result = streamText({
-    model: openaiProvider.responses(modelOverride || "gpt-5"),
+    model: provider.responses(modelOverride || defaultModel),
     prompt,
     tools: buildResearchTools(config),
     stopWhen: stepCountIs(MAX_STEPS),

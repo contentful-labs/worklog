@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import { z } from "zod";
 
 vi.mock("ai", async (importOriginal) => {
@@ -11,13 +11,22 @@ vi.mock("@anthropic-ai/claude-agent-sdk", async (importOriginal) => {
   return { ...actual, query: vi.fn() };
 });
 
+vi.mock("../../openai-auth", () => ({
+  resolveOpenAIAuth: vi.fn(),
+  refreshCodexToken: vi.fn(),
+}));
+
 import { streamText } from "ai";
 import { query } from "@anthropic-ai/claude-agent-sdk";
+import { resolveOpenAIAuth, refreshCodexToken } from "../../openai-auth";
 import { aiQueryStructured, postProcess, toAnthropicJsonSchema } from "../ai";
 import type { WorklogConfig } from "../types";
 
 const mockedStreamText = vi.mocked(streamText);
 const mockedQuery = vi.mocked(query);
+const mockedResolveAuth = vi.mocked(resolveOpenAIAuth);
+const mockedRefreshToken = vi.mocked(refreshCodexToken);
+
 
 const schema = z.object({
   headline: z.string().describe("One line."),
@@ -58,11 +67,8 @@ function streamTextResult(output: unknown) {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  process.env.OPENAI_API_KEY = "test-key";
-});
-
-afterEach(() => {
-  delete process.env.OPENAI_API_KEY;
+  mockedResolveAuth.mockReturnValue({ apiKey: "test-key", source: "env" });
+  mockedRefreshToken.mockResolvedValue(null);
 });
 
 describe("toAnthropicJsonSchema", () => {
@@ -95,6 +101,34 @@ describe("aiQueryStructured on the OpenAI path", () => {
     mockedStreamText.mockReturnValue(streamTextResult({ headline: 42 }));
 
     await expect(aiQueryStructured({ prompt: "go", config: configFor("openai"), schema })).rejects.toThrow();
+  });
+});
+
+describe("OpenAI default model", () => {
+  beforeEach(() => {
+    mockedStreamText.mockReturnValue(streamTextResult({ headline: "hi", items: [] }));
+  });
+
+  it("uses a Codex-served model on a ChatGPT subscription", async () => {
+    mockedResolveAuth.mockReturnValue({ apiKey: "tok", source: "codex-subscription", accountId: "acct" });
+
+    await aiQueryStructured({ prompt: "go", config: configFor("openai"), schema });
+
+    expect(mockedStreamText.mock.calls[0][0].model).toMatchObject({ modelId: "gpt-5.6-sol" });
+  });
+
+  it("uses gpt-5 on an API key", async () => {
+    await aiQueryStructured({ prompt: "go", config: configFor("openai"), schema });
+
+    expect(mockedStreamText.mock.calls[0][0].model).toMatchObject({ modelId: "gpt-5" });
+  });
+
+  it("lets an explicit model win over both defaults", async () => {
+    mockedResolveAuth.mockReturnValue({ apiKey: "tok", source: "codex-subscription", accountId: "acct" });
+
+    await aiQueryStructured({ prompt: "go", config: configFor("openai"), schema, model: "gpt-5-mini" });
+
+    expect(mockedStreamText.mock.calls[0][0].model).toMatchObject({ modelId: "gpt-5-mini" });
   });
 });
 
