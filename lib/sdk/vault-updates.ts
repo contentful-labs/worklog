@@ -65,6 +65,24 @@ Contributions here are waiting to accumulate into something brag-worthy.
 const MEMORY_HEADER = ["Date", "Item", "Category", "Notes"];
 const IMPACT_HEADER = ["Date", "Achievement", "Scope", "Core Value", "Evidence"];
 
+/**
+ * `worklog init` seeds every vault file except this one, so the first real achievement
+ * has to be able to create it. The header has to match IMPACT_HEADER exactly, since
+ * that is what the writer looks for.
+ */
+const IMPACT_LOG_TEMPLATE = `# Impact Log
+
+Achievements that carry weight in a review, with the evidence for them.
+
+## Impact Timeline
+
+| Date | Achievement | Scope | Core Value | Evidence |
+|------|-------------|-------|------------|----------|
+
+**Last significant impact:** none recorded
+**Current gap:** no significant impact recorded
+`;
+
 /** Column indexes in a memory row: `| Date | Item | Category | Notes |`. */
 const MEMORY_ITEM_COLUMN = 1;
 const MEMORY_NOTES_COLUMN = 3;
@@ -1090,7 +1108,13 @@ export async function updateImpactLog(
   now: Date = new Date(),
 ): Promise<VaultWriteResult> {
   const nothingToRecord = !entry || isPlaceholder(entry.achievement);
-  const original = await readFile(impactLogPath, "utf-8");
+
+  // Nothing to record and no file yet: creating one to say it holds nothing would be
+  // writing a file the user never asked for. The first real entry creates it.
+  const exists = existsSync(impactLogPath);
+  if (!exists && nothingToRecord) return writeResult("placeholder", { skipped: entry ? 1 : 0 });
+
+  const original = exists ? await readFile(impactLogPath, "utf-8") : IMPACT_LOG_TEMPLATE;
   const eol = detectEol(original);
   const lines = toLines(original);
   const scan = maskFenced(lines);
@@ -1150,6 +1174,9 @@ export async function updateWorkContext(
   now: Date = new Date(),
 ): Promise<VaultWriteResult> {
   if (updates.length === 0) return writeResult("placeholder");
+  // Seeded by `worklog init`. Gone means the user removed it, which is not this code's
+  // business to undo.
+  if (!existsSync(workContextPath)) return writeResult("no-section", { skipped: updates.length });
 
   const original = await readFile(workContextPath, "utf-8");
   const eol = detectEol(original);
@@ -1233,6 +1260,8 @@ export async function updateProfile(
   update: BragBookResult["profileUpdate"],
 ): Promise<VaultWriteResult> {
   if (!update || isPlaceholder(update.bulletPoint)) return writeResult("placeholder", { skipped: update ? 1 : 0 });
+  // Seeded by `worklog init`, like work-context.md.
+  if (!existsSync(profilePath)) return writeResult("no-section", { skipped: 1 });
 
   const original = await readFile(profilePath, "utf-8");
   const eol = detectEol(original);

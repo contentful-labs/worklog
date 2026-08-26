@@ -678,7 +678,7 @@ export async function runWorklog(opts: {
     p.log.success(`${wid} done in ${formatDuration(weekTotal)}`);
 
     timings.push({ weekId: wid, fetch: fetchMs, bragBook: bragMs, contextUpdates: ctxMs, total: weekTotal });
-    results.push({ weekId: wid, jira: issues.length, confluence: pages.length, prs: prs.length, reviews: reviews.length, memoryAdded: memoryResult.added, memoryRemoved: memoryResult.removed, impactLog: impactResult.status === "written", workContextUpdates: workContextResult.added, profileUpdated: profileResult.status === "written", focusItems: focusItems.length, focusUpdates: focusUpdates.length });
+    results.push({ weekId: wid, jira: issues.length, confluence: pages.length, prs: prs.length, reviews: reviews.length, memoryAdded: memoryResult.added, memoryRemoved: memoryResult.removed, impactLog: impactResult.added + impactResult.merged > 0, workContextUpdates: workContextResult.added, profileUpdated: profileResult.status === "written", focusItems: focusItems.length, focusUpdates: focusUpdates.length });
 
     progress.completedWeeks.push(wid);
     await saveProgress(progress);

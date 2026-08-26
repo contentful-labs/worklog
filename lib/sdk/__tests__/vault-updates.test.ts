@@ -3518,3 +3518,98 @@ describe("the gap ages on a file with nothing to clean", () => {
     expect(existsSync(`${path}.pre-dedupe.bak`)).toBe(false);
   });
 });
+
+describe("a vault file that is not there yet", () => {
+  const now = new Date("2026-03-06T00:00:00Z");
+
+  it("does not create an impact log for a week with nothing to record", async () => {
+    const path = join(tmpDir, "impact-log.md");
+
+    expect(await updateImpactLog(path, null, now)).toMatchObject({ status: "placeholder", added: 0 });
+    expect(await updateImpactLog(path, { ...IMPACT_ENTRY, achievement: "(none)" }, now))
+      .toMatchObject({ status: "placeholder", added: 0 });
+    expect(existsSync(path)).toBe(false);
+  });
+
+  it("creates the impact log for the first real achievement", async () => {
+    const path = join(tmpDir, "impact-log.md");
+
+    expect(await updateImpactLog(path, IMPACT_ENTRY, now)).toMatchObject({ status: "written", added: 1 });
+
+    const content = await readFile(path, "utf-8");
+    expect(content).toContain("## Impact Timeline");
+    expect(content).toContain("| Date | Achievement | Scope | Core Value | Evidence |");
+    expect(content).toContain("| 2026-03-05 | Led the Search Revamp rollout across three teams | org | craft | TEAM-1234 |");
+    expect(content).toContain("**Last significant impact:** 2026-03-05");
+    expect(content).toContain("**Current gap:** None - recent entry added");
+  });
+
+  it("takes a second entry into the file it just created", async () => {
+    const path = join(tmpDir, "impact-log.md");
+    await updateImpactLog(path, IMPACT_ENTRY, now);
+
+    expect(await updateImpactLog(path, IMPACT_ENTRY, now)).toMatchObject({ status: "unchanged", added: 0 });
+    expect(await updateImpactLog(path, { ...IMPACT_ENTRY, date: "2026-03-12" }, now))
+      .toMatchObject({ status: "written", added: 1 });
+  });
+
+  it("creates memory.md the same way, and focus tracking too", async () => {
+    const memoryPath = join(tmpDir, "memory.md");
+    expect(await updateMemory(memoryPath, ["| 2026-03-08 | Wrote the fallback path | project |  |"], []))
+      .toMatchObject({ status: "written", added: 1 });
+    expect(await readFile(memoryPath, "utf-8")).toContain("| Date | Item | Category | Notes |");
+
+    const focusPath = join(tmpDir, "focus-tracking.md");
+    const focus = await updateFocusTracking(focusPath, {
+      focusItems: ["Ship the auth PR"], focusUpdates: [], reviewedIds: [], weekLabel: "2026-W10",
+    });
+    expect(focus.added).toBe(1);
+    expect(await readFile(focusPath, "utf-8")).toContain("# Focus Tracking");
+  });
+
+  it("says so rather than throwing when a seeded file has been removed", async () => {
+    const workContext = join(tmpDir, "work-context.md");
+    expect(await updateWorkContext(workContext, [
+      { category: "team", info: "Support rota rotates fortnightly", source: "TEAM-1400" },
+    ], now)).toMatchObject({ status: "no-section", skipped: 1 });
+    expect(existsSync(workContext)).toBe(false);
+
+    const profile = join(tmpDir, "my-profile.md");
+    expect(await updateProfile(profile, { achievement: "Rollout", bulletPoint: "Runs multi-team rollouts" }))
+      .toMatchObject({ status: "no-section", skipped: 1 });
+    expect(existsSync(profile)).toBe(false);
+  });
+
+  it("leaves the cleanup alone on a file that is not there", async () => {
+    for (const kind of ["memory", "impact-log", "work-context", "my-profile"] as const) {
+      expect(await migrateVaultRecordsFile(join(tmpDir, `${kind}.md`), kind, now), kind).toBeNull();
+    }
+  });
+});
+
+describe("what the run summary counts as an impact update", () => {
+  // The summary reads added + merged rather than the status, so a run that only aged
+  // the gap does not report an impact the user did not have.
+  const impactCounted = (result: { added: number; merged: number }) => result.added + result.merged > 0;
+
+  it("counts a new entry and a merged one, but not a metadata refresh", async () => {
+    const path = join(tmpDir, "impact-log.md");
+    await writeFile(path, CLEAN_IMPACT_LOG);
+
+    const added = await updateImpactLog(path, { ...IMPACT_ENTRY, date: "2026-08-03" }, new Date("2026-08-04T00:00:00Z"));
+    expect(added).toMatchObject({ status: "written" });
+    expect(impactCounted(added)).toBe(true);
+
+    const merged = await updateImpactLog(
+      path,
+      { ...IMPACT_ENTRY, date: "2026-08-03", evidence: "TEAM-1240" },
+      new Date("2026-08-04T00:00:00Z"),
+    );
+    expect(merged).toMatchObject({ status: "written", merged: 1 });
+    expect(impactCounted(merged)).toBe(true);
+
+    const aged = await updateImpactLog(path, null, new Date("2026-08-26T00:00:00Z"));
+    expect(aged).toMatchObject({ status: "written", added: 0, merged: 0 });
+    expect(impactCounted(aged)).toBe(false);
+  });
+});
