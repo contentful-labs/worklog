@@ -12,7 +12,7 @@ export function generateMarkdown(
   weekInfo: WeekInfo,
   additionalContext: string,
   config: WorklogConfig,
-  accountId: string,
+  accountId?: string,
 ): string {
   const lines: string[] = [];
   const startDate = weekInfo.startDate.toISOString().split("T")[0];
@@ -62,7 +62,7 @@ export function generateMarkdown(
       if (f.comment?.comments?.length) {
         // Account id is the stable identifier; display names change and repeat.
         const myComments = f.comment.comments.filter((c) =>
-          c.author?.accountId
+          accountId && c.author?.accountId
             ? c.author.accountId === accountId
             : c.author?.displayName === config.profile.displayName,
         );

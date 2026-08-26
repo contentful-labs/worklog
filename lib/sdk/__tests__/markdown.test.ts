@@ -113,6 +113,27 @@ describe("generateMarkdown", () => {
     expect(md).not.toContain("legacy theirs");
   });
 
+  it("matches on display name when the caller passes no account id", () => {
+    const issues: JiraIssue[] = [
+      {
+        key: "CORE-9",
+        fields: {
+          summary: "Rollout", status: { name: "Done" }, created: "2026-03-02", updated: "2026-03-05",
+          comment: {
+            comments: [
+              { author: { accountId: ACCOUNT_ID, displayName: "Test" }, body: { content: [{ content: [{ text: "mine" }] }] } },
+              { author: { accountId: "other-acct", displayName: "Other" }, body: { content: [{ content: [{ text: "theirs" }] }] } },
+            ],
+          },
+        },
+      },
+    ];
+    const md = generateMarkdown(issues, [], [], [], [], weekInfo, "", config);
+    expect(md).toContain("**Your comments (1):**");
+    expect(md).toContain("mine");
+    expect(md).not.toContain("theirs");
+  });
+
   it("omits empty sections", () => {
     const md = generateMarkdown([], [], [], [], [], weekInfo, "", config, ACCOUNT_ID);
     expect(md).not.toContain("## Jira Tasks");
