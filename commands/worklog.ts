@@ -645,7 +645,8 @@ export async function runWorklog(opts: {
     log(`Context updates — memory: +${itemsToAdd.length}/-${itemsToRemove.length}, impact: ${impactLogEntry ? "yes" : "no"}, workContext: ${workContextUpdates.length}, profile: ${profileUpdate ? "yes" : "no"}, focus: ${focusItems.length}/${focusUpdates.length}`);
 
     if (itemsToAdd.length > 0 || itemsToRemove.length > 0) await updateMemory(paths.memory, itemsToAdd, itemsToRemove);
-    if (impactLogEntry && !(await updateImpactLog(paths.impactLog, impactLogEntry))) p.log.warn("impact-log.md has no `## Impact Timeline` section; entry not written");
+    const impactResult = await updateImpactLog(paths.impactLog, impactLogEntry);
+    if (impactResult === "no-section") p.log.warn("impact-log.md has no `## Impact Timeline` section; entry not written");
     if (workContextUpdates.length > 0) await updateWorkContext(paths.workContext, workContextUpdates);
     if (profileUpdate) await updateProfile(paths.profile, profileUpdate);
     if (focusItems.length > 0 || focusUpdates.length > 0 || openFocusItems.length > 0) {
@@ -666,7 +667,7 @@ export async function runWorklog(opts: {
     p.log.success(`${wid} done in ${formatDuration(weekTotal)}`);
 
     timings.push({ weekId: wid, fetch: fetchMs, bragBook: bragMs, contextUpdates: ctxMs, total: weekTotal });
-    results.push({ weekId: wid, jira: issues.length, confluence: pages.length, prs: prs.length, reviews: reviews.length, memoryAdded: itemsToAdd.length, memoryRemoved: itemsToRemove.length, impactLog: !!impactLogEntry, workContextUpdates: workContextUpdates.length, profileUpdated: !!profileUpdate, focusItems: focusItems.length, focusUpdates: focusUpdates.length });
+    results.push({ weekId: wid, jira: issues.length, confluence: pages.length, prs: prs.length, reviews: reviews.length, memoryAdded: itemsToAdd.length, memoryRemoved: itemsToRemove.length, impactLog: impactResult === "written", workContextUpdates: workContextUpdates.length, profileUpdated: !!profileUpdate, focusItems: focusItems.length, focusUpdates: focusUpdates.length });
 
     progress.completedWeeks.push(wid);
     await saveProgress(progress);

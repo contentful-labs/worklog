@@ -83,7 +83,7 @@ export {
 } from "./prep";
 
 // Vault updates
-export type { FocusFileMigration, VaultRecordKind, VaultRecordsMigration } from "./vault-updates";
+export type { FocusFileMigration, ImpactLogResult, VaultRecordKind, VaultRecordsMigration } from "./vault-updates";
 export {
   updateMemory, updateImpactLog, updateWorkContext, updateProfile,
   updateFocusTracking, migrateFocusTrackingFile, migrateVaultRecordsFile, isPlaceholder,
