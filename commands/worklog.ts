@@ -647,8 +647,8 @@ export async function runWorklog(opts: {
     if (itemsToAdd.length > 0 || itemsToRemove.length > 0) await updateMemory(paths.memory, itemsToAdd, itemsToRemove);
     const impactResult = await updateImpactLog(paths.impactLog, impactLogEntry);
     if (impactResult === "no-section") p.log.warn("impact-log.md has no `## Impact Timeline` section; entry not written");
-    if (workContextUpdates.length > 0) await updateWorkContext(paths.workContext, workContextUpdates);
-    if (profileUpdate) await updateProfile(paths.profile, profileUpdate);
+    if (await updateWorkContext(paths.workContext, workContextUpdates) === "no-section") p.log.warn("work-context.md has no `## Organizational Notes` section; notes not written");
+    if (await updateProfile(paths.profile, profileUpdate) === "no-section") p.log.warn("my-profile.md has no `## Key Strengths` section; strength not written");
     if (focusItems.length > 0 || focusUpdates.length > 0 || openFocusItems.length > 0) {
       const focusResult = await updateFocusTracking(paths.focusTracking, {
         focusItems,

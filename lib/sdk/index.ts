@@ -73,7 +73,7 @@ export type { TableBounds } from "./markdown-table";
 export { isTableSeparator, splitRow, escapeCell, renderRow, appendToFirstTable, findTable } from "./markdown-table";
 
 // Text similarity
-export { SIMILARITY_THRESHOLD, PROSE_SIMILARITY_THRESHOLD, normalizeText, textSimilarity } from "./text-similarity";
+export { SIMILARITY_THRESHOLD, LOOKUP_MARGIN, canonicalText, normalizeText, textSimilarity } from "./text-similarity";
 
 // Prep doc generation
 export type { PrepType, PrepContext, PrepOptions } from "./prep";
@@ -83,7 +83,7 @@ export {
 } from "./prep";
 
 // Vault updates
-export type { FocusFileMigration, ImpactLogResult, VaultRecordKind, VaultRecordsMigration } from "./vault-updates";
+export type { FocusFileMigration, VaultWriteResult, VaultRecordKind, VaultRecordsMigration } from "./vault-updates";
 export {
   updateMemory, updateImpactLog, updateWorkContext, updateProfile,
   updateFocusTracking, migrateFocusTrackingFile, migrateVaultRecordsFile, isPlaceholder,
