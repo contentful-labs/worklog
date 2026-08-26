@@ -34,6 +34,11 @@ export interface PRReview {
   pr_html_url: string;
 }
 
+export interface FetchWeekOptions {
+  /** Called when a supplementary fetch fails and the week continues without that data. */
+  onWarning?: (message: string) => void;
+}
+
 export interface FetchedWeekData {
   issues: JiraIssue[];
   pages: ConfluencePage[];
@@ -158,7 +163,9 @@ export async function fetchDataForWeek(
   accountId: string,
   githubUsername: string,
   weekInfo: WeekInfo,
+  opts: FetchWeekOptions = {},
 ): Promise<FetchedWeekData> {
+  const { onWarning } = opts;
   const startDate = weekInfo.startDate.toISOString().split("T")[0];
   const endDate = weekInfo.endDate.toISOString().split("T")[0];
 
@@ -221,8 +228,13 @@ export async function fetchDataForWeek(
   const authoredUrls = new Set(prs.map(p => p.html_url));
   const reviewQuery = `type:pr reviewed-by:${githubUsername} ${orgFilter} updated:${startDate}..${endDate}`;
 
-  // Reviews are supplementary; a failed search shouldn't abort the week.
-  const reviewPRs = await fetchGitHubPRs(headers, reviewQuery, "updated").catch(() => [] as GitHubPR[]);
+  // Reviews are supplementary; a failed search shouldn't abort the week, but it must be reported.
+  let reviewPRs: GitHubPR[] = [];
+  try {
+    reviewPRs = await fetchGitHubPRs(headers, reviewQuery, "updated");
+  } catch (err) {
+    onWarning?.(`GitHub reviewed-PR search failed, reviews will be missing from this week: ${String(err)}`);
+  }
 
   for (const pr of reviewPRs) {
     if (authoredUrls.has(pr.html_url)) continue;
@@ -230,18 +242,28 @@ export async function fetchDataForWeek(
 
     try {
       const reviewsRes = await fetch(`https://api.github.com/repos/${repoPath}/pulls/${pr.number}/reviews`, { headers: headers.github });
-      if (!reviewsRes.ok) continue;
+      if (!reviewsRes.ok) {
+        onWarning?.(`Could not read reviews for ${repoPath}#${pr.number}, it will be missing from this week: HTTP ${reviewsRes.status}`);
+        continue;
+      }
       const prReviews = await reviewsRes.json();
       const userReviews = prReviews.filter((r: { user?: { login: string }; state: string; submitted_at: string; html_url: string }) => r.user?.login === githubUsername);
       if (userReviews.length === 0) continue;
 
       const latestReview = userReviews[userReviews.length - 1];
 
-      const commentsRes = await fetch(`https://api.github.com/repos/${repoPath}/pulls/${pr.number}/comments`, { headers: headers.github });
+      // Own try/catch: the review is already fetched, so a comment count failure must not drop it.
       let commentCount = 0;
-      if (commentsRes.ok) {
-        const prComments = await commentsRes.json();
-        commentCount = prComments.filter((c: { user?: { login: string } }) => c.user?.login === githubUsername).length;
+      try {
+        const commentsRes = await fetch(`https://api.github.com/repos/${repoPath}/pulls/${pr.number}/comments`, { headers: headers.github });
+        if (commentsRes.ok) {
+          const prComments = await commentsRes.json();
+          commentCount = prComments.filter((c: { user?: { login: string } }) => c.user?.login === githubUsername).length;
+        } else {
+          onWarning?.(`Could not read review comments for ${repoPath}#${pr.number}, its comment count will read 0: HTTP ${commentsRes.status}`);
+        }
+      } catch (err) {
+        onWarning?.(`Could not read review comments for ${repoPath}#${pr.number}, its comment count will read 0: ${String(err)}`);
       }
 
       reviews.push({
@@ -255,8 +277,8 @@ export async function fetchDataForWeek(
         html_url: latestReview.html_url,
         pr_html_url: pr.html_url,
       });
-    } catch {
-      // skip failed review fetches
+    } catch (err) {
+      onWarning?.(`Review fetch failed for ${repoPath}#${pr.number}, it will be missing from this week: ${String(err)}`);
     }
   }
 
@@ -265,12 +287,16 @@ export async function fetchDataForWeek(
   const projectKeys = config.profile.ticketPrefixes.map(normalizeTicketPrefix).filter(Boolean);
   if (projectKeys.length > 0) {
     const sprintJql = buildTeamSprintJql(projectKeys, email);
-    // Sprint context is supplementary; a failed query shouldn't abort the week.
-    teamSprintItems = await fetchJiraIssues(
-      config, headers, sprintJql,
-      ["summary", "status", "priority", "labels", "components"],
-      { pageSize: 50, limit: 50 },
-    ).catch(() => []);
+    // Sprint context is supplementary; a failed query shouldn't abort the week, but it must be reported.
+    try {
+      teamSprintItems = await fetchJiraIssues(
+        config, headers, sprintJql,
+        ["summary", "status", "priority", "labels", "components"],
+        { pageSize: 50, limit: 50 },
+      );
+    } catch (err) {
+      onWarning?.(`Team sprint query failed, sprint context will be missing from this week: ${String(err)}`);
+    }
   }
 
   return { issues, pages, prs, reviews, teamSprintItems };

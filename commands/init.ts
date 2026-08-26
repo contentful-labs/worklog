@@ -8,6 +8,7 @@ import {
   loadConfig,
   getConfigPath,
   validateAtlassianUrl,
+  canonicalizeAtlassianUrl,
   validateEmail,
   validateISODate,
   expandHome,
@@ -35,15 +36,9 @@ function resolveInputPath(path: string): string {
 }
 
 const DEFAULT_VAULT_PATH = "~/Documents/worklog";
-const DEFAULT_ATLASSIAN_URL = "https://contentful.atlassian.net";
-const DEFAULT_GITHUB_ORGS = ["contentful", "contentful-labs"];
-const DEFAULT_PROFILE_COMPANY = "Contentful";
-const DEFAULT_CAREER_COMPANY_VALUES = [
-  "Relentless Customer Focus",
-  "Be Bold",
-  "Own It",
-  "Win Together",
-];
+// Hints shown in empty prompts. Never written to config: the user has to type a real value.
+const PLACEHOLDER_ATLASSIAN_URL = "https://your-company.atlassian.net";
+const PLACEHOLDER_GITHUB_ORGS = "your-org";
 
 // --- Vault doc writer with existing-file handling ---
 
@@ -317,13 +312,7 @@ export async function promptAtlassian(
   initial?: WorklogConfig["atlassian"],
   options?: { defaultUrl?: string; skipUrlPrompt?: boolean }
 ): Promise<WorklogConfig["atlassian"]> {
-  const fallbackUrl = (
-    initial?.url ||
-    options?.defaultUrl ||
-    DEFAULT_ATLASSIAN_URL
-  )
-    .trim()
-    .replace(/\/$/, "");
+  const fallbackUrl = (initial?.url || options?.defaultUrl || "").trim();
   let urlStr = fallbackUrl;
 
   if (options?.skipUrlPrompt) {
@@ -331,18 +320,26 @@ export async function promptAtlassian(
   } else {
     const url = await p.text({
       message: "Atlassian instance URL:",
-      placeholder: fallbackUrl,
+      placeholder: fallbackUrl || PLACEHOLDER_ATLASSIAN_URL,
       initialValue: initial?.url,
       validate: (v) =>
         validateAtlassianUrl(((v ?? "").trim() || fallbackUrl).trim()) ?? undefined,
     });
     cancelGuard(url);
-    urlStr = ((url as string).trim() || fallbackUrl).replace(/\/$/, "");
+    urlStr = (url as string).trim() || fallbackUrl;
+  }
+
+  // Store the origin, not whatever the user pasted: API paths are appended to it.
+  const canonical = canonicalizeAtlassianUrl(urlStr);
+  if (canonical.ok) {
+    urlStr = canonical.url;
+  } else {
+    p.log.warn(`Atlassian URL may not work (${canonical.error}): ${urlStr}`);
   }
 
   const email = await p.text({
     message: "Your Atlassian email:",
-    placeholder: "you@company.com",
+    placeholder: "you@example.com",
     initialValue: initial?.email,
     validate: (v) => validateEmail((v ?? "").trim()) ?? undefined,
   });
@@ -386,7 +383,7 @@ export async function promptGitHub(
       ? initial
       : options?.defaultOrgs?.length
         ? options.defaultOrgs
-        : DEFAULT_GITHUB_ORGS;
+        : [];
   let selectedOrgs = fallbackOrgs;
 
   if (options?.skipOrgPrompt) {
@@ -395,7 +392,7 @@ export async function promptGitHub(
     const fallbackText = fallbackOrgs.join(", ");
     const orgs = await p.text({
       message: "GitHub orgs to track (comma-separated):",
-      placeholder: fallbackText || "myorg",
+      placeholder: fallbackText || PLACEHOLDER_GITHUB_ORGS,
       initialValue: initial?.join(", "),
       validate: (v) => {
         const parsed = parseCommaSeparated(((v ?? "").trim() || fallbackText).trim());
@@ -566,7 +563,7 @@ export async function promptCareer(
   const companyValues = await p.text({
     message: "Company core values (comma-sep, or Enter to skip):",
     placeholder:
-      "e.g. Customer Focus, Be Bold, Own It, Win Together",
+      "e.g. Customer Focus, Ownership, Craft",
     initialValue: initial?.companyValues?.join(", "),
   });
   cancelGuard(companyValues);
@@ -812,56 +809,16 @@ export async function runInit(options?: { dryRun?: boolean }): Promise<void> {
   cancelGuard(nameRaw);
   const fullName = (nameRaw as string).trim();
 
-  // --- Prompt 3: Atlassian email ---
-  const emailRaw = await p.text({
-    message: "Atlassian email:",
-    placeholder: "you@contentful.com",
-    initialValue: useExisting ? existing!.atlassian.email : undefined,
-    validate: (v) => validateEmail((v ?? "").trim()) ?? undefined,
-  });
-  cancelGuard(emailRaw);
-  const atlassianEmail = (emailRaw as string).trim();
+  // --- Prompt 3: Atlassian instance, email and token ---
+  const atlassian = await promptAtlassian(useExisting ? existing!.atlassian : undefined);
 
   // --- Prompt 4: AI auth ---
   const ai = await promptAI(useExisting ? existing!.ai : undefined);
 
-  // --- Prompt 5: API tokens ---
-  if (!process.env.ATLASSIAN_API_TOKEN) {
-    await promptForToken({
-      envVar: "ATLASSIAN_API_TOKEN",
-      label: "Atlassian API",
-      generateUrl: "https://id.atlassian.com/manage-profile/security/api-tokens",
-      validate: async () => {
-        const r = await checkAtlassianConnection(DEFAULT_ATLASSIAN_URL, atlassianEmail);
-        return { ok: r.ok, detail: r.ok ? `Connected as ${r.accountId}` : r.error };
-      },
-    });
-  } else {
-    const check = await checkAtlassianConnection(
-      useExisting ? existing!.atlassian.url : DEFAULT_ATLASSIAN_URL,
-      atlassianEmail
-    );
-    if (check.ok) p.log.success(`Atlassian connected as ${check.accountId}`);
-    else p.log.warn(`Atlassian connection issue: ${check.error}`);
-  }
+  // --- Prompt 5: GitHub orgs and token ---
+  const githubOrgs = await promptGitHub(useExisting ? existing!.githubOrgs : undefined);
 
-  if (!process.env.GITHUB_TOKEN) {
-    await promptForToken({
-      envVar: "GITHUB_TOKEN",
-      label: "GitHub",
-      generateUrl: "https://github.com/settings/tokens",
-      validate: async () => {
-        const r = await checkGitHubConnection();
-        return { ok: r.ok, detail: r.ok ? `Connected as ${r.username}` : r.error };
-      },
-    });
-  } else {
-    const check = await checkGitHubConnection();
-    if (check.ok) p.log.success(`GitHub connected as ${check.username}`);
-    else p.log.warn(`GitHub connection issue: ${check.error}`);
-  }
-
-  // --- Build config with Contentful defaults ---
+  // --- Build config ---
   const defaultReviewCycle = [
     { type: "Q1 check-in", date: "" },
     { type: "Mid-year review", date: "" },
@@ -872,18 +829,15 @@ export async function runInit(options?: { dryRun?: boolean }): Promise<void> {
   const config: WorklogConfig = {
     version: 1,
     vault,
-    atlassian: {
-      url: useExisting ? existing!.atlassian.url : DEFAULT_ATLASSIAN_URL,
-      email: atlassianEmail,
-    },
-    githubOrgs: useExisting ? existing!.githubOrgs : [...DEFAULT_GITHUB_ORGS],
+    atlassian,
+    githubOrgs,
     ai,
     profile: {
       fullName,
       displayName: useExisting ? existing!.profile.displayName : fullName,
       jobTitle: useExisting ? existing!.profile.jobTitle : "",
       level: useExisting ? existing!.profile.level : "",
-      company: DEFAULT_PROFILE_COMPANY,
+      company: useExisting ? existing!.profile.company : "",
       location: useExisting ? existing!.profile.location : "",
       startDate: useExisting ? existing!.profile.startDate : "",
       domain: useExisting ? existing!.profile.domain : "",
@@ -895,9 +849,7 @@ export async function runInit(options?: { dryRun?: boolean }): Promise<void> {
       framework: useExisting ? existing!.career.framework : "ic",
       currentLevel: useExisting ? existing!.career.currentLevel : "",
       targetLevel: useExisting ? existing!.career.targetLevel : "",
-      companyValues: useExisting
-        ? existing!.career.companyValues
-        : [...DEFAULT_CAREER_COMPANY_VALUES],
+      companyValues: useExisting ? existing!.career.companyValues : [],
       reviewCycleDates: useExisting
         ? existing!.career.reviewCycleDates
         : defaultReviewCycle,

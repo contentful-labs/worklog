@@ -149,16 +149,35 @@ export function contractConfigPaths(config: WorklogConfig): WorklogConfig {
   return mapConfigPaths(config, contractHome);
 }
 
-export function validateAtlassianUrl(url: string): string | null {
+export type AtlassianUrlResult = { ok: true; url: string } | { ok: false; error: string };
+
+/**
+ * Reduce an Atlassian site URL to the origin every API path is built from. Plain HTTP is refused
+ * because the API token travels in a Basic auth header, and a path such as /wiki has to go or
+ * requests end up at /wiki/rest/api/3/... and never find the account.
+ */
+export function canonicalizeAtlassianUrl(value: string): AtlassianUrlResult {
+  let parsed: URL;
   try {
-    const parsed = new URL(url);
-    if (!parsed.hostname.endsWith(".atlassian.net")) {
-      return "URL should end with .atlassian.net (e.g. https://company.atlassian.net)";
-    }
-    return null;
+    parsed = new URL(value.trim());
   } catch {
-    return "Invalid URL";
+    return { ok: false, error: "Invalid URL" };
   }
+  if (parsed.protocol !== "https:") {
+    return { ok: false, error: "URL must use https (your API token is sent with every request)" };
+  }
+  if (parsed.username || parsed.password) {
+    return { ok: false, error: "Remove the username and password from the URL" };
+  }
+  if (!parsed.hostname.endsWith(".atlassian.net")) {
+    return { ok: false, error: "URL should end with .atlassian.net (e.g. https://company.atlassian.net)" };
+  }
+  return { ok: true, url: parsed.origin };
+}
+
+export function validateAtlassianUrl(url: string): string | null {
+  const result = canonicalizeAtlassianUrl(url);
+  return result.ok ? null : result.error;
 }
 
 export function validateEmail(email: string): string | null {

@@ -29,7 +29,6 @@ To test the full pipeline you'll need API tokens (Jira, GitHub) and an AI provid
 ├── commands/                  # CLI surface: prompts, spinners, process.exit
 │   ├── worklog.ts             # worklog [generate] -- weekly brag book pipeline
 │   ├── prep.ts                # worklog prep <type> -- prep doc generation
-│   ├── perf-data.ts           # worklog perf-data -- raw activity dump since a date
 │   ├── init.ts                # worklog init -- guided setup, seeds vault docs
 │   └── configure.ts           # worklog configure -- update a config section
 ├── lib/

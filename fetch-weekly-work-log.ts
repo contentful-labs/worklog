@@ -5,7 +5,6 @@ import { runInit } from "./commands/init";
 import { runConfigure } from "./commands/configure";
 import { makePrepCommand } from "./commands/prep";
 import { makeWorklogCommand } from "./commands/worklog";
-import { makePerfDataCommand } from "./commands/perf-data";
 
 const program = new Command("worklog")
   .description("A weekly 5-minute habit that turns your Jira/GitHub/Confluence activity into a brag book with career coaching.")
@@ -17,9 +16,6 @@ program.addCommand(worklogCmd, { isDefault: true });
 
 // worklog prep <type>
 program.addCommand(makePrepCommand());
-
-// worklog perf-data
-program.addCommand(makePerfDataCommand());
 
 // worklog init
 program
