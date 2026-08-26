@@ -256,7 +256,9 @@ The remaining fields of the object feed the vault files directly:
 - `memoryItemsToAdd` — this week's small contributions, one entry each. These are the items
   that did not clear the brag book bar.
 - `memoryGraduations` — memory items that an achievement above absorbed. `item` is matched
-  against [[memory]], so copy its wording as closely as you can rather than paraphrasing.
+  against [[memory]] by substring, so copy its wording as closely as you can rather than
+  paraphrasing, and never abbreviate it to a word or two: a short `item` matches half the
+  file and deletes it.
 - `impactLogEntry` — at most one entry for the week, or null. `scope` is Team, Department or
   Organization. `coreValue` is one of: {{company_values}}.
 - `workContextUpdates` — facts about the company or org learned this week, or an empty list.
@@ -267,6 +269,13 @@ The remaining fields of the object feed the vault files directly:
 
 Empty means empty. An empty list or a null is the correct answer when there is nothing to
 report; a placeholder row saying "(none)" or "N/A" is not.
+
+Every field outside `bragBookMarkdown` lands in a markdown table cell or a list bullet, so:
+
+- dates are `YYYY-MM-DD` and must be real dates;
+- text stays on one line, with no newlines;
+- do not use `|` in impact, work context or graduation text;
+- an entry that breaks these rules is dropped, and the work it described goes unrecorded.
 </output_format>
 
 <available_research_tools>

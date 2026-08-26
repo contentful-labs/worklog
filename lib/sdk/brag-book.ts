@@ -1,5 +1,17 @@
-import { MAX_NEW_FOCUS_ITEMS, type BragBookOutput } from "./brag-book-schema";
+import {
+  MAX_NEW_FOCUS_ITEMS,
+  bragBookMarkdownProblem,
+  validFocusStatusSchema,
+  validImpactLogEntrySchema,
+  validMemoryGraduationSchema,
+  validMemoryItemSchema,
+  validNewFocusItemSchema,
+  validProfileUpdateSchema,
+  validWorkContextUpdateSchema,
+  type BragBookOutput,
+} from "./brag-book-schema";
 import { renderRow } from "./markdown-table";
+import type { z } from "zod";
 
 export interface BragBookResult {
   bragBookContent: string;
@@ -20,38 +32,68 @@ export interface ReviewInfo {
   urgency: "normal" | "attention" | "urgent";
 }
 
+/** Keep only the elements that satisfy `schema`, dropping the rest. */
+function keepValid<T>(rows: unknown[], schema: z.ZodType<T>): T[] {
+  const kept: T[] = [];
+  for (const row of rows) {
+    const result = schema.safeParse(row);
+    if (result.success) kept.push(result.data);
+  }
+  return kept;
+}
+
+/**
+ * Reject a brag book document that must not be written over the vault's copy.
+ *
+ * Everything else in this file drops the offending element and lets the week through,
+ * because losing one memory row beats losing a 225k-token generation. The document is the
+ * exception: it is the week's only record, `worklog --force` regenerates over an existing
+ * file, and a blank string would silently replace a real entry with nothing.
+ *
+ * The check stays shallow on purpose. Live runs on both providers produced `## Achievements`
+ * every time but the mandated `# Brag Book` H1 only sometimes, and the codebase already
+ * assumes models drop mandated boilerplate: that is what ensureBragBookFrontmatter exists
+ * for. Requiring the exact H1 would turn a cosmetic slip into a failed week.
+ */
+export function validateBragBookMarkdown(markdown: string): void {
+  const problem = bragBookMarkdownProblem(markdown);
+  if (problem !== null) {
+    throw new Error(
+      `Refusing to write the brag book: ${problem}. Nothing was written to the vault. ` +
+      `Re-run the week; if it repeats, the prompt's output_format section and the model are out of step.`,
+    );
+  }
+}
+
 /**
  * Turn the model's schema-constrained output into the shape the vault writers consume.
  *
  * The writers still speak in rendered markdown rows, so memory items are rendered here
- * with the same helper the writers use.
+ * with the same helper the writers use. Elements that fail their rules are dropped, so a
+ * single malformed row costs one row rather than the week. The one hard failure is the
+ * document itself, which throws before the caller writes anything.
  */
 export function toBragBookResult(output: BragBookOutput): BragBookResult {
-  const impact = output.impactLogEntry;
-  const profile = output.profileUpdate;
+  validateBragBookMarkdown(output.bragBookMarkdown);
+
+  const impact = validImpactLogEntrySchema.safeParse(output.impactLogEntry);
+  const profile = validProfileUpdateSchema.safeParse(output.profileUpdate);
 
   return {
     bragBookContent: output.bragBookMarkdown.trim(),
-    itemsToAdd: output.memoryItemsToAdd
-      .filter((row) => row.item.trim() !== "")
+    itemsToAdd: keepValid(output.memoryItemsToAdd, validMemoryItemSchema)
       .map((row) => renderRow([row.date, row.item, row.category, row.notes])),
     // updateMemory splits this string on "(now part of" to recover the text it matches
     // against memory.md, so the separator has to stay exactly as written.
-    itemsToRemove: output.memoryGraduations
-      .filter((row) => row.item.trim() !== "")
-      .map((row) => `${row.item.trim()} (now part of: ${row.nowPartOf.trim()})`),
-    impactLogEntry: impact !== null && impact.achievement.trim() !== "" ? impact : null,
-    workContextUpdates: output.workContextUpdates.filter((row) => row.info.trim() !== ""),
-    profileUpdate: profile !== null && profile.achievement.trim() !== "" ? profile : null,
-    focusItems: output.newFocusItems
-      .map((item) => item.trim())
-      .filter((item) => item !== "")
-      .slice(0, MAX_NEW_FOCUS_ITEMS),
+    itemsToRemove: keepValid(output.memoryGraduations, validMemoryGraduationSchema)
+      .map((row) => `${row.item} (now part of: ${row.nowPartOf})`),
+    impactLogEntry: impact.success ? impact.data : null,
+    workContextUpdates: keepValid(output.workContextUpdates, validWorkContextUpdateSchema),
+    profileUpdate: profile.success ? profile.data : null,
+    focusItems: keepValid(output.newFocusItems, validNewFocusItemSchema).slice(0, MAX_NEW_FOCUS_ITEMS),
     // An id the model invented is inert: applyFocusUpdates looks ids up in a map and
     // ignores misses, which leaves the real item to age toward lapsing.
-    focusUpdates: output.focusStatuses
-      .filter((row) => row.id.trim() !== "")
-      .map((row) => ({ id: row.id.trim(), status: row.status, notes: row.notes.trim() })),
+    focusUpdates: keepValid(output.focusStatuses, validFocusStatusSchema),
   };
 }
 

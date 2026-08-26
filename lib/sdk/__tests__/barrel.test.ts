@@ -53,8 +53,11 @@ describe("SDK barrel exports", () => {
   it("exports brag book result handling", () => {
     expect(sdk.toBragBookResult).toBeTypeOf("function");
     expect(sdk.parseReviewCycle).toBeTypeOf("function");
+    expect(sdk.validateBragBookMarkdown).toBeTypeOf("function");
+    expect(sdk.isFocusItemId).toBeTypeOf("function");
     expect(sdk.bragBookOutputSchema).toBeDefined();
     expect(sdk.FOCUS_STATUSES).toBeDefined();
+    expect(sdk.IMPACT_SCOPES).toBeDefined();
   });
 
   it("exports prep doc utilities", () => {
