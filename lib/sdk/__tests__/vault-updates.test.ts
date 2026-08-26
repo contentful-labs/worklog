@@ -6,7 +6,7 @@ import {
   updateMemory, updateImpactLog, updateWorkContext, updateProfile,
   updateFocusTracking, migrateFocusTrackingFile, migrateVaultRecordsFile, isPlaceholder,
 } from "../vault-updates";
-import { appendToFirstTable } from "../markdown-table";
+import { appendToFirstTable, splitRow } from "../markdown-table";
 
 let tmpDir: string;
 
@@ -760,7 +760,8 @@ describe("record dedupe threshold", () => {
 
     const content = await readFile(path, "utf-8");
     expect(content.match(/Release readiness reviews/g)).toHaveLength(1);
-    expect(content).not.toContain("TEAM-1300");
+    // The note is not repeated, but the source it arrived with is folded into the one row.
+    expect(content).toContain("_(TEAM-1200, TEAM-1300)_");
   });
 
   it("finds the row a graduation names even when the wording drifts below the prose threshold", async () => {
@@ -772,5 +773,200 @@ describe("record dedupe threshold", () => {
     await updateMemory(path, [], ["Fallback path work for the Search Revamp indexer (now part of: shipped indexer resilience)"]);
 
     expect(await readFile(path, "utf-8")).not.toContain("fallback path");
+  });
+});
+
+// --- Review findings: sections, merging, CRLF, sentinels, clock ---
+
+const ARCHIVED_IMPACT_LOG = `# Impact Log
+
+## Impact Timeline
+
+| Date | Achievement | Scope | Core Value | Evidence |
+|------|-------------|-------|------------|----------|
+
+**Last significant impact:** 2026-02-01
+**Current gap:** 4 weeks
+
+## Previous Team (2025) — ARCHIVED
+
+| Date | Achievement | Scope | Core Value | Evidence |
+|------|-------------|-------|------------|----------|
+| 2025-05-01 | Old achievement | team | craft | TEAM-0001 |
+
+**Last significant impact:** 2025-05-01
+**Current gap:** closed with the team
+`;
+
+const IMPACT_ENTRY = {
+  date: "2026-03-05",
+  achievement: "Led the Search Revamp rollout across three teams",
+  scope: "org",
+  coreValue: "craft",
+  evidence: "TEAM-1234",
+};
+
+describe("live section bounds", () => {
+  it("writes the row and both status lines into the live section only", async () => {
+    const path = join(tmpDir, "impact-log.md");
+    await writeFile(path, ARCHIVED_IMPACT_LOG);
+
+    expect(await updateImpactLog(path, IMPACT_ENTRY)).toBe(true);
+
+    const content = await readFile(path, "utf-8");
+    expect(content.indexOf("Search Revamp rollout")).toBeLessThan(content.indexOf("ARCHIVED"));
+    expect(content).toContain("**Last significant impact:** 2026-03-05");
+    expect(content).toContain("**Last significant impact:** 2025-05-01");
+    expect(content).toContain("**Current gap:** closed with the team");
+    expect(content).toContain("| 2025-05-01 | Old achievement | team | craft | TEAM-0001 |");
+  });
+
+  it("refuses to write when the Impact Timeline section is missing", async () => {
+    const path = join(tmpDir, "impact-log.md");
+    const withoutTimeline = `# Impact Log
+
+## Something Else
+
+| Date | Note |
+|------|------|
+| 2026-01-01 | Not the timeline |
+`;
+    await writeFile(path, withoutTimeline);
+
+    expect(await updateImpactLog(path, IMPACT_ENTRY)).toBe(false);
+    expect(await readFile(path, "utf-8")).toBe(withoutTimeline);
+  });
+
+  it("leaves archived organizational notes alone", async () => {
+    const path = join(tmpDir, "work-context.md");
+    await writeFile(path, `# Work Context
+
+## Organizational Notes
+
+- **process:** Release trains ship on Tuesdays _(TEAM-1200)_
+
+## Previous Team (2025) — HISTORICAL
+
+- **process:** Release trains ship on Tuesdays _(TEAM-0001)_
+
+*Last updated: 2025-05-01*
+`);
+
+    await updateWorkContext(path, [
+      { category: "team", info: "Support rota rotates fortnightly", source: "TEAM-1400" },
+    ], new Date("2026-03-08T00:00:00Z"));
+
+    const content = await readFile(path, "utf-8");
+    expect(content).toContain("- **process:** Release trains ship on Tuesdays _(TEAM-0001)_");
+    // The only date line sits under the archived heading, so it is not the live stamp.
+    expect(content).toContain("*Last updated: 2025-05-01*");
+    expect(content.indexOf("Support rota")).toBeLessThan(content.indexOf("HISTORICAL"));
+  });
+});
+
+describe("merging new evidence into a record already there", () => {
+  it("folds added evidence into the existing impact row", async () => {
+    const path = join(tmpDir, "impact-log.md");
+    await writeFile(path, CLEAN_IMPACT_LOG);
+
+    await updateImpactLog(path, IMPACT_ENTRY);
+    await updateImpactLog(path, { ...IMPACT_ENTRY, evidence: "TEAM-1234, TEAM-1235" });
+
+    const content = await readFile(path, "utf-8");
+    expect(content.match(/Search Revamp rollout/g)).toHaveLength(1);
+    expect(content).toContain("| TEAM-1234, TEAM-1235 |");
+  });
+
+  it("folds added notes into the existing memory row", async () => {
+    const path = join(tmpDir, "memory.md");
+    await writeFile(path, CLEAN_MEMORY);
+
+    await updateMemory(path, [
+      "| 2026-03-08 | Wrote the fallback path for the Search Revamp indexer | project | TEAM-1234, follow-up in TEAM-1240 |",
+    ], []);
+
+    const content = await readFile(path, "utf-8");
+    expect(content.match(/fallback path/g)).toHaveLength(1);
+    expect(content).toContain("TEAM-1234, follow-up in TEAM-1240");
+  });
+
+  it("escapes a pipe in the evidence instead of adding a column", async () => {
+    const path = join(tmpDir, "impact-log.md");
+    await writeFile(path, CLEAN_IMPACT_LOG);
+
+    await updateImpactLog(path, { ...IMPACT_ENTRY, evidence: "TEAM-1234 | TEAM-1235" });
+
+    const content = await readFile(path, "utf-8");
+    const row = content.split("\n").find((line) => line.includes("Search Revamp rollout")) ?? "";
+    expect(splitRow(row)).toHaveLength(5);
+    expect(splitRow(row)[4]).toBe("TEAM-1234 | TEAM-1235");
+  });
+});
+
+describe("CRLF files", () => {
+  it("keeps the file's line endings and still finds the table", async () => {
+    const path = join(tmpDir, "memory.md");
+    await writeFile(path, CLEAN_MEMORY.split("\n").join("\r\n"));
+
+    await updateMemory(path, ["| 2026-03-08 | Documented the on-call escalation path | support |  |"], []);
+
+    const content = await readFile(path, "utf-8");
+    expect(content).toContain("| 2026-03-08 | Documented the on-call escalation path | support |  |\r\n");
+    expect(content.split("\n").every((line) => line === "" || line.endsWith("\r"))).toBe(true);
+    // Landed in the table, not appended past the end of the file.
+    expect(content.indexOf("escalation path")).toBeLessThan(content.length - 10);
+  });
+});
+
+describe("sentinel-only placeholders", () => {
+  it("keeps a parenthesised value that is not a known sentinel", async () => {
+    const path = join(tmpDir, "my-profile.md");
+    await writeFile(path, CLEAN_PROFILE);
+
+    await updateProfile(path, { achievement: "Stepped up", bulletPoint: "(Acting tech lead)" });
+
+    expect(await readFile(path, "utf-8")).toContain("- (Acting tech lead)");
+    expect(isPlaceholder("(Acting tech lead)")).toBe(false);
+    expect(isPlaceholder("(None configured)")).toBe(true);
+  });
+});
+
+describe("negated notes", () => {
+  it("keeps a correction that reverses a note already there", async () => {
+    const path = join(tmpDir, "work-context.md");
+    await writeFile(path, `# Work Context
+
+## Organizational Notes
+
+- **process:** Release trains ship on Tuesdays _(TEAM-1200)_
+
+---
+
+*Last updated: 2026-02-01*
+`);
+
+    await updateWorkContext(path, [
+      { category: "process", info: "Release trains do not ship on Tuesdays any more", source: "TEAM-1300" },
+    ], new Date("2026-03-08T00:00:00Z"));
+
+    const content = await readFile(path, "utf-8");
+    expect(content).toContain("- **process:** Release trains ship on Tuesdays _(TEAM-1200)_");
+    expect(content).toContain("do not ship on Tuesdays any more");
+  });
+});
+
+describe("work-context stamp", () => {
+  it("moves the date only when a note was actually added", async () => {
+    const path = join(tmpDir, "work-context.md");
+    await writeFile(path, CLEAN_WORK_CONTEXT);
+    const updates = [{ category: "team", info: "Support rota rotates fortnightly", source: "TEAM-1400" }];
+
+    await updateWorkContext(path, updates, new Date("2026-03-08T00:00:00Z"));
+    const first = await readFile(path, "utf-8");
+    expect(first).toContain("*Last updated: 2026-03-08*");
+
+    // A week later, same result applied again: nothing new to say, nothing to restamp.
+    await updateWorkContext(path, updates, new Date("2026-03-15T00:00:00Z"));
+    expect(await readFile(path, "utf-8")).toBe(first);
   });
 });

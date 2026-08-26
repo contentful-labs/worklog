@@ -13,17 +13,26 @@
 export function isTableSeparator(line: string): boolean {
   if (!line.startsWith("|")) return false;
   let hasDash = false;
-  for (const char of line) {
+  for (const char of stripCarriageReturn(line)) {
     if (char === "-") hasDash = true;
     else if (char !== "|" && char !== ":" && char !== " " && char !== "\t") return false;
   }
   return hasDash;
 }
 
+/**
+ * A file written on Windows carries a `\r` at the end of every line. It is not part of
+ * the cell content and it is not part of the separator syntax.
+ */
+function stripCarriageReturn(line: string): string {
+  return line.endsWith("\r") ? line.slice(0, -1) : line;
+}
+
 /** Split a table row into trimmed cells, honouring `\\` and `\|` escapes. */
 export function splitRow(rawLine: string): string[] {
   // GFM allows a row without the outer pipes; only drop the empty strings that a real
   // leading or trailing pipe produces, or the last cell of an unterminated row is lost.
+  // The trim also takes the carriage return off a CRLF line.
   const line = rawLine.trim();
   const cells: string[] = [];
   let current = "";
