@@ -80,7 +80,9 @@ export {
 } from "./markdown-table";
 
 // Text similarity
-export { SIMILARITY_THRESHOLD, LOOKUP_MARGIN, canonicalText, normalizeText, textSimilarity } from "./text-similarity";
+export {
+  SIMILARITY_THRESHOLD, LOOKUP_MARGIN, canonicalText, exactText, normalizeText, textSimilarity,
+} from "./text-similarity";
 
 // Prep doc generation
 export type { PrepType, PrepContext, PrepOptions } from "./prep";
@@ -96,7 +98,7 @@ export type {
 } from "./vault-updates";
 export {
   updateMemory, updateImpactLog, updateWorkContext, updateProfile,
-  updateFocusTracking, migrateFocusTrackingFile, migrateVaultRecordsFile, isPlaceholder,
+  updateFocusTracking, migrateFocusTrackingFile, migrateVaultRecordsFile, isPlaceholder, isIsoDate,
 } from "./vault-updates";
 
 // Data fetching

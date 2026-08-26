@@ -31,7 +31,7 @@ function stripLinkTargets(text: string): string {
 }
 
 /**
- * Case-folded text with runs of whitespace collapsed and nothing else touched.
+ * Text with runs of whitespace collapsed and nothing else touched.
  *
  * The lossless counterpart to `normalizeText`, for deciding that two stored records
  * are literally the same. `normalizeText` drops every symbol and non-ASCII letter, so
@@ -39,8 +39,19 @@ function stripLinkTargets(text: string): string {
  * two notes written in a non-Latin script both collapse to "". Deleting on that basis
  * loses records that were never duplicates.
  */
+export function exactText(text: string): string {
+  return text.trim().split(/\s+/).join(" ");
+}
+
+/**
+ * The same, with case folded as well.
+ *
+ * For deciding two records are the same when the cost of being wrong is a skipped
+ * insert. Never for deciding one can be deleted: `Set \`API_KEY\`` and
+ * `Set \`api_key\`` are not the same instruction.
+ */
 export function canonicalText(text: string): string {
-  return text.trim().toLowerCase().split(/\s+/).join(" ");
+  return exactText(text).toLowerCase();
 }
 
 /**

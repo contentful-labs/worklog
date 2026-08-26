@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
   updateMemory, updateImpactLog, updateWorkContext, updateProfile,
-  updateFocusTracking, migrateFocusTrackingFile, migrateVaultRecordsFile, isPlaceholder,
+  updateFocusTracking, migrateFocusTrackingFile, migrateVaultRecordsFile, isPlaceholder, isIsoDate,
 } from "../vault-updates";
 import { appendToFirstTable, splitRow } from "../markdown-table";
 import { generateProfileDoc, generateWorkContextDoc } from "../doc-generators";
@@ -1144,12 +1144,53 @@ ${bullets.join("\n")}
     expect(content).toContain("オンコール体制を整備");
   });
 
-  it("still collapses a repeat that differs only in case and spacing", async () => {
+  it("still collapses a repeat that differs only in spacing", async () => {
     const path = join(tmpDir, "my-profile.md");
-    await writeFile(path, strengthsFile(["- Builds C++ toolchains", "-  builds c++   TOOLCHAINS"]));
+    await writeFile(path, strengthsFile(["- Builds C++ toolchains", "-  Builds  C++   toolchains"]));
 
     const result = await migrateVaultRecordsFile(path, "my-profile");
     expect(result?.duplicates).toBe(1);
+  });
+
+  it("keeps two strengths that differ only in case", async () => {
+    const path = join(tmpDir, "my-profile.md");
+    const file = strengthsFile(["- Builds C++ toolchains", "- builds c++ toolchains"]);
+    await writeFile(path, file);
+
+    // Deleting one of these would take a claim the user made about the other.
+    expect(await migrateVaultRecordsFile(path, "my-profile")).toBeNull();
+    expect(await readFile(path, "utf-8")).toBe(file);
+  });
+
+  it("keeps two memory rows whose items differ only in case", async () => {
+    const path = join(tmpDir, "memory.md");
+    const file = `# Memory
+
+| Date | Item | Category | Notes |
+|------|------|----------|-------|
+| 2026-03-01 | Set API_KEY in the deploy job | project | TEAM-100 |
+| 2026-03-01 | Set api_key in the deploy job | project | TEAM-200 |
+`;
+    await writeFile(path, file);
+
+    expect(await migrateVaultRecordsFile(path, "memory")).toBeNull();
+    expect(await readFile(path, "utf-8")).toBe(file);
+  });
+
+  it("still folds a case-only repeat on the way in", async () => {
+    const path = join(tmpDir, "memory.md");
+    await writeFile(path, `# Memory
+
+| Date | Item | Category | Notes |
+|------|------|----------|-------|
+| 2026-03-01 | Set API_KEY in the deploy job | project | TEAM-100 |
+`);
+
+    // The model rewriting its own capitalisation is not a new record.
+    const result = await updateMemory(path, ["| 2026-03-01 | Set api_key in the deploy job | project | TEAM-200 |"], []);
+
+    expect(result).toMatchObject({ status: "written", added: 0, merged: 1 });
+    expect((await readFile(path, "utf-8")).match(/deploy job/g)).toHaveLength(1);
   });
 });
 
@@ -3611,5 +3652,120 @@ describe("what the run summary counts as an impact update", () => {
     const aged = await updateImpactLog(path, null, new Date("2026-08-26T00:00:00Z"));
     expect(aged).toMatchObject({ status: "written", added: 0, merged: 0 });
     expect(impactCounted(aged)).toBe(false);
+  });
+});
+
+describe("dates that are not days", () => {
+  it("rejects a month that does not exist", () => {
+    for (const value of ["2026-13-01", "2026-02-29", "2026-02-30", "2026-00-10", "2026-04-31", "not-a-date"]) {
+      expect(isIsoDate(value), value).toBe(false);
+    }
+    // 2026 is not a leap year; 2028 is.
+    for (const value of ["2026-03-05", "2028-02-29", "2026-12-31"]) {
+      expect(isIsoDate(value), value).toBe(true);
+    }
+  });
+
+  it("does not write an entry dated impossibly", async () => {
+    const path = join(tmpDir, "impact-log.md");
+    await writeFile(path, CLEAN_IMPACT_LOG);
+
+    const result = await updateImpactLog(path, { ...IMPACT_ENTRY, date: "2026-13-01" }, new Date(2026, 2, 6));
+
+    expect(result).toMatchObject({ added: 0, merged: 0 });
+    const content = await readFile(path, "utf-8");
+    expect(content).not.toContain("2026-13-01");
+    expect(content).not.toContain("Led the Search Revamp rollout");
+  });
+
+  it("leaves an impossible stored date out of the status lines", async () => {
+    const path = join(tmpDir, "impact-log.md");
+    await writeFile(path, `# Impact Log
+
+## Impact Timeline
+
+| Date | Achievement | Scope | Core Value | Evidence |
+|------|-------------|-------|------------|----------|
+| 2026-08-03 | Led the Search Revamp rollout | org | craft | TEAM-1234 |
+| 2026-13-01 | A row the model mis-dated | org | craft | TEAM-1235 |
+
+**Last significant impact:** 2026-13-01
+**Current gap:** None - recent entry added
+`);
+
+    await updateImpactLog(path, null, new Date(2026, 7, 26));
+
+    const content = await readFile(path, "utf-8");
+    // The row stays, since nothing here deletes what the user can still fix.
+    expect(content).toContain("| 2026-13-01 | A row the model mis-dated |");
+    expect(content).toContain("**Last significant impact:** 2026-08-03");
+    expect(content).toContain("**Current gap:** 3 weeks");
+  });
+});
+
+describe("the gap counts calendar days", () => {
+  it("reads a week as a week just after local midnight", async () => {
+    const path = join(tmpDir, "impact-log.md");
+    await writeFile(path, `# Impact Log
+
+## Impact Timeline
+
+| Date | Achievement | Scope | Core Value | Evidence |
+|------|-------------|-------|------------|----------|
+| 2026-08-10 | Led the Search Revamp rollout | org | craft | TEAM-1234 |
+
+**Last significant impact:** 2026-08-10
+**Current gap:** None - recent entry added
+`);
+
+    // 00:30 on the seventh day, in whatever zone this machine runs in.
+    await updateImpactLog(path, null, new Date(2026, 7, 17, 0, 30));
+
+    expect(await readFile(path, "utf-8")).toContain("**Current gap:** 1 week");
+  });
+
+  it("still reads the same day as no gap at all", async () => {
+    const path = join(tmpDir, "impact-log.md");
+    await writeFile(path, CLEAN_IMPACT_LOG);
+
+    await updateImpactLog(path, { ...IMPACT_ENTRY, date: "2026-08-10" }, new Date(2026, 7, 10, 23, 45));
+
+    expect(await readFile(path, "utf-8")).toContain("**Current gap:** None - recent entry added");
+  });
+});
+
+describe("what the run summary counts for the other two writers", () => {
+  const memoryCounted = (r: { added: number; removed: number; merged: number }) => r.added + r.removed + r.merged;
+  const notesCounted = (r: { added: number; merged: number }) => r.added + r.merged;
+
+  it("counts a memory merge and a graduation, not only new rows", async () => {
+    const path = join(tmpDir, "memory.md");
+    await writeFile(path, CLEAN_MEMORY);
+
+    const merged = await updateMemory(path, [
+      "| 2026-03-01 | Wrote the fallback path for the Search Revamp indexer | project | follow-up in TEAM-1240 |",
+      "| 2026-03-08 | Cut the search index rebuild time | project |  |",
+    ], []);
+    expect(merged).toMatchObject({ added: 1, merged: 1, removed: 0 });
+    expect(memoryCounted(merged)).toBe(2);
+
+    const graduated = await updateMemory(path, [], [
+      "Wrote the fallback path for the Search Revamp indexer (now part of: shipped indexer resilience)",
+    ]);
+    expect(graduated).toMatchObject({ added: 0, removed: 1 });
+    expect(memoryCounted(graduated)).toBe(1);
+  });
+
+  it("counts a note whose source was folded in", async () => {
+    const path = join(tmpDir, "work-context.md");
+    await writeFile(path, CLEAN_WORK_CONTEXT);
+
+    const result = await updateWorkContext(path, [
+      { category: "process", info: "Release trains ship on Tuesdays", source: "TEAM-1300" },
+      { category: "team", info: "Support rota rotates fortnightly", source: "TEAM-1400" },
+    ], new Date(2026, 2, 8));
+
+    expect(result).toMatchObject({ added: 1, merged: 1 });
+    expect(notesCounted(result)).toBe(2);
   });
 });

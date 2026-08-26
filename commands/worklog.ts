@@ -61,6 +61,7 @@ import {
   updateFocusTracking,
   migrateFocusTrackingFile,
   migrateVaultRecordsFile,
+  isIsoDate,
 } from "../lib/sdk/vault-updates";
 import { createLogger } from "../lib/sdk/logger";
 
@@ -652,6 +653,7 @@ export async function runWorklog(opts: {
     }
     const impactResult = await updateImpactLog(paths.impactLog, impactLogEntry);
     if (impactResult.status === "no-section") p.log.warn("impact-log.md has no `## Impact Timeline` section; entry not written");
+    if (impactLogEntry && !isIsoDate(impactLogEntry.date)) p.log.warn(`impact entry is dated "${impactLogEntry.date}", which is not a date; entry not written`);
     const workContextResult = await updateWorkContext(paths.workContext, workContextUpdates);
     if (workContextResult.status === "no-section") p.log.warn("work-context.md has no `## Organizational Notes` section; notes not written");
     const profileResult = await updateProfile(paths.profile, profileUpdate);
@@ -678,7 +680,7 @@ export async function runWorklog(opts: {
     p.log.success(`${wid} done in ${formatDuration(weekTotal)}`);
 
     timings.push({ weekId: wid, fetch: fetchMs, bragBook: bragMs, contextUpdates: ctxMs, total: weekTotal });
-    results.push({ weekId: wid, jira: issues.length, confluence: pages.length, prs: prs.length, reviews: reviews.length, memoryAdded: memoryResult.added, memoryRemoved: memoryResult.removed, impactLog: impactResult.added + impactResult.merged > 0, workContextUpdates: workContextResult.added, profileUpdated: profileResult.status === "written", focusItems: focusItems.length, focusUpdates: focusUpdates.length });
+    results.push({ weekId: wid, jira: issues.length, confluence: pages.length, prs: prs.length, reviews: reviews.length, memoryAdded: memoryResult.added + memoryResult.merged, memoryRemoved: memoryResult.removed, impactLog: impactResult.added + impactResult.merged > 0, workContextUpdates: workContextResult.added + workContextResult.merged, profileUpdated: profileResult.status === "written", focusItems: focusItems.length, focusUpdates: focusUpdates.length });
 
     progress.completedWeeks.push(wid);
     await saveProgress(progress);

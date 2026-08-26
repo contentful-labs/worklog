@@ -36,7 +36,9 @@ import {
   type TableBounds,
 } from "./markdown-table";
 import { weekIdForDate } from "./week-utils";
-import { LOOKUP_MARGIN, SIMILARITY_THRESHOLD, canonicalText, normalizeText, textSimilarity } from "./text-similarity";
+import {
+  LOOKUP_MARGIN, SIMILARITY_THRESHOLD, canonicalText, exactText, normalizeText, textSimilarity,
+} from "./text-similarity";
 import {
   FOCUS_TRACKING_TEMPLATE,
   applyFocusUpdates,
@@ -206,9 +208,22 @@ const NO_EXCLUSIONS: ReadonlySet<number> = new Set<number>();
  * space between them, `| Foo | Bar Baz |` and `| Foo Bar | Baz |` read as one record
  * and the second was merged into the first.
  */
-function identityOf(cells: readonly string[]): string {
-  const canonical = cells.map(canonicalText);
-  return canonical.every((cell) => cell.length === 0) ? NO_IDENTITY : JSON.stringify(canonical);
+type Canonicalizer = (text: string) => string;
+
+/**
+ * How the two sides read a record's cells.
+ *
+ * An insert folds case: the model re-emits its own text with whatever capitalisation
+ * it feels like that week, and writing the note twice over a capital letter is the
+ * churn this phase exists to stop. A delete does not fold it. `Set API_KEY` and
+ * `Set api_key` are different instructions, and one is not proof of the other.
+ */
+const INSERT_IDENTITY: Canonicalizer = canonicalText;
+const DELETE_IDENTITY: Canonicalizer = exactText;
+
+function identityOf(cells: readonly string[], canonical: Canonicalizer = INSERT_IDENTITY): string {
+  const parts = cells.map(canonical);
+  return parts.every((cell) => cell.length === 0) ? NO_IDENTITY : JSON.stringify(parts);
 }
 
 /** A record with nothing in any of its cells identifies nothing, and matches nothing. */
@@ -407,8 +422,8 @@ function findTableByHeader(
 }
 
 /** A row's identity: every cell that is not the one designated mergeable. */
-function rowIdentity(row: string, columns: readonly number[]): string {
-  return identityOf(columns.map((column) => rowCell(row, column)));
+function rowIdentity(row: string, columns: readonly number[], canonical?: Canonicalizer): string {
+  return identityOf(columns.map((column) => rowCell(row, column)), canonical);
 }
 
 /**
@@ -422,13 +437,13 @@ function rowIdentity(row: string, columns: readonly number[]): string {
  * it, and the row that named the category would otherwise swallow the one that
  * renamed it.
  */
-function memoryIdentity(row: string): string {
-  return rowIdentity(row, MEMORY_IDENTITY_COLUMNS);
+function memoryIdentity(row: string, canonical?: Canonicalizer): string {
+  return rowIdentity(row, MEMORY_IDENTITY_COLUMNS, canonical);
 }
 
 /** What makes an impact row that row: everything it claims except the evidence for it. */
-function impactIdentity(row: string): string {
-  return rowIdentity(row, IMPACT_IDENTITY_COLUMNS);
+function impactIdentity(row: string, canonical?: Canonicalizer): string {
+  return rowIdentity(row, IMPACT_IDENTITY_COLUMNS, canonical);
 }
 
 /** Cell of a table row, or "" when the row is shorter than expected. */
@@ -824,13 +839,15 @@ function parseOrgNote(body: string): OrgNote {
  * from the one filed under "process", and identifying by the info alone let whichever
  * arrived first keep its label and swallow the other.
  */
-function generatedNoteIdentity(category: string, info: string): string {
-  return identityOf([category, info]);
+function generatedNoteIdentity(category: string, info: string, canonical?: Canonicalizer): string {
+  return identityOf([category, info], canonical);
 }
 
-function orgNoteIdentity(body: string): string {
+function orgNoteIdentity(body: string, canonical?: Canonicalizer): string {
   const note = parseOrgNote(body);
-  return note.generated ? generatedNoteIdentity(note.category, note.text) : identityOf([FREEFORM_NOTE, note.text]);
+  return note.generated
+    ? generatedNoteIdentity(note.category, note.text, canonical)
+    : identityOf([FREEFORM_NOTE, note.text], canonical);
 }
 
 /** What decides whether a note says anything at all. */
@@ -967,7 +984,7 @@ export async function updateMemory(
   const newRows: string[] = [];
   // Rows already in the file, then rows queued by this batch, so a repeat inside one
   // batch is folded into the row queued moments earlier rather than added twice.
-  const pending = kept.map(memoryIdentity);
+  const pending = kept.map((row) => memoryIdentity(row));
   let merged = 0;
   let skipped = 0;
 
@@ -1020,10 +1037,27 @@ export async function updateMemory(
  * "no-section" is the file not having the live heading to write under, which is worth
  * telling the user about: the update existed and had nowhere to go.
  */
-/** How long ago an impact was, in whole weeks, as the gap line says it. */
+/** Today where the user is, as a plain date. */
+function localIsoDate(now: Date): string {
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = String(now.getDate()).padStart(2, "0");
+  return `${now.getFullYear()}-${month}-${day}`;
+}
+
+/**
+ * How long ago an impact was, in whole weeks, as the gap line says it.
+ *
+ * Both sides are calendar days: subtracting UTC midnight from the current instant put
+ * the answer a day out for anyone east of Greenwich, so a run at 00:30 on the seventh
+ * day still called the gap closed.
+ */
 function gapText(latest: string, now: Date): string {
-  const weeks = Math.floor((now.getTime() - Date.parse(`${latest}T00:00:00Z`)) / (7 * 24 * 60 * 60 * 1000));
-  if (!Number.isFinite(weeks) || weeks < 1) return GAP_CLOSED;
+  const today = localIsoDate(now);
+  if (!isIsoDate(latest) || !isIsoDate(today)) return GAP_CLOSED;
+
+  const days = Math.round((Date.parse(`${today}T00:00:00Z`) - Date.parse(`${latest}T00:00:00Z`)) / 86_400_000);
+  const weeks = Math.floor(days / 7);
+  if (weeks < 1) return GAP_CLOSED;
   return `${weeks} week${weeks === 1 ? "" : "s"}`;
 }
 
@@ -1081,13 +1115,20 @@ function refreshImpactStatus(content: string, eol: string, now: Date): string {
   return lines.join(eol);
 }
 
-/** True for a `YYYY-MM-DD` cell, the only thing worth comparing as a date. */
-function isIsoDate(value: string): boolean {
+/**
+ * True for a `YYYY-MM-DD` cell that is a real day.
+ *
+ * The shape alone is not enough: the model can produce 2026-13-01, and a month that
+ * does not exist sorted above every real row and became the latest impact. Parsing and
+ * round-tripping is what separates a date from a string that looks like one.
+ */
+export function isIsoDate(value: string): boolean {
   if (value.length !== 10 || value[4] !== "-" || value[7] !== "-") return false;
   for (const i of [0, 1, 2, 3, 5, 6, 8, 9]) {
     if (value[i] < "0" || value[i] > "9") return false;
   }
-  return true;
+  const parsed = new Date(`${value}T00:00:00Z`);
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
 }
 
 /** The most recent date in a set of dated rows, or "" when none of them carry one. */
@@ -1107,7 +1148,8 @@ export async function updateImpactLog(
   entry: BragBookResult["impactLogEntry"],
   now: Date = new Date(),
 ): Promise<VaultWriteResult> {
-  const nothingToRecord = !entry || isPlaceholder(entry.achievement);
+  // A date that is not a day cannot be filed against one.
+  const nothingToRecord = !entry || isPlaceholder(entry.achievement) || !isIsoDate(entry.date);
 
   // Nothing to record and no file yet: creating one to say it holds nothing would be
   // writing a file the user never asked for. The first real entry creates it.
@@ -1137,7 +1179,7 @@ export async function updateImpactLog(
     const incoming = [entry.date, entry.achievement, entry.scope, entry.coreValue, entry.evidence];
     // The same claim on the same date is the same entry; a different scope or value is
     // a different claim, not more evidence for this one.
-    const keys = rows.map(impactIdentity);
+    const keys = rows.map((row) => impactIdentity(row));
     const idx = findIdentityIndex(keys, identityOf(IMPACT_IDENTITY_COLUMNS.map((column) => incoming[column])));
 
     if (idx === -1) {
@@ -1547,7 +1589,11 @@ function cleanVaultRecords(content: string, kind: VaultRecordKind, now: Date): C
         MEMORY_HEADER,
         // Identity is the date and the item together; only the item decides whether
         // the row says anything.
-        (row) => ({ line: row, identity: memoryIdentity(row), value: rowCell(row, MEMORY_ITEM_COLUMN) }),
+        (row) => ({
+          line: row,
+          identity: memoryIdentity(row, DELETE_IDENTITY),
+          value: rowCell(row, MEMORY_ITEM_COLUMN),
+        }),
         foldRowCells(MEMORY_NOTES_COLUMN, PROSE_NOTES),
       );
 
@@ -1565,7 +1611,7 @@ function cleanVaultRecords(content: string, kind: VaultRecordKind, now: Date): C
         sectionScope(scan, headingIdx, liveEnd),
         eol,
         IMPACT_HEADER,
-        (row) => ({ line: row, identity: impactIdentity(row), value: rowCell(row, 1) }),
+        (row) => ({ line: row, identity: impactIdentity(row, DELETE_IDENTITY), value: rowCell(row, 1) }),
         foldRowCells(IMPACT_EVIDENCE_COLUMN, REFERENCE_LIST),
       );
       // Always, not only when rows moved: the gap is measured from today, so it goes
@@ -1576,7 +1622,16 @@ function cleanVaultRecords(content: string, kind: VaultRecordKind, now: Date): C
     case "work-context": {
       const headingIdx = findExactHeading(scan, ORG_NOTES_HEADING, liveEnd);
       if (headingIdx === -1) return unchanged(lines, eol);
-      return cleanBullets(lines, scan, headingIdx, liveEnd, eol, orgNoteIdentity, orgNoteText, foldNoteSource);
+      return cleanBullets(
+        lines,
+        scan,
+        headingIdx,
+        liveEnd,
+        eol,
+        (body) => orgNoteIdentity(body, DELETE_IDENTITY),
+        orgNoteText,
+        foldNoteSource,
+      );
     }
 
     case "my-profile": {
@@ -1589,7 +1644,7 @@ function cleanVaultRecords(content: string, kind: VaultRecordKind, now: Date): C
         headingIdx,
         liveEnd,
         eol,
-        (text) => identityOf([text]),
+        (text) => identityOf([text], DELETE_IDENTITY),
         (text) => text,
         foldNothing,
       );
