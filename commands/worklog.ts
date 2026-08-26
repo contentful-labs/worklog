@@ -644,16 +644,17 @@ export async function runWorklog(opts: {
     s.start("Updating context...");
     log(`Context updates — memory: +${itemsToAdd.length}/-${itemsToRemove.length}, impact: ${impactLogEntry ? "yes" : "no"}, workContext: ${workContextUpdates.length}, profile: ${profileUpdate ? "yes" : "no"}, focus: ${focusItems.length}/${focusUpdates.length}`);
 
-    const memoryResult = itemsToAdd.length > 0 || itemsToRemove.length > 0
-      ? await updateMemory(paths.memory, itemsToAdd, itemsToRemove)
-      : "placeholder";
-    if (memoryResult === "no-section") p.log.warn("memory.md has no live table above its archived sections; items not written");
+    const memoryResult = await updateMemory(paths.memory, itemsToAdd, itemsToRemove);
+    if (memoryResult.status === "no-section") p.log.warn("memory.md has no live table above its archived sections; items not written");
     const impactResult = await updateImpactLog(paths.impactLog, impactLogEntry);
-    if (impactResult === "no-section") p.log.warn("impact-log.md has no `## Impact Timeline` section; entry not written");
+    if (impactResult.status === "no-section") p.log.warn("impact-log.md has no `## Impact Timeline` section; entry not written");
     const workContextResult = await updateWorkContext(paths.workContext, workContextUpdates);
-    if (workContextResult === "no-section") p.log.warn("work-context.md has no `## Organizational Notes` section; notes not written");
+    if (workContextResult.status === "no-section") p.log.warn("work-context.md has no `## Organizational Notes` section; notes not written");
     const profileResult = await updateProfile(paths.profile, profileUpdate);
-    if (profileResult === "no-section") p.log.warn("my-profile.md has no `## Key Strengths` section; strength not written");
+    if (profileResult.status === "no-section") p.log.warn("my-profile.md has no `## Key Strengths` section; strength not written");
+    const skipped = memoryResult.skipped + impactResult.skipped + workContextResult.skipped + profileResult.skipped;
+    const merged = memoryResult.merged + impactResult.merged + workContextResult.merged + profileResult.merged;
+    if (merged > 0 || skipped > 0) log(`Vault records: ${merged} merged into existing records, ${skipped} already present or empty`);
     if (focusItems.length > 0 || focusUpdates.length > 0 || openFocusItems.length > 0) {
       const focusResult = await updateFocusTracking(paths.focusTracking, {
         focusItems,
@@ -672,7 +673,7 @@ export async function runWorklog(opts: {
     p.log.success(`${wid} done in ${formatDuration(weekTotal)}`);
 
     timings.push({ weekId: wid, fetch: fetchMs, bragBook: bragMs, contextUpdates: ctxMs, total: weekTotal });
-    results.push({ weekId: wid, jira: issues.length, confluence: pages.length, prs: prs.length, reviews: reviews.length, memoryAdded: memoryResult === "written" ? itemsToAdd.length : 0, memoryRemoved: memoryResult === "written" ? itemsToRemove.length : 0, impactLog: impactResult === "written", workContextUpdates: workContextResult === "written" ? workContextUpdates.length : 0, profileUpdated: profileResult === "written", focusItems: focusItems.length, focusUpdates: focusUpdates.length });
+    results.push({ weekId: wid, jira: issues.length, confluence: pages.length, prs: prs.length, reviews: reviews.length, memoryAdded: memoryResult.added, memoryRemoved: memoryResult.removed, impactLog: impactResult.status === "written", workContextUpdates: workContextResult.added, profileUpdated: profileResult.status === "written", focusItems: focusItems.length, focusUpdates: focusUpdates.length });
 
     progress.completedWeeks.push(wid);
     await saveProgress(progress);
