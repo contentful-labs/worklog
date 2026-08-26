@@ -1,13 +1,19 @@
 import { describe, it, expect, beforeAll, afterAll, afterEach, beforeEach, vi } from "vitest";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { http, HttpResponse } from "msw";
 import { setupServer } from "msw/node";
 import * as p from "@clack/prompts";
 
-// The init prompts are clack text inputs; mock the module so the tests can answer them.
+// The init prompts are clack inputs; mock the module so the tests can answer them.
 vi.mock("@clack/prompts", () => ({
   text: vi.fn(),
+  select: vi.fn(),
   isCancel: () => false,
   cancel: vi.fn(),
+  intro: vi.fn(),
+  outro: vi.fn(),
   log: { info: vi.fn(), success: vi.fn(), warn: vi.fn(), error: vi.fn(), step: vi.fn(), message: vi.fn() },
 }));
 
@@ -109,5 +115,46 @@ describe("promptGitHub", () => {
     const orgs = await promptGitHub(["acme", "acme-labs"]);
 
     expect(orgs).toEqual(["acme", "acme-labs"]);
+  });
+});
+
+describe("runInit", () => {
+  it("writes the Atlassian instance and GitHub orgs the user entered", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "worklog-init-"));
+    const configHome = join(tmp, "config");
+    const vault = join(tmp, "vault");
+    const previousConfigHome = process.env.XDG_CONFIG_HOME;
+    process.env.XDG_CONFIG_HOME = configHome;
+    // init writes vault docs through Bun.write; vitest runs on node, so stand it in.
+    vi.stubGlobal("Bun", { write: async (path: string, content: string) => writeFileSync(path, content) });
+
+    try {
+      // CONFIG_DIR is read at module load, so re-import both modules under the temp config home.
+      vi.resetModules();
+      const clack = await import("@clack/prompts");
+      const textAnswers = new Map([
+        ["Vault path (where to save brag books and docs):", vault],
+        ["Full name:", "Test User"],
+        ["Atlassian instance URL:", "https://acme.atlassian.net"],
+        ["Your Atlassian email:", "user@example.com"],
+        ["Model override (leave blank for default):", ""],
+        ["GitHub orgs to track (comma-separated):", "acme, acme-labs"],
+      ]);
+      vi.mocked(clack.text).mockImplementation(async (opts) => textAnswers.get(opts.message) ?? "");
+      vi.mocked(clack.select).mockImplementation(async () => "anthropic");
+
+      const { runInit } = await import("../init");
+      await runInit();
+
+      const written = JSON.parse(readFileSync(join(configHome, "worklog", "config.json"), "utf8"));
+      expect(written.atlassian).toEqual({ url: "https://acme.atlassian.net", email: "user@example.com" });
+      expect(written.githubOrgs).toEqual(["acme", "acme-labs"]);
+      expect(written.vault).toBe(vault);
+    } finally {
+      if (previousConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
+      else process.env.XDG_CONFIG_HOME = previousConfigHome;
+      vi.unstubAllGlobals();
+      rmSync(tmp, { recursive: true, force: true });
+    }
   });
 });
