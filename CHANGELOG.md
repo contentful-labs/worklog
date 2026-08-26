@@ -1,5 +1,20 @@
 # Changelog
 
+## [2.0.2](https://github.com/contentful-labs/worklog/compare/v2.0.1...v2.0.2) (2026-08-26)
+
+
+### Bug Fixes
+
+* ask for the Atlassian instance and GitHub orgs during init ([974c061](https://github.com/contentful-labs/worklog/commit/974c0617265abfde9e82c2f36b9f1c3e3718f2e3))
+* canonicalize the Atlassian URL before saving it ([f4d62ca](https://github.com/contentful-labs/worklog/commit/f4d62ca1b419e001ba2cd23ff7d4e651da559033))
+* hygiene bundle (loud supplementary fetches, account-id comments, drop perf-data, neutral init defaults) ([4cccfb6](https://github.com/contentful-labs/worklog/commit/4cccfb6a4482dc85b4b766600632eef4a36695c3))
+* keep a review when its comment count cannot be fetched ([90dfd08](https://github.com/contentful-labs/worklog/commit/90dfd0874605ae68348d13e0eb091fe4dc6d0e29))
+* keep generateMarkdown's accountId optional ([86e27a2](https://github.com/contentful-labs/worklog/commit/86e27a2e30c0488ce8b88bc2eb65e3ab62e43dd5))
+* match your Jira comments on account id ([cc9c598](https://github.com/contentful-labs/worklog/commit/cc9c598c1d8df98cf475e702480ea39cf894bd8f))
+* report per-PR review fetch failures ([bc0b8b4](https://github.com/contentful-labs/worklog/commit/bc0b8b4f2c04e5b629d0676b39f8fab5959bb74e))
+* report supplementary fetch failures instead of swallowing them ([f896c0a](https://github.com/contentful-labs/worklog/commit/f896c0a6b77e98b8af193b889d8cc9467c35601a))
+* use neutral placeholders in init instead of one company's setup ([323e8f4](https://github.com/contentful-labs/worklog/commit/323e8f431e259c9ae4073f332a5449c996e8de32))
+
 ## [2.0.1](https://github.com/contentful-labs/worklog/compare/v2.0.0...v2.0.1) (2026-08-26)
 
 

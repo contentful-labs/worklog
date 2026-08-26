@@ -1,6 +1,6 @@
 {
   "name": "@contentful-labs/worklog",
-  "version": "2.0.1",
+  "version": "2.0.2",
   "description": "A weekly 5-minute habit that turns your Jira/GitHub/Confluence activity into a brag book with career coaching.",
   "license": "MIT",
   "bin": {
