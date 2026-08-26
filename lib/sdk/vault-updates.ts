@@ -335,24 +335,34 @@ function splitValues(text: string, style: MergeStyle): string[] {
  * is already there would throw that away. Comparison is by whole value: as substrings,
  * TEAM-123 disappeared into TEAM-1234, which is one ticket swallowing another.
  */
-function mergeValues(stored: string, incoming: string, style: MergeStyle): string[] {
+function mergeValues(
+  stored: string,
+  incoming: string,
+  style: MergeStyle,
+  canonical: Canonicalizer = INSERT_IDENTITY,
+): string[] {
   const next = incoming.trim();
   if (next.length === 0 || isPlaceholder(next)) return [];
 
-  const seen = new Set(splitValues(stored, style).map(canonicalText));
+  const seen = new Set(splitValues(stored, style).map(canonical));
   const additions: string[] = [];
   for (const value of splitValues(next, style)) {
-    const canonical = canonicalText(value);
-    if (seen.has(canonical)) continue;
-    seen.add(canonical);
+    const key = canonical(value);
+    if (seen.has(key)) continue;
+    seen.add(key);
     additions.push(value);
   }
   return additions;
 }
 
 /** Fold a newer value into the stored one. Stable: merging twice adds nothing twice. */
-function mergeCell(stored: string, incoming: string, style: MergeStyle): string {
-  const additions = mergeValues(stored, incoming, style);
+function mergeCell(
+  stored: string,
+  incoming: string,
+  style: MergeStyle,
+  canonical?: Canonicalizer,
+): string {
+  const additions = mergeValues(stored, incoming, style, canonical);
   if (additions.length === 0) return stored;
   const kept = stored.trim();
   const added = additions.join(style.joiner);
@@ -373,6 +383,7 @@ function mergeRowCells(
   incoming: readonly string[],
   column: number,
   style: MergeStyle,
+  canonical?: Canonicalizer,
 ): string | null {
   const scanned = scanRow(row);
   while (scanned.values.length <= column) {
@@ -381,13 +392,13 @@ function mergeRowCells(
   }
 
   const value = incoming[column] ?? "";
-  const additions = mergeValues(scanned.values[column], value, style);
+  const additions = mergeValues(scanned.values[column], value, style, canonical);
   if (additions.length === 0) return null;
 
   const escaped = escapeCell(additions.join(style.joiner));
   const source = scanned.raw[column].trimEnd();
   scanned.raw[column] = source.trim().length === 0 ? ` ${escaped} ` : `${source}${style.joiner}${escaped} `;
-  scanned.values[column] = mergeCell(scanned.values[column], value, style);
+  scanned.values[column] = mergeCell(scanned.values[column], value, style, canonical);
 
   return renderScannedRow(scanned);
 }
@@ -869,7 +880,7 @@ function orgNoteSource(bullet: string): string {
  * A note written without a suffix gains one rather than losing the source: the whole
  * point of merging into the note already there is that nothing arrives and vanishes.
  */
-function mergeNoteSource(bullet: string, source: string): string | null {
+function mergeNoteSource(bullet: string, source: string, canonical?: Canonicalizer): string | null {
   const value = source.trim();
   if (value.length === 0 || isPlaceholder(value)) return null;
 
@@ -878,7 +889,7 @@ function mergeNoteSource(bullet: string, source: string): string | null {
   if (start === -1) return `${trimmed} _(${value})_`;
 
   const stored = trimmed.slice(start + 2, trimmed.length - 2);
-  const merged = mergeCell(stored, value, REFERENCE_LIST);
+  const merged = mergeCell(stored, value, REFERENCE_LIST, canonical);
   return merged === stored ? null : `${trimmed.slice(0, start)}_(${merged})_`;
 }
 
@@ -966,11 +977,12 @@ export async function updateMemory(
     const target = (marker === -1 ? removal : removal.slice(0, marker)).trim();
 
     // The model names the item, not the day it happened, so every date of that item
-    // graduates together: they were all folded into the same achievement.
-    const canonical = canonicalText(target);
+    // graduates together: they were all folded into the same achievement. Case is not
+    // folded here: this deletes rows, and "Set API_KEY" is not "Set api_key".
+    const canonical = DELETE_IDENTITY(target);
     let found = false;
     for (const [i, item] of items.entries()) {
-      if (canonicalText(item) !== canonical) continue;
+      if (DELETE_IDENTITY(item) !== canonical) continue;
       graduated.add(i);
       found = true;
     }
@@ -1549,12 +1561,14 @@ function cleanBullets(
 
 /** Fold the given columns of a duplicate row into the row that survives it. */
 function foldRowCells(column: number, style: MergeStyle): FoldRecord {
-  return (survivor, duplicate) => mergeRowCells(survivor, splitRow(duplicate), column, style);
+  // The duplicate is about to be deleted, so its cell has to be read the way the
+  // cleanup reads a record: a note that differs only in case is another note.
+  return (survivor, duplicate) => mergeRowCells(survivor, splitRow(duplicate), column, style, DELETE_IDENTITY);
 }
 
 /** Fold a duplicate note's source into the note that survives it. */
 function foldNoteSource(survivor: string, duplicate: string): string | null {
-  return mergeNoteSource(survivor, orgNoteSource(duplicate));
+  return mergeNoteSource(survivor, orgNoteSource(duplicate), DELETE_IDENTITY);
 }
 
 /** Nothing to carry over: a strength is only its text. */

@@ -3769,3 +3769,98 @@ describe("what the run summary counts for the other two writers", () => {
     expect(notesCounted(result)).toBe(2);
   });
 });
+
+describe("case survives the paths that delete", () => {
+  const TWO_CASINGS = `# Memory
+
+| Date | Item | Category | Notes |
+|------|------|----------|-------|
+| 2026-03-01 | Set API_KEY in the deploy job | project | TEAM-100 |
+| 2026-03-01 | Set api_key in the deploy job | project | TEAM-200 |
+`;
+
+  it("graduates only the row the removal actually names", async () => {
+    const path = join(tmpDir, "memory.md");
+    await writeFile(path, TWO_CASINGS);
+
+    const result = await updateMemory(path, [], ["Set api_key in the deploy job (now part of: secrets cleanup)"]);
+
+    expect(result).toMatchObject({ removed: 1 });
+    const content = await readFile(path, "utf-8");
+    expect(content).toContain("| Set API_KEY in the deploy job | project | TEAM-100 |");
+    expect(content).not.toContain("api_key");
+  });
+
+  it("keeps both notes when a cleanup folds a duplicate row", async () => {
+    const path = join(tmpDir, "memory.md");
+    // Same record twice over, with notes that differ only in case.
+    await writeFile(path, `# Memory
+
+| Date | Item | Category | Notes |
+|------|------|----------|-------|
+| 2026-03-01 | Reviewed the incident runbook | support | Set API_KEY |
+| 2026-03-01 | Reviewed the incident runbook | support | Set api_key |
+`);
+
+    const result = await migrateVaultRecordsFile(path, "memory", new Date(2026, 2, 6));
+
+    expect(result).toMatchObject({ duplicates: 1 });
+    // The dropped row's note is not the surviving row's note, so it comes across.
+    expect(await readFile(path, "utf-8")).toContain("| Set API_KEY; Set api_key |");
+  });
+
+  it("keeps both sources when a cleanup folds a duplicate note", async () => {
+    const path = join(tmpDir, "work-context.md");
+    await writeFile(path, `# Work Context
+
+## Organizational Notes
+
+- **process:** Release trains ship on Tuesdays _(DOC-A)_
+- **process:** Release trains ship on Tuesdays _(doc-a)_
+
+---
+
+*Last updated: 2026-02-01*
+`);
+
+    const result = await migrateVaultRecordsFile(path, "work-context", new Date(2026, 2, 6));
+
+    expect(result).toMatchObject({ duplicates: 1 });
+    expect(await readFile(path, "utf-8")).toContain("_(DOC-A, doc-a)_");
+  });
+
+  it("keeps both evidence values when a cleanup folds a duplicate impact row", async () => {
+    const path = join(tmpDir, "impact-log.md");
+    await writeFile(path, `# Impact Log
+
+## Impact Timeline
+
+| Date | Achievement | Scope | Core Value | Evidence |
+|------|-------------|-------|------------|----------|
+| 2026-03-05 | Led the Search Revamp rollout | org | craft | DOC-A |
+| 2026-03-05 | Led the Search Revamp rollout | org | craft | doc-a |
+
+**Last significant impact:** 2026-03-05
+**Current gap:** None - recent entry added
+`);
+
+    const result = await migrateVaultRecordsFile(path, "impact-log", new Date(2026, 2, 6));
+
+    expect(result).toMatchObject({ duplicates: 1 });
+    expect(await readFile(path, "utf-8")).toContain("| DOC-A, doc-a |");
+  });
+
+  it("still folds a case-only repeat arriving from the model", async () => {
+    const path = join(tmpDir, "impact-log.md");
+    await writeFile(path, CLEAN_IMPACT_LOG);
+    const now = new Date(2026, 2, 6);
+
+    await updateImpactLog(path, { ...IMPACT_ENTRY, evidence: "DOC-A" }, now);
+    const again = await updateImpactLog(path, { ...IMPACT_ENTRY, evidence: "doc-a" }, now);
+
+    // An insert still folds case, so the model recapitalising its own evidence is not
+    // a second reference.
+    expect(again).toMatchObject({ status: "unchanged" });
+    expect(await readFile(path, "utf-8")).not.toContain("DOC-A, doc-a");
+  });
+});
