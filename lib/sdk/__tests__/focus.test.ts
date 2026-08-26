@@ -8,6 +8,13 @@ import {
   needsFocusMigration,
   focusSimilarity,
   normalizeFocusText,
+  lapseStaleOpenFocusItems,
+  isOpenFocusStatus,
+  focusFormatVersion,
+  needsFocusFormatUpgrade,
+  upgradeFocusFormat,
+  FOCUS_TRACKING_TEMPLATE,
+  FOCUS_FORMAT_VERSION,
   DEFAULT_INJECT_CAP,
 } from "../focus";
 
@@ -74,6 +81,13 @@ describe("selectOpenFocusItems", () => {
     expect(selectOpenFocusItems(FILE).map((i) => i.id)).toEqual(["2026-W09.1", "2026-W10.1"]);
   });
 
+  it("treats ongoing as open: the coach wants to check it again", () => {
+    const withOngoing = FILE.replace("| Review the RFC | pending | 1 |", "| Review the RFC | ongoing | 0 |");
+    expect(selectOpenFocusItems(withOngoing).map((i) => i.id)).toEqual(["2026-W09.1", "2026-W10.1"]);
+    expect(isOpenFocusStatus("ongoing")).toBe(true);
+    expect(isOpenFocusStatus("completed")).toBe(false);
+  });
+
   it("caps how many are injected so a backlog cannot blow up the prompt", () => {
     const rows = Array.from({ length: 30 }, (_, n) => `| 2026-W${String(n + 10)}.1 | 2026-W${String(n + 10)} | Item ${n} | pending | 0 |  |`);
     const big = `| ID | Week | Focus Item | Status | Reviews | Notes |\n|---|---|---|---|---|---|\n${rows.join("\n")}`;
@@ -125,6 +139,33 @@ describe("applyFocusUpdates", () => {
     });
     expect(twice.lapsed).toBe(1);
     expect(twice.content).toContain("| Write docs | lapsed | 2 |");
+  });
+
+  it("keeps an item reported as ongoing open and resets its review clock", () => {
+    const result = applyFocusUpdates(base, {
+      reviewedIds: ["2026-W09.1", "2026-W09.2"],
+      updates: [{ id: "2026-W09.2", status: "ongoing", notes: "PR up" }],
+      newItems: [],
+      weekLabel: "2026-W10",
+    });
+    expect(result.carried).toBe(1);
+    expect(result.resolved).toBe(0);
+    // answered, so not aged; clock back to 0 despite having been at 1
+    expect(result.content).toContain("| Review RFC | ongoing | 0 | PR up |");
+    // the unanswered one still ages
+    expect(result.content).toContain("| Write docs | pending | 1 |");
+    expect(selectOpenFocusItems(result.content).map((i) => i.id)).toEqual(["2026-W09.1", "2026-W09.2"]);
+  });
+
+  it("an ongoing item that is then ignored twice lapses like a pending one", () => {
+    let content = applyFocusUpdates(base, {
+      reviewedIds: ["2026-W09.2"], updates: [{ id: "2026-W09.2", status: "ongoing", notes: "" }],
+      newItems: [], weekLabel: "2026-W10",
+    }).content;
+    content = applyFocusUpdates(content, { reviewedIds: ["2026-W09.2"], updates: [], newItems: [], weekLabel: "2026-W11" }).content;
+    const last = applyFocusUpdates(content, { reviewedIds: ["2026-W09.2"], updates: [], newItems: [], weekLabel: "2026-W12" });
+    expect(last.lapsed).toBe(1);
+    expect(last.content).toContain("| Review RFC | lapsed | 2 |");
   });
 
   it("does not age an item that was never put in front of the coach", () => {
@@ -198,7 +239,7 @@ describe("migrateFocusTracking", () => {
   });
 
   it("assigns ids, collapses rewordings, and closes the unreviewable backlog", () => {
-    const { content, assigned, collapsed, lapsed } = migrateFocusTracking(legacy);
+    const { content, assigned, collapsed, lapsed } = migrateFocusTracking(legacy, "2026-W09");
     expect(collapsed).toBe(1);
     expect(assigned).toBe(4);
     expect(lapsed).toBe(1);
@@ -211,9 +252,374 @@ describe("migrateFocusTracking", () => {
     expect(content).toContain("| 2026-W01.2 | 2026-W01 | Ancient closed item | completed |");
   });
 
+  it("lapses stale ongoing rows too, not only pending ones", () => {
+    const withOngoing = legacy.replace("| 2026-W01 | Ancient open item | pending | |", "| 2026-W01 | Ancient open item | ongoing | |");
+    const { content, lapsed } = migrateFocusTracking(withOngoing, "2026-W09");
+    expect(lapsed).toBe(1);
+    expect(content).toContain("| 2026-W01.1 | 2026-W01 | Ancient open item | lapsed |");
+  });
+
   it("is idempotent", () => {
-    const once = migrateFocusTracking(legacy).content;
+    const once = migrateFocusTracking(legacy, "2026-W09").content;
     expect(needsFocusMigration(once)).toBe(false);
-    expect(migrateFocusTracking(once).content).toBe(once);
+    expect(migrateFocusTracking(once, "2026-W09").content).toBe(once);
+  });
+});
+
+describe("lapseStaleOpenFocusItems", () => {
+  it("lapses open rows older than the cutoff, leaves newer and closed rows alone", () => {
+    const content = `| ID | Week | Focus Item | Status | Reviews | Notes |
+|---|---|---|---|---|---|
+| 2026-W08.1 | 2026-W08 | Old ongoing | ongoing | 0 |  |
+| 2026-W16.1 | 2026-W16 | Old pending | pending | 1 |  |
+| 2026-W16.2 | 2026-W16 | Old done | completed | 0 | shipped |
+| 2026-W34.1 | 2026-W34 | Recent ongoing | ongoing | 0 |  |
+`;
+    const { content: out, lapsed } = lapseStaleOpenFocusItems(content, "2026-W34");
+    expect(lapsed).toBe(2);
+    expect(out).toContain("| Old ongoing | lapsed | 0 | lapsed: still ongoing at 2026-W34 |");
+    expect(out).toContain("| Old pending | lapsed | 1 | lapsed: still pending at 2026-W34 |");
+    expect(out).toContain("| Old done | completed | 0 | shipped |");
+    expect(out).toContain("| Recent ongoing | ongoing | 0 |  |");
+  });
+
+  it("is a no-op when nothing is stale", () => {
+    const content = "| ID | Week | Focus Item | Status | Reviews | Notes |\n|---|---|---|---|---|---|\n| 2026-W34.1 | 2026-W34 | x | pending | 0 |  |";
+    expect(lapseStaleOpenFocusItems(content, "2026-W30")).toEqual({ content, lapsed: 0 });
+  });
+});
+
+describe("rows that are not focus items", () => {
+  const HAND_EDITED = "| my own note | keep me | exactly | as | I | wrote it |";
+  const content = `| ID | Week | Focus Item | Status | Reviews | Notes |
+|---|---|---|---|---|---|
+| 2026-W09.1 | 2026-W09 | Write docs | ongoing | 0 |  |
+${HAND_EDITED}
+| 2026-W10.1 | 2026-W10 | Review RFC | pending | 0 |  |
+`;
+
+  it("survive an update, in their original position", () => {
+    const result = applyFocusUpdates(content, {
+      reviewedIds: ["2026-W09.1"], updates: [{ id: "2026-W09.1", status: "completed", notes: "" }],
+      newItems: ["Brand new"], weekLabel: "2026-W11",
+    });
+    const lines = result.content.split("\n");
+    expect(lines[3]).toBe(HAND_EDITED);
+    expect(lines[2]).toContain("| Write docs | completed |");
+    expect(result.content).toContain("| 2026-W11.1 | 2026-W11 | Brand new |");
+  });
+
+  it("survive lapsing", () => {
+    const { content: out } = lapseStaleOpenFocusItems(content, "2026-W10");
+    expect(out).toContain(HAND_EDITED);
+    expect(out).toContain("| Write docs | lapsed |");
+  });
+
+  it("make the migration refuse rather than silently drop them", () => {
+    const legacy = `| Week | Focus Item | Status | Notes |
+|---|---|---|---|
+| 2026-W09 | Real item | pending | |
+| not a week | something | pending | |
+`;
+    expect(() => migrateFocusTracking(legacy, "2026-W09")).toThrow(/line 4/);
+  });
+
+  it("make a legacy table of only such rows refuse too, instead of reporting success", () => {
+    const legacy = `| Week | Focus Item | Status | Notes |
+|---|---|---|---|
+| not a week | handwritten | pending | |
+`;
+    expect(() => migrateFocusTracking(legacy, "2026-W09")).toThrow(/line 3/);
+  });
+});
+
+describe("format versioning", () => {
+  const format1 = `# Focus Tracking
+
+| ID | Week | Focus Item | Status | Reviews | Notes |
+|---|---|---|---|---|---|
+| 2026-W08.1 | 2026-W08 | Stale ongoing | ongoing | 0 |  |
+| 2026-W16.1 | 2026-W16 | Stale pending | pending | 1 |  |
+| 2026-W34.1 | 2026-W34 | Recent ongoing | ongoing | 0 |  |
+| 2026-W35.1 | 2026-W35 | Current pending | pending | 0 |  |
+`;
+
+  it("the template and a fresh migration carry the current marker", () => {
+    expect(FOCUS_TRACKING_TEMPLATE).toContain(`<!-- worklog-focus-format: ${FOCUS_FORMAT_VERSION} -->`);
+    expect(needsFocusFormatUpgrade(FOCUS_TRACKING_TEMPLATE)).toBe(false);
+    const migrated = migrateFocusTracking("| Week | Focus Item | Status | Notes |\n|---|---|---|---|\n| 2026-W09 | x | pending | |", "2026-W01").content;
+    expect(needsFocusFormatUpgrade(migrated)).toBe(false);
+    expect(focusFormatVersion(migrated)).toBe(FOCUS_FORMAT_VERSION);
+  });
+
+  it("detects a 2.0.0 file and lapses only the stale open rows once", () => {
+    expect(needsFocusFormatUpgrade(format1)).toBe(true);
+    const { content, lapsed } = upgradeFocusFormat(format1, "2026-W34");
+    expect(lapsed).toBe(2);
+    expect(content).toContain("| Stale ongoing | lapsed |");
+    expect(content).toContain("| Stale pending | lapsed |");
+    expect(content).toContain("| Recent ongoing | ongoing | 0 |");
+    expect(content).toContain("| Current pending | pending | 0 |");
+    expect(content.split("\n")[1]).toBe(`<!-- worklog-focus-format: ${FOCUS_FORMAT_VERSION} -->`);
+    expect(needsFocusFormatUpgrade(content)).toBe(false);
+    expect(upgradeFocusFormat(content, "2026-W34")).toEqual({ content, lapsed: 0 });
+  });
+
+  it("uses the calendar as cutoff, so a file whose newest rows are all stale still cleans up", () => {
+    const staleOnly = `| ID | Week | Focus Item | Status | Reviews | Notes |
+|---|---|---|---|---|---|
+| 2026-W01.1 | 2026-W01 | Old one | ongoing | 0 |  |
+| 2026-W02.1 | 2026-W02 | Old two | ongoing | 0 |  |
+`;
+    const { lapsed } = upgradeFocusFormat(staleOnly, "2026-W33");
+    expect(lapsed).toBe(2);
+  });
+
+  it("refuses to touch a file written by a newer worklog", () => {
+    const future = `# Focus Tracking\n<!-- worklog-focus-format: ${FOCUS_FORMAT_VERSION + 1} -->\n\n${format1.split("\n").slice(2).join("\n")}`;
+    expect(focusFormatVersion(future)).toBe(FOCUS_FORMAT_VERSION + 1);
+    expect(() => needsFocusFormatUpgrade(future)).toThrow(/Upgrade worklog/);
+    expect(() => upgradeFocusFormat(future, "2026-W34")).toThrow(/Upgrade worklog/);
+    expect(() => migrateFocusTracking(future, "2026-W34")).toThrow(/Upgrade worklog/);
+  });
+});
+
+describe("user-added columns", () => {
+  const widened = `| ID | Week | Focus Item | Status | Reviews | Notes | Owner |
+|---|---|---|---|---|---|---|
+| 2026-W09.1 | 2026-W09 | Write docs | pending | 0 |  | Owner A |
+| 2026-W09.2 | 2026-W09 | Review RFC | pending | 0 |  | Owner B |
+`;
+
+  it("survive an update on touched and untouched rows, header included", () => {
+    const result = applyFocusUpdates(widened, {
+      reviewedIds: ["2026-W09.1"], updates: [{ id: "2026-W09.1", status: "completed", notes: "done" }],
+      newItems: [], weekLabel: "2026-W10",
+    });
+    const lines = result.content.split("\n");
+    expect(lines[0]).toBe("| ID | Week | Focus Item | Status | Reviews | Notes | Owner |");
+    expect(lines[2]).toBe("| 2026-W09.1 | 2026-W09 | Write docs | completed | 0 | done | Owner A |");
+    expect(lines[3]).toBe("| 2026-W09.2 | 2026-W09 | Review RFC | pending | 0 |  | Owner B |");
+  });
+
+  it("are never lost when a duplicate row is collapsed", () => {
+    const legacy = `| Week | Focus Item | Status | Notes | Owner |
+|---|---|---|---|---|
+| 2026-W09 | Ship the Search Revamp release via TEAM-1234 | pending | first note | Owner A |
+| 2026-W09 | Ship the Search Revamp release through TEAM-1234 | pending | second note | Owner B |
+| 2026-W09 | Ship the Search Revamp release through TEAM-1234 again | pending |  |  |
+`;
+    const { content, collapsed, assigned } = migrateFocusTracking(legacy, "2026-W09");
+    // the empty third row collapses; the second carries its own note and owner, so it stays
+    expect(collapsed).toBe(1);
+    expect(assigned).toBe(2);
+    expect(content).toContain("| first note | Owner A |");
+    expect(content).toContain("| second note | Owner B |");
+  });
+
+  it("still collapse a safe duplicate that sits after a different-outcome one", () => {
+    const legacy = `| Week | Focus Item | Status | Notes |
+|---|---|---|---|
+| 2026-W09 | Ship the auth PR | completed | |
+| 2026-W09 | Ship auth PR now | pending | |
+| 2026-W09 | Ship the auth PR now | pending | |
+`;
+    const { assigned, collapsed } = migrateFocusTracking(legacy, "2026-W09");
+    expect(collapsed).toBe(1);
+    expect(assigned).toBe(2);
+  });
+
+  it("collapse two stale duplicates and lapse the survivor", () => {
+    const legacy = `| Week | Focus Item | Status | Notes |
+|---|---|---|---|
+| 2026-W01 | Ship the auth PR | pending | |
+| 2026-W01 | Ship auth PR now | pending | |
+`;
+    const { assigned, collapsed, lapsed } = migrateFocusTracking(legacy, "2026-W09");
+    expect({ assigned, collapsed, lapsed }).toEqual({ assigned: 1, collapsed: 1, lapsed: 1 });
+  });
+
+  it("keep both rows when duplicates disagree on outcome", () => {
+    const legacy = `| Week | Focus Item | Status | Notes |
+|---|---|---|---|
+| 2026-W09 | Ship the auth PR | pending | |
+| 2026-W09 | Ship auth PR now | completed | |
+`;
+    const { content, collapsed } = migrateFocusTracking(legacy, "2026-W09");
+    expect(collapsed).toBe(0);
+    expect(content).toContain("| Ship the auth PR | pending |");
+    expect(content).toContain("| Ship auth PR now | completed |");
+  });
+
+  it("survive the legacy migration, header included", () => {
+    const legacyWidened = `| Week | Focus Item | Status | Notes | Owner |
+|---|---|---|---|---|
+| 2026-W09 | Ship docs | pending | note | Owner A |
+`;
+    const { content } = migrateFocusTracking(legacyWidened, "2026-W09");
+    const lines = content.split("\n");
+    const header = lines.findIndex((line) => line.startsWith("| ID"));
+    expect(lines[header]).toBe("| ID | Week | Focus Item | Status | Reviews | Notes | Owner |");
+    expect(lines[header + 2]).toBe("| 2026-W09.1 | 2026-W09 | Ship docs | pending | 0 | note | Owner A |");
+  });
+});
+
+describe("format marker robustness", () => {
+  it("reads an indented marker and still refuses a newer version", () => {
+    const indented = `# Focus Tracking\n  <!-- worklog-focus-format: ${FOCUS_FORMAT_VERSION + 1} -->\n| ID | Week | Focus Item | Status | Reviews | Notes |\n|---|---|---|---|---|---|\n| 2026-W01.1 | 2026-W01 | x | ongoing | 0 |  |\n`;
+    expect(focusFormatVersion(indented)).toBe(FOCUS_FORMAT_VERSION + 1);
+    expect(() => needsFocusFormatUpgrade(indented)).toThrow(/Upgrade worklog/);
+  });
+
+  it.each([
+    "<!-- worklog-focus-format: two -->",
+    "<!-- worklog-focus-format: 2oops -->",
+    "<!-- worklog-focus-format: 2.1 -->",
+    "<!-- worklog-focus-format: 2",
+    "<!-- worklog-focus-format: -->",
+    "<!-- worklog-focus-format:2 -->",
+    "<!-- worklog-focus-format:  2 -->",
+    "<!-- worklog-focus-format: 2  -->",
+  ])("throws on a malformed marker (%s) instead of guessing a version", (marker) => {
+    expect(() => focusFormatVersion(`# Focus Tracking\n${marker}\n`)).toThrow(/unreadable format marker/);
+  });
+
+  it("ignores a marker under an archived heading and leaves it untouched", () => {
+    const file = `# Focus Tracking
+
+| ID | Week | Focus Item | Status | Reviews | Notes |
+|---|---|---|---|---|---|
+| 2020-W01.1 | 2020-W01 | Stale ongoing | ongoing | 0 |  |
+
+## Old era — ARCHIVED
+<!-- worklog-focus-format: ${FOCUS_FORMAT_VERSION} -->
+| ID | Week | Focus Item | Status | Reviews | Notes |
+|---|---|---|---|---|---|
+`;
+    expect(focusFormatVersion(file)).toBeNull();
+    expect(needsFocusFormatUpgrade(file)).toBe(true);
+    const { content, lapsed } = upgradeFocusFormat(file, "2026-W33");
+    expect(lapsed).toBe(1);
+    expect(content.split("\n")[1]).toBe(`<!-- worklog-focus-format: ${FOCUS_FORMAT_VERSION} -->`);
+    expect(content).toContain(`## Old era — ARCHIVED\n<!-- worklog-focus-format: ${FOCUS_FORMAT_VERSION} -->`);
+  });
+
+  it.each([1, 2, 3])("respects an archived heading indented by %s space(s)", (n) => {
+    const file = `# Focus Tracking
+
+| ID | Week | Focus Item | Status | Reviews | Notes |
+|---|---|---|---|---|---|
+| 2026-W34.1 | 2026-W34 | Live item | pending | 0 |  |
+
+${" ".repeat(n)}## Old era — ARCHIVED
+| ID | Week | Focus Item | Status | Reviews | Notes |
+|---|---|---|---|---|---|
+| 2020-W01.1 | 2020-W01 | Historical item | ongoing | 0 | keep |
+`;
+    expect(selectOpenFocusItems(file).map((i) => i.id)).toEqual(["2026-W34.1"]);
+    const { content, lapsed } = upgradeFocusFormat(file, "2026-W33");
+    expect(lapsed).toBe(0);
+    expect(content).toContain("| Historical item | ongoing | 0 | keep |");
+  });
+
+  it("keeps the last cell of a row written without a trailing pipe", () => {
+    const file = `| ID | Week | Focus Item | Status | Reviews | Notes |
+|---|---|---|---|---|---|
+| 2026-W01.1 | 2026-W01 | Old | ongoing | 0 | do not lose this note
+`;
+    const { content } = upgradeFocusFormat(file, "2026-W33");
+    expect(content).toContain("| Old | lapsed | 0 | do not lose this note; lapsed: still ongoing at 2026-W33 |");
+  });
+
+  it("migrates an empty legacy table once, not on every run", () => {
+    const empty = "# Focus Tracking\n\n| Week | Focus Item | Status | Notes |\n|---|---|---|---|\n";
+    const once = migrateFocusTracking(empty, "2026-W09").content;
+    expect(needsFocusMigration(once)).toBe(false);
+    expect(needsFocusFormatUpgrade(once)).toBe(false);
+    expect(once).toContain("| ID | Week | Focus Item | Status | Reviews | Notes |");
+  });
+
+  it("keeps a cell that ends in a literal backslash intact", () => {
+    const file = "| ID | Week | Focus Item | Status | Reviews | Notes |\n|---|---|---|---|---|---|\n|2026-W01.1|2026-W01|Old|ongoing|0|C:\\\\|\n";
+    const items = parseFocusItems(file);
+    expect(items[0].notes).toBe("C:\\");
+    const { content } = upgradeFocusFormat(file, "2026-W33");
+    const row = content.split("\n").find((line) => line.includes("2026-W01.1"));
+    expect(row).toBe("| 2026-W01.1 | 2026-W01 | Old | lapsed | 0 | C:\\\\; lapsed: still ongoing at 2026-W33 |");
+  });
+
+  it.each([
+    ["id-keyed", "| ID | Week | Focus Item | Status | Reviews | Notes |\n|---|---|---|---|---|---|\n| 2026-W01.1 | 2026-W01 | x | ongoing | 0 |  |\n"],
+    ["empty legacy", "| Week | Focus Item | Status | Notes |\n|---|---|---|---|\n"],
+  ])("keeps frontmatter first when there is no heading (%s table)", (_label, table) => {
+    const file = `---\ntags:\n  - work\n---\n${table}`;
+    const migrated = _label === "id-keyed" ? upgradeFocusFormat(file, "2026-W33").content : migrateFocusTracking(file, "2026-W33").content;
+    const lines = migrated.split("\n");
+    expect(lines.slice(0, 4)).toEqual(["---", "tags:", "  - work", "---"]);
+    expect(lines[4]).toBe(`<!-- worklog-focus-format: ${FOCUS_FORMAT_VERSION} -->`);
+  });
+
+  it("does not mistake an indented --- inside a YAML block scalar for the frontmatter close", () => {
+    const file = "---\ndescription: |\n  ---\n  keep this text\ntags: [work]\n---\n| Week | Focus Item | Status | Notes |\n|---|---|---|---|\n";
+    const lines = migrateFocusTracking(file, "2026-W33").content.split("\n");
+    expect(lines.slice(0, 6)).toEqual(["---", "description: |", "  ---", "  keep this text", "tags: [work]", "---"]);
+    expect(lines[6]).toBe(`<!-- worklog-focus-format: ${FOCUS_FORMAT_VERSION} -->`);
+  });
+
+  it("ignores heading-, table- and marker-looking lines inside frontmatter", () => {
+    const file = `---
+description: |
+  ## ARCHIVED
+  <!-- worklog-focus-format: 9 -->
+  |---|
+---
+| Week | Focus Item | Status | Notes |
+|---|---|---|---|
+| 2026-W34 | Existing commitment | pending | keep |
+`;
+    expect(focusFormatVersion(file)).toBeNull();
+    expect(parseFocusItems(file).map((i) => i.item)).toEqual(["Existing commitment"]);
+    const { content, assigned } = migrateFocusTracking(file, "2026-W33");
+    expect(assigned).toBe(1);
+    expect(content).toContain("| 2026-W34.1 | 2026-W34 | Existing commitment | pending | 0 | keep |");
+    expect(content.split("\n").slice(0, 6).join("\n")).toBe(file.split("\n").slice(0, 6).join("\n"));
+  });
+
+  it("puts the marker under the heading when frontmatter and a heading both exist", () => {
+    const file = "---\ntags: []\n---\n# Focus Tracking\n\n| Week | Focus Item | Status | Notes |\n|---|---|---|---|\n";
+    const lines = migrateFocusTracking(file, "2026-W33").content.split("\n");
+    expect(lines[3]).toBe("# Focus Tracking");
+    expect(lines[4]).toBe(`<!-- worklog-focus-format: ${FOCUS_FORMAT_VERSION} -->`);
+  });
+
+  it("refuses a file with two live markers", () => {
+    const file = `# Focus Tracking\n<!-- worklog-focus-format: 2 -->\n<!-- worklog-focus-format: 2 -->\n`;
+    expect(() => focusFormatVersion(file)).toThrow(/2 format markers/);
+  });
+
+  it("migrateFocusTracking defaults its cutoff from the calendar when none is given", () => {
+    const legacy = "| Week | Focus Item | Status | Notes |\n|---|---|---|---|\n| 2020-W01 | Ancient | pending | |\n";
+    expect(migrateFocusTracking(legacy).lapsed).toBe(1);
+  });
+});
+
+describe("duplicate status rows", () => {
+  it("apply once", () => {
+    const base = `| ID | Week | Focus Item | Status | Reviews | Notes |
+|---|---|---|---|---|---|
+| 2026-W09.1 | 2026-W09 | Write docs | pending | 0 |  |
+`;
+    const result = applyFocusUpdates(base, {
+      reviewedIds: ["2026-W09.1"],
+      updates: [
+        { id: "2026-W09.1", status: "ongoing", notes: "PR up" },
+        { id: "2026-W09.1", status: "ongoing", notes: "PR up" },
+        { id: "2026-W09.1", status: "completed", notes: "no wait" },
+      ],
+      newItems: [], weekLabel: "2026-W10",
+    });
+    expect(result.carried).toBe(1);
+    expect(result.resolved).toBe(0);
+    expect(result.content).toContain("| Write docs | ongoing | 0 | PR up |");
   });
 });

@@ -477,12 +477,13 @@ export async function runWorklog(opts: {
 
   // Focus items are keyed by id now; upgrade a pre-id file before anything reads it.
   const migration = await migrateFocusTrackingFile(paths.focusTracking);
-  if (migration) {
+  if (migration?.kind === "ids") {
     p.log.info(
       `Upgraded focus-tracking.md to id-keyed format: ${migration.assigned} items kept, ` +
-      `${migration.collapsed} duplicates collapsed, ${migration.lapsed} stale items closed. ` +
-      `Backup: ${paths.focusTracking}.pre-ids.bak`,
+      `${migration.collapsed} duplicates collapsed, ${migration.lapsed} stale items closed. Backup: ${migration.backup}`,
     );
+  } else if (migration?.kind === "format") {
+    p.log.info(`Cleaned focus-tracking.md: ${migration.lapsed} stale open item(s) closed. Backup: ${migration.backup}`);
   }
 
   const weeksToGenerate = await getWeeksToGenerate(paths.vault, weeksBack, specificWeek, force, sinceDate);

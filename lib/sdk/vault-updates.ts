@@ -3,11 +3,14 @@ import { existsSync } from "node:fs";
 import type { BragBookResult } from "./brag-book";
 
 import { appendToFirstTable } from "./markdown-table";
+import { weekIdForDate } from "./week-utils";
 import {
   FOCUS_TRACKING_TEMPLATE,
   applyFocusUpdates,
   migrateFocusTracking,
   needsFocusMigration,
+  needsFocusFormatUpgrade,
+  upgradeFocusFormat,
   type ApplyFocusResult,
 } from "./focus";
 
@@ -119,15 +122,38 @@ export async function updateFocusTracking(
  * Bring a pre-id focus-tracking file up to the current shape, keeping a one-time backup
  * because the file is owned by the user, not by us.
  */
+export interface FocusFileMigration {
+  kind: "ids" | "format";
+  backup: string;
+  assigned: number;
+  collapsed: number;
+  lapsed: number;
+}
+
 export async function migrateFocusTrackingFile(
   focusTrackingPath: string,
-): Promise<{ assigned: number; collapsed: number; lapsed: number } | null> {
+  now: Date = new Date(),
+): Promise<FocusFileMigration | null> {
   if (!existsSync(focusTrackingPath)) return null;
   const content = await readFile(focusTrackingPath, "utf-8");
-  if (!needsFocusMigration(content)) return null;
+  // Two weeks of grace, like the pure helpers default to; passed explicitly so tests can pin it.
+  const keepSinceWeek = weekIdForDate(new Date(now.getTime() - 2 * 7 * 24 * 60 * 60 * 1000));
 
-  await writeFile(`${focusTrackingPath}.pre-ids.bak`, content, "utf-8");
-  const { content: migrated, assigned, collapsed, lapsed } = migrateFocusTracking(content);
-  await writeFile(focusTrackingPath, migrated, "utf-8");
-  return { assigned, collapsed, lapsed };
+  if (needsFocusMigration(content)) {
+    const backup = `${focusTrackingPath}.pre-ids.bak`;
+    await writeFile(backup, content, "utf-8");
+    const { content: migrated, assigned, collapsed, lapsed } = migrateFocusTracking(content, keepSinceWeek);
+    await writeFile(focusTrackingPath, migrated, "utf-8");
+    return { kind: "ids", backup, assigned, collapsed, lapsed };
+  }
+
+  if (needsFocusFormatUpgrade(content)) {
+    const backup = `${focusTrackingPath}.pre-format2.bak`;
+    await writeFile(backup, content, "utf-8");
+    const { content: upgraded, lapsed } = upgradeFocusFormat(content, keepSinceWeek);
+    await writeFile(focusTrackingPath, upgraded, "utf-8");
+    return { kind: "format", backup, assigned: 0, collapsed: 0, lapsed };
+  }
+
+  return null;
 }
