@@ -56,13 +56,51 @@ function expandNegatedContractions(text: string): string {
   return text.split("\u2019").join("'").split("n't").join(" not");
 }
 
+/** Symbols that belong to a name when they are attached to one: c++, c#, f#. */
+const NAME_SYMBOLS = new Set(["+", "#"]);
+
+function isWordChar(char: string): boolean {
+  return (char >= "a" && char <= "z") || (char >= "0" && char <= "9");
+}
+
+/**
+ * Reduce text to words, keeping the punctuation that is part of a name.
+ *
+ * Stripping every symbol made "Builds C++ toolchains" and "Builds C# toolchains" the
+ * same sentence, so the second one could never be written. A `+` or `#` attached to a
+ * word stays, and a `.` stays only between two characters of one name (node.js, 1.22),
+ * never as the full stop ending a sentence.
+ *
+ * A scan rather than a pattern: this is model output, and CodeQL flags regexes over it.
+ */
+function toWords(text: string): string {
+  let out = "";
+  for (let i = 0; i < text.length; i++) {
+    const char = text[i];
+    if (isWordChar(char)) {
+      out += char;
+      continue;
+    }
+
+    const previous = out[out.length - 1] ?? " ";
+    if (NAME_SYMBOLS.has(char) && previous !== " ") {
+      out += char;
+      continue;
+    }
+    if (char === "." && previous !== " " && isWordChar(text[i + 1] ?? " ")) {
+      out += char;
+      continue;
+    }
+    out += " ";
+  }
+  return out.split(" ").filter((word) => word.length > 0).join(" ");
+}
+
 /** Strip markdown down to comparable words. */
 export function normalizeText(text: string): string {
-  // Bracket syntax is left to the alphanumeric filter below; only the URL has to go,
-  // since otherwise every item carrying a Jira link would look alike.
-  return expandNegatedContractions(stripLinkTargets(text).toLowerCase())
-    .replace(/[^a-z0-9]+/g, " ")
-    .trim();
+  // Bracket syntax is left to the word scan below; only the URL has to go, since
+  // otherwise every item carrying a Jira link would look alike.
+  return toWords(expandNegatedContractions(stripLinkTargets(text).toLowerCase()));
 }
 
 /**
@@ -82,12 +120,37 @@ const STOP_WORDS = new Set([
  */
 const NEGATIONS = new Set(["not", "no", "never", "nor", "cannot", "without"]);
 
+/**
+ * A token carrying a digit or a name symbol is what tells two otherwise identical
+ * records apart: a version, a ticket number, a language. Never dropped for being short.
+ */
+function isDistinguishing(token: string): boolean {
+  for (const char of token) {
+    if ((char >= "0" && char <= "9") || char === "+" || char === "#" || char === ".") return true;
+  }
+  return false;
+}
+
 function tokenSet(text: string): Set<string> {
   return new Set(
     normalizeText(text)
       .split(" ")
-      .filter((token) => NEGATIONS.has(token) || (token.length > 2 && !STOP_WORDS.has(token))),
+      .filter(
+        (token) =>
+          NEGATIONS.has(token) || isDistinguishing(token) || (token.length > 2 && !STOP_WORDS.has(token)),
+      ),
   );
+}
+
+function distinguishingTokens(tokens: ReadonlySet<string>): Set<string> {
+  const named = new Set<string>();
+  for (const token of tokens) if (isDistinguishing(token)) named.add(token);
+  return named;
+}
+
+function isSubsetOf(inner: ReadonlySet<string>, outer: ReadonlySet<string>): boolean {
+  for (const token of inner) if (!outer.has(token)) return false;
+  return true;
 }
 
 function isNegated(tokens: ReadonlySet<string>): boolean {
@@ -137,6 +200,15 @@ export function textSimilarity(a: string, b: string): number {
   // Keeping the negation as a token is not enough on its own: the affirmative token set
   // is a subset of the negated one, so containment would still score them identical.
   if (isNegated(left) !== isNegated(right)) return 0;
+
+  // Versions, languages and ticket numbers are the whole difference between two records
+  // that otherwise read alike, and the short ones survive no other filter. When each
+  // text names one the other does not, they are different records: C++ against C#, Go
+  // 1.22 against Go 1.23. One naming a superset of the other's (the same ticket plus a
+  // second) is still the same record elaborated, which is what the score is for.
+  const leftNames = distinguishingTokens(left);
+  const rightNames = distinguishingTokens(right);
+  if (!isSubsetOf(leftNames, rightNames) && !isSubsetOf(rightNames, leftNames)) return 0;
 
   let shared = 0;
   for (const token of left) if (right.has(token)) shared++;

@@ -124,3 +124,39 @@ describe("contractions", () => {
     }
   });
 });
+
+describe("versions, languages and ticket numbers", () => {
+  const distinct: Array<[string, string]> = [
+    ["Builds C++ toolchains", "Builds C# toolchains"],
+    ["Runs Go 1.22 services", "Runs Go 1.23 services"],
+    ["Runs node.js 20 in CI", "Runs node.js 22 in CI"],
+    ["Ships the TEAM-1234 rollout to every space", "Ships the TEAM-1235 rollout to every space"],
+  ];
+
+  it("scores a pair that differs only in a version or a name as unrelated", () => {
+    for (const [a, b] of distinct) {
+      expect(textSimilarity(a, b), a).toBe(0);
+      expect(textSimilarity(b, a), b).toBe(0);
+    }
+  });
+
+  it("keeps those names as tokens instead of stripping them to nothing", () => {
+    expect(normalizeText("Builds C++ toolchains, Go 1.22 and node.js."))
+      .toBe("builds c++ toolchains go 1.22 and node.js");
+    expect(normalizeText("Ships C#, F# and 1.2.3")).toBe("ships c# f# and 1.2.3");
+  });
+
+  it("still reads a longer version of the same record as the same record", () => {
+    // One naming a superset of the other's tickets is an elaboration, not a new record.
+    const score = textSimilarity(
+      "Close the Search Revamp correctness loop through TEAM-1234",
+      "Close the Search Revamp correctness loop through TEAM-1234 and TEAM-1235",
+    );
+    expect(score).toBeGreaterThanOrEqual(PROSE_SIMILARITY_THRESHOLD);
+  });
+
+  it("still reads a plain rewording as the same record", () => {
+    expect(textSimilarity("Release trains ship on Tuesdays", "Release trains now ship Tuesdays"))
+      .toBeGreaterThanOrEqual(PROSE_SIMILARITY_THRESHOLD);
+  });
+});

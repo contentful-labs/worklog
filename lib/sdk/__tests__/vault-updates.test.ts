@@ -819,7 +819,7 @@ describe("live section bounds", () => {
     const path = join(tmpDir, "impact-log.md");
     await writeFile(path, ARCHIVED_IMPACT_LOG);
 
-    expect(await updateImpactLog(path, IMPACT_ENTRY)).toBe(true);
+    expect(await updateImpactLog(path, IMPACT_ENTRY)).toBe("written");
 
     const content = await readFile(path, "utf-8");
     expect(content.indexOf("Search Revamp rollout")).toBeLessThan(content.indexOf("ARCHIVED"));
@@ -841,7 +841,7 @@ describe("live section bounds", () => {
 `;
     await writeFile(path, withoutTimeline);
 
-    expect(await updateImpactLog(path, IMPACT_ENTRY)).toBe(false);
+    expect(await updateImpactLog(path, IMPACT_ENTRY)).toBe("no-section");
     expect(await readFile(path, "utf-8")).toBe(withoutTimeline);
   });
 
@@ -1191,7 +1191,7 @@ describe("impact heading is matched exactly", () => {
 `;
     await writeFile(path, file);
 
-    expect(await updateImpactLog(path, IMPACT_ENTRY)).toBe(false);
+    expect(await updateImpactLog(path, IMPACT_ENTRY)).toBe("no-section");
     expect(await readFile(path, "utf-8")).toBe(file);
   });
 
@@ -1211,7 +1211,7 @@ Nothing recorded yet.
 `;
     await writeFile(path, file);
 
-    expect(await updateImpactLog(path, IMPACT_ENTRY)).toBe(false);
+    expect(await updateImpactLog(path, IMPACT_ENTRY)).toBe("no-section");
     expect(await readFile(path, "utf-8")).toBe(file);
   });
 
@@ -1219,7 +1219,7 @@ Nothing recorded yet.
     const path = join(tmpDir, "impact-log.md");
     await writeFile(path, CLEAN_IMPACT_LOG.replace("## Impact Timeline", "##  Impact  Timeline"));
 
-    expect(await updateImpactLog(path, IMPACT_ENTRY)).toBe(true);
+    expect(await updateImpactLog(path, IMPACT_ENTRY)).toBe("written");
     expect(await readFile(path, "utf-8")).toContain("Led the Search Revamp rollout");
   });
 });
@@ -1245,5 +1245,114 @@ describe("contracted negations", () => {
     const content = await readFile(path, "utf-8");
     expect(content).toContain("- **process:** Release trains ship on Tuesdays _(TEAM-1200)_");
     expect(content).toContain("don't ship on Tuesdays any more");
+  });
+});
+
+describe("records that differ only in a version or a language", () => {
+  it("writes the second strength instead of treating it as a repeat", async () => {
+    const path = join(tmpDir, "my-profile.md");
+    await writeFile(path, `# My Profile
+
+## Key Strengths
+
+- Builds C++ toolchains other teams depend on
+
+---
+
+*Last updated: 2026-02-01*
+`);
+
+    await updateProfile(path, {
+      achievement: "Toolchain work",
+      bulletPoint: "Builds C# toolchains other teams depend on",
+    });
+
+    const content = await readFile(path, "utf-8");
+    expect(content).toContain("- Builds C++ toolchains other teams depend on");
+    expect(content).toContain("- Builds C# toolchains other teams depend on");
+  });
+
+  it("writes a note about a different version of the same thing", async () => {
+    const path = join(tmpDir, "work-context.md");
+    await writeFile(path, `# Work Context
+
+## Organizational Notes
+
+- **platform:** Services run on Go 1.22 in production _(TEAM-1200)_
+
+---
+
+*Last updated: 2026-02-01*
+`);
+
+    await updateWorkContext(path, [
+      { category: "platform", info: "Services run on Go 1.23 in production", source: "TEAM-1300" },
+    ], new Date("2026-03-08T00:00:00Z"));
+
+    const content = await readFile(path, "utf-8");
+    expect(content).toContain("Go 1.22 in production");
+    expect(content).toContain("Go 1.23 in production");
+  });
+});
+
+describe("the two ways an impact entry is not written", () => {
+  it("reports a placeholder achievement without a warning-worthy result", async () => {
+    const path = join(tmpDir, "impact-log.md");
+    await writeFile(path, CLEAN_IMPACT_LOG);
+
+    expect(await updateImpactLog(path, { ...IMPACT_ENTRY, achievement: "(none)" })).toBe("placeholder");
+    expect(await updateImpactLog(path, null)).toBe("placeholder");
+    expect(await readFile(path, "utf-8")).toBe(CLEAN_IMPACT_LOG);
+  });
+});
+
+describe("migration section bounds", () => {
+  it("leaves a file whose only table belongs to another section byte-identical", async () => {
+    const path = join(tmpDir, "impact-log.md");
+    const file = `# Impact Log
+
+## Impact Timeline Notes
+
+| Date | Note | Note | Note | Note |
+|------|------|------|------|------|
+| 2026-03-05 | (none) | | | |
+| 2026-03-05 | (none) | | | |
+`;
+    await writeFile(path, file);
+
+    expect(await migrateVaultRecordsFile(path, "impact-log")).toBeNull();
+    expect(await readFile(path, "utf-8")).toBe(file);
+  });
+
+  it("leaves an archived era's rows out of the memory cleanup", async () => {
+    const path = join(tmpDir, "memory.md");
+    const file = `# Memory
+
+## Previous Team (2025) — ARCHIVED
+
+| Date | Item | Category | Notes |
+|------|------|----------|-------|
+| 2025-05-01 | Old item | Fix | |
+| 2025-05-02 | Old item | Fix | |
+`;
+    await writeFile(path, file);
+
+    expect(await migrateVaultRecordsFile(path, "memory")).toBeNull();
+    expect(await readFile(path, "utf-8")).toBe(file);
+  });
+
+  it("does not clean a Key Strengths section that is only named like one", async () => {
+    const path = join(tmpDir, "my-profile.md");
+    const file = `# My Profile
+
+## Key Strengths Archive
+
+- (none)
+- (none)
+`;
+    await writeFile(path, file);
+
+    expect(await migrateVaultRecordsFile(path, "my-profile")).toBeNull();
+    expect(await readFile(path, "utf-8")).toBe(file);
   });
 });
