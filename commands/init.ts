@@ -35,15 +35,8 @@ function resolveInputPath(path: string): string {
 }
 
 const DEFAULT_VAULT_PATH = "~/Documents/worklog";
-const DEFAULT_ATLASSIAN_URL = "https://contentful.atlassian.net";
-const DEFAULT_GITHUB_ORGS = ["contentful", "contentful-labs"];
-const DEFAULT_PROFILE_COMPANY = "Contentful";
-const DEFAULT_CAREER_COMPANY_VALUES = [
-  "Relentless Customer Focus",
-  "Be Bold",
-  "Own It",
-  "Win Together",
-];
+const DEFAULT_ATLASSIAN_URL = "https://your-company.atlassian.net";
+const DEFAULT_GITHUB_ORGS = ["your-org"];
 
 // --- Vault doc writer with existing-file handling ---
 
@@ -342,7 +335,7 @@ export async function promptAtlassian(
 
   const email = await p.text({
     message: "Your Atlassian email:",
-    placeholder: "you@company.com",
+    placeholder: "you@example.com",
     initialValue: initial?.email,
     validate: (v) => validateEmail((v ?? "").trim()) ?? undefined,
   });
@@ -566,7 +559,7 @@ export async function promptCareer(
   const companyValues = await p.text({
     message: "Company core values (comma-sep, or Enter to skip):",
     placeholder:
-      "e.g. Customer Focus, Be Bold, Own It, Win Together",
+      "e.g. Customer Focus, Ownership, Craft",
     initialValue: initial?.companyValues?.join(", "),
   });
   cancelGuard(companyValues);
@@ -815,7 +808,7 @@ export async function runInit(options?: { dryRun?: boolean }): Promise<void> {
   // --- Prompt 3: Atlassian email ---
   const emailRaw = await p.text({
     message: "Atlassian email:",
-    placeholder: "you@contentful.com",
+    placeholder: "you@example.com",
     initialValue: useExisting ? existing!.atlassian.email : undefined,
     validate: (v) => validateEmail((v ?? "").trim()) ?? undefined,
   });
@@ -861,7 +854,7 @@ export async function runInit(options?: { dryRun?: boolean }): Promise<void> {
     else p.log.warn(`GitHub connection issue: ${check.error}`);
   }
 
-  // --- Build config with Contentful defaults ---
+  // --- Build config ---
   const defaultReviewCycle = [
     { type: "Q1 check-in", date: "" },
     { type: "Mid-year review", date: "" },
@@ -883,7 +876,7 @@ export async function runInit(options?: { dryRun?: boolean }): Promise<void> {
       displayName: useExisting ? existing!.profile.displayName : fullName,
       jobTitle: useExisting ? existing!.profile.jobTitle : "",
       level: useExisting ? existing!.profile.level : "",
-      company: DEFAULT_PROFILE_COMPANY,
+      company: useExisting ? existing!.profile.company : "",
       location: useExisting ? existing!.profile.location : "",
       startDate: useExisting ? existing!.profile.startDate : "",
       domain: useExisting ? existing!.profile.domain : "",
@@ -895,9 +888,7 @@ export async function runInit(options?: { dryRun?: boolean }): Promise<void> {
       framework: useExisting ? existing!.career.framework : "ic",
       currentLevel: useExisting ? existing!.career.currentLevel : "",
       targetLevel: useExisting ? existing!.career.targetLevel : "",
-      companyValues: useExisting
-        ? existing!.career.companyValues
-        : [...DEFAULT_CAREER_COMPANY_VALUES],
+      companyValues: useExisting ? existing!.career.companyValues : [],
       reviewCycleDates: useExisting
         ? existing!.career.reviewCycleDates
         : defaultReviewCycle,
