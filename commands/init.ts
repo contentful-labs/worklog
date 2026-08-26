@@ -8,6 +8,7 @@ import {
   loadConfig,
   getConfigPath,
   validateAtlassianUrl,
+  canonicalizeAtlassianUrl,
   validateEmail,
   validateISODate,
   expandHome,
@@ -311,9 +312,7 @@ export async function promptAtlassian(
   initial?: WorklogConfig["atlassian"],
   options?: { defaultUrl?: string; skipUrlPrompt?: boolean }
 ): Promise<WorklogConfig["atlassian"]> {
-  const fallbackUrl = (initial?.url || options?.defaultUrl || "")
-    .trim()
-    .replace(/\/$/, "");
+  const fallbackUrl = (initial?.url || options?.defaultUrl || "").trim();
   let urlStr = fallbackUrl;
 
   if (options?.skipUrlPrompt) {
@@ -327,7 +326,15 @@ export async function promptAtlassian(
         validateAtlassianUrl(((v ?? "").trim() || fallbackUrl).trim()) ?? undefined,
     });
     cancelGuard(url);
-    urlStr = ((url as string).trim() || fallbackUrl).replace(/\/$/, "");
+    urlStr = (url as string).trim() || fallbackUrl;
+  }
+
+  // Store the origin, not whatever the user pasted: API paths are appended to it.
+  const canonical = canonicalizeAtlassianUrl(urlStr);
+  if (canonical.ok) {
+    urlStr = canonical.url;
+  } else {
+    p.log.warn(`Atlassian URL may not work (${canonical.error}): ${urlStr}`);
   }
 
   const email = await p.text({

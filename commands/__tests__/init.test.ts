@@ -71,6 +71,26 @@ describe("promptAtlassian", () => {
     expect(optionsFor("Atlassian instance URL:").placeholder).toBe("https://your-company.atlassian.net");
   });
 
+  it("stores the origin when the user pastes a URL with a path", async () => {
+    answer({
+      "Atlassian instance URL:": "https://acme.atlassian.net/wiki/spaces/ENG/",
+      "Your Atlassian email:": "user@example.com",
+    });
+
+    const result = await promptAtlassian();
+
+    expect(result.url).toBe("https://acme.atlassian.net");
+  });
+
+  it("rejects http and embedded credentials", async () => {
+    answer({ "Atlassian instance URL:": "https://acme.atlassian.net", "Your Atlassian email:": "user@example.com" });
+    await promptAtlassian();
+
+    const validate = optionsFor("Atlassian instance URL:").validate;
+    expect(validate?.("http://acme.atlassian.net")).toBe("URL must use https (your API token is sent with every request)");
+    expect(validate?.("https://user:pass@acme.atlassian.net")).toBe("Remove the username and password from the URL");
+  });
+
   it("rejects an empty URL on a fresh setup so the placeholder cannot be saved", async () => {
     answer({ "Atlassian instance URL:": "https://acme.atlassian.net", "Your Atlassian email:": "user@example.com" });
     await promptAtlassian();

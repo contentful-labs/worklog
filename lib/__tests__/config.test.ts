@@ -7,6 +7,7 @@ import {
   expandConfigPaths,
   contractConfigPaths,
   validateAtlassianUrl,
+  canonicalizeAtlassianUrl,
   validateEmail,
   validateISODate,
   parseCommaSeparated,
@@ -116,6 +117,74 @@ describe("validateAtlassianUrl", () => {
 
   it("rejects empty string", () => {
     expect(validateAtlassianUrl("")).toBe("Invalid URL");
+  });
+});
+
+describe("validateAtlassianUrl rejections", () => {
+  it("rejects plain http", () => {
+    expect(validateAtlassianUrl("http://company.atlassian.net")).toBe(
+      "URL must use https (your API token is sent with every request)"
+    );
+  });
+
+  it("rejects embedded credentials", () => {
+    expect(validateAtlassianUrl("https://user:pass@company.atlassian.net")).toBe(
+      "Remove the username and password from the URL"
+    );
+  });
+});
+
+describe("canonicalizeAtlassianUrl", () => {
+  it("reduces a site URL to its origin", () => {
+    expect(canonicalizeAtlassianUrl("https://company.atlassian.net")).toEqual({
+      ok: true, url: "https://company.atlassian.net",
+    });
+  });
+
+  it("drops a trailing slash", () => {
+    expect(canonicalizeAtlassianUrl("https://company.atlassian.net/")).toEqual({
+      ok: true, url: "https://company.atlassian.net",
+    });
+  });
+
+  it("drops a path such as /wiki", () => {
+    expect(canonicalizeAtlassianUrl("https://company.atlassian.net/wiki")).toEqual({
+      ok: true, url: "https://company.atlassian.net",
+    });
+  });
+
+  it("drops a query string and fragment", () => {
+    expect(canonicalizeAtlassianUrl("https://company.atlassian.net/jira/software?tab=1#top")).toEqual({
+      ok: true, url: "https://company.atlassian.net",
+    });
+  });
+
+  it("trims surrounding whitespace", () => {
+    expect(canonicalizeAtlassianUrl("  https://company.atlassian.net  ")).toEqual({
+      ok: true, url: "https://company.atlassian.net",
+    });
+  });
+
+  it("rejects plain http", () => {
+    expect(canonicalizeAtlassianUrl("http://company.atlassian.net")).toEqual({
+      ok: false, error: "URL must use https (your API token is sent with every request)",
+    });
+  });
+
+  it("rejects embedded credentials", () => {
+    expect(canonicalizeAtlassianUrl("https://user:pass@company.atlassian.net")).toEqual({
+      ok: false, error: "Remove the username and password from the URL",
+    });
+  });
+
+  it("rejects a non-atlassian.net host", () => {
+    expect(canonicalizeAtlassianUrl("https://example.com")).toEqual({
+      ok: false, error: "URL should end with .atlassian.net (e.g. https://company.atlassian.net)",
+    });
+  });
+
+  it("rejects something that is not a URL", () => {
+    expect(canonicalizeAtlassianUrl("company.atlassian.net")).toEqual({ ok: false, error: "Invalid URL" });
   });
 });
 
