@@ -644,11 +644,16 @@ export async function runWorklog(opts: {
     s.start("Updating context...");
     log(`Context updates — memory: +${itemsToAdd.length}/-${itemsToRemove.length}, impact: ${impactLogEntry ? "yes" : "no"}, workContext: ${workContextUpdates.length}, profile: ${profileUpdate ? "yes" : "no"}, focus: ${focusItems.length}/${focusUpdates.length}`);
 
-    if (itemsToAdd.length > 0 || itemsToRemove.length > 0) await updateMemory(paths.memory, itemsToAdd, itemsToRemove);
+    const memoryResult = itemsToAdd.length > 0 || itemsToRemove.length > 0
+      ? await updateMemory(paths.memory, itemsToAdd, itemsToRemove)
+      : "placeholder";
+    if (memoryResult === "no-section") p.log.warn("memory.md has no live table above its archived sections; items not written");
     const impactResult = await updateImpactLog(paths.impactLog, impactLogEntry);
     if (impactResult === "no-section") p.log.warn("impact-log.md has no `## Impact Timeline` section; entry not written");
-    if (await updateWorkContext(paths.workContext, workContextUpdates) === "no-section") p.log.warn("work-context.md has no `## Organizational Notes` section; notes not written");
-    if (await updateProfile(paths.profile, profileUpdate) === "no-section") p.log.warn("my-profile.md has no `## Key Strengths` section; strength not written");
+    const workContextResult = await updateWorkContext(paths.workContext, workContextUpdates);
+    if (workContextResult === "no-section") p.log.warn("work-context.md has no `## Organizational Notes` section; notes not written");
+    const profileResult = await updateProfile(paths.profile, profileUpdate);
+    if (profileResult === "no-section") p.log.warn("my-profile.md has no `## Key Strengths` section; strength not written");
     if (focusItems.length > 0 || focusUpdates.length > 0 || openFocusItems.length > 0) {
       const focusResult = await updateFocusTracking(paths.focusTracking, {
         focusItems,
@@ -667,7 +672,7 @@ export async function runWorklog(opts: {
     p.log.success(`${wid} done in ${formatDuration(weekTotal)}`);
 
     timings.push({ weekId: wid, fetch: fetchMs, bragBook: bragMs, contextUpdates: ctxMs, total: weekTotal });
-    results.push({ weekId: wid, jira: issues.length, confluence: pages.length, prs: prs.length, reviews: reviews.length, memoryAdded: itemsToAdd.length, memoryRemoved: itemsToRemove.length, impactLog: impactResult === "written", workContextUpdates: workContextUpdates.length, profileUpdated: !!profileUpdate, focusItems: focusItems.length, focusUpdates: focusUpdates.length });
+    results.push({ weekId: wid, jira: issues.length, confluence: pages.length, prs: prs.length, reviews: reviews.length, memoryAdded: memoryResult === "written" ? itemsToAdd.length : 0, memoryRemoved: memoryResult === "written" ? itemsToRemove.length : 0, impactLog: impactResult === "written", workContextUpdates: workContextResult === "written" ? workContextUpdates.length : 0, profileUpdated: profileResult === "written", focusItems: focusItems.length, focusUpdates: focusUpdates.length });
 
     progress.completedWeeks.push(wid);
     await saveProgress(progress);
