@@ -496,7 +496,7 @@ export async function runWorklog(opts: {
     ["my-profile", paths.profile],
   ] as const) {
     const cleanup = await migrateVaultRecordsFile(recordPath, kind);
-    if (cleanup) {
+    if (cleanup?.backup) {
       p.log.info(
         `Cleaned ${kind}.md: ${cleanup.placeholders} placeholder rows removed, ` +
         `${cleanup.duplicates} duplicates collapsed. Backup: ${cleanup.backup}`,

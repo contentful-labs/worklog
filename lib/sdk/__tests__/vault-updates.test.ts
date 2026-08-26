@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtemp, writeFile, readFile, rm, chmod, lstat, stat, symlink } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -123,7 +124,7 @@ describe("updateImpactLog", () => {
       scope: "team",
       coreValue: "quality",
       evidence: "CORE-42",
-    });
+    }, new Date("2026-03-06T00:00:00Z"));
 
     const content = await readFile(path, "utf-8");
     expect(content).toContain("| 2026-03-05 | Shipped auth | team | quality | CORE-42 |");
@@ -1420,11 +1421,43 @@ describe("records that differ only in a version or a language", () => {
 describe("the two ways an impact entry is not written", () => {
   it("reports a placeholder achievement without a warning-worthy result", async () => {
     const path = join(tmpDir, "impact-log.md");
-    await writeFile(path, CLEAN_IMPACT_LOG);
+    const settled = `# Impact Log
 
-    expect(await updateImpactLog(path, { ...IMPACT_ENTRY, achievement: "(none)" })).toMatchObject({ status: "placeholder" });
-    expect(await updateImpactLog(path, null)).toMatchObject({ status: "placeholder" });
-    expect(await readFile(path, "utf-8")).toBe(CLEAN_IMPACT_LOG);
+## Impact Timeline
+
+| Date | Achievement | Scope | Core Value | Evidence |
+|------|-------------|-------|------------|----------|
+
+**Last significant impact:** none recorded
+**Current gap:** no significant impact recorded
+`;
+    await writeFile(path, settled);
+    const now = new Date("2026-03-06T00:00:00Z");
+
+    expect(await updateImpactLog(path, { ...IMPACT_ENTRY, achievement: "(none)" }, now))
+      .toMatchObject({ status: "placeholder", added: 0 });
+    expect(await updateImpactLog(path, null, now)).toMatchObject({ status: "placeholder", added: 0 });
+    expect(await readFile(path, "utf-8")).toBe(settled);
+  });
+
+  it("ages the gap even when the week has nothing to record", async () => {
+    const path = join(tmpDir, "impact-log.md");
+    await writeFile(path, `# Impact Log
+
+## Impact Timeline
+
+| Date | Achievement | Scope | Core Value | Evidence |
+|------|-------------|-------|------------|----------|
+| 2026-08-03 | Led the Search Revamp rollout | org | craft | TEAM-1234 |
+
+**Last significant impact:** 2026-08-03
+**Current gap:** None - recent entry added
+`);
+
+    const result = await updateImpactLog(path, null, new Date("2026-08-26T00:00:00Z"));
+
+    expect(result).toMatchObject({ status: "written", added: 0, merged: 0 });
+    expect(await readFile(path, "utf-8")).toContain("**Current gap:** 3 weeks");
   });
 });
 
@@ -2883,7 +2916,7 @@ describe("identity is every cell but the mergeable one", () => {
 `;
     await writeFile(path, file);
 
-    expect(await migrateVaultRecordsFile(path, "impact-log")).toBeNull();
+    expect(await migrateVaultRecordsFile(path, "impact-log", new Date("2026-03-06T00:00:00Z"))).toBeNull();
     expect(await readFile(path, "utf-8")).toBe(file);
   });
 
@@ -3003,7 +3036,7 @@ describe("identity keeps its cell boundaries", () => {
 `;
     await writeFile(path, file);
 
-    expect(await migrateVaultRecordsFile(path, "impact-log")).toBeNull();
+    expect(await migrateVaultRecordsFile(path, "impact-log", new Date("2026-03-06T00:00:00Z"))).toBeNull();
     expect(await readFile(path, "utf-8")).toBe(file);
   });
 
@@ -3219,8 +3252,9 @@ describe("replaying a week already recorded", () => {
 `;
     await writeFile(path, file);
 
-    // A --force regeneration of a week the file already holds.
-    expect(await updateImpactLog(path, IMPACT_ENTRY)).toMatchObject({ status: "unchanged", added: 0 });
+    // A --force regeneration of a week the file already holds, 25 weeks on.
+    expect(await updateImpactLog(path, IMPACT_ENTRY, new Date("2026-08-27T00:00:00Z")))
+      .toMatchObject({ status: "unchanged", added: 0 });
     expect(await readFile(path, "utf-8")).toBe(file);
   });
 
@@ -3238,7 +3272,8 @@ describe("replaying a week already recorded", () => {
 **Current gap:** 25 weeks
 `);
 
-    expect(await updateImpactLog(path, IMPACT_ENTRY)).toMatchObject({ status: "written", added: 1 });
+    expect(await updateImpactLog(path, IMPACT_ENTRY, new Date("2026-03-06T00:00:00Z")))
+      .toMatchObject({ status: "written", added: 1 });
 
     const content = await readFile(path, "utf-8");
     expect(content).toContain("**Last significant impact:** 2026-03-05");
@@ -3299,7 +3334,7 @@ describe("values that carry their own punctuation", () => {
     const link = "[dashboard](https://example.com/explore?q=a,b)";
     await writeFile(path, evidenceRow(link));
 
-    expect(await updateImpactLog(path, { ...IMPACT_ENTRY, evidence: link }))
+    expect(await updateImpactLog(path, { ...IMPACT_ENTRY, evidence: link }, new Date("2026-03-06T00:00:00Z")))
       .toMatchObject({ status: "unchanged" });
   });
 
@@ -3431,5 +3466,55 @@ describe("the gap line goes stale on its own", () => {
     expect(content).toContain("**Last significant impact:** 2026-01-01");
     expect(content).toContain("**Current gap:** a long time");
     expect(content).toContain("**Current gap:** 3 weeks");
+  });
+});
+
+describe("the gap ages on a file with nothing to clean", () => {
+  it("counts the weeks since the newest entry on a later run", async () => {
+    const path = join(tmpDir, "impact-log.md");
+    await writeFile(path, CLEAN_IMPACT_LOG);
+
+    // Week one: the impact happens and the gap closes.
+    const written = await updateImpactLog(
+      path,
+      { ...IMPACT_ENTRY, date: "2026-08-03" },
+      new Date("2026-08-04T00:00:00Z"),
+    );
+    expect(written).toMatchObject({ status: "written", added: 1 });
+    expect(await readFile(path, "utf-8")).toContain("**Current gap:** None - recent entry added");
+
+    // Three weeks later, with nothing new to record and nothing to clean.
+    const later = new Date("2026-08-26T00:00:00Z");
+    const aged = await updateImpactLog(path, null, later);
+    expect(aged).toMatchObject({ status: "written", added: 0, merged: 0 });
+
+    const content = await readFile(path, "utf-8");
+    expect(content).toContain("**Last significant impact:** 2026-08-03");
+    expect(content).toContain("**Current gap:** 3 weeks");
+
+    // And the cleanup agrees, without taking a backup for a status line.
+    expect(await migrateVaultRecordsFile(path, "impact-log", later)).toBeNull();
+    expect(existsSync(`${path}.pre-dedupe.bak`)).toBe(false);
+  });
+
+  it("ages the gap from the cleanup when no week is generated", async () => {
+    const path = join(tmpDir, "impact-log.md");
+    await writeFile(path, `# Impact Log
+
+## Impact Timeline
+
+| Date | Achievement | Scope | Core Value | Evidence |
+|------|-------------|-------|------------|----------|
+| 2026-08-03 | Led the Search Revamp rollout | org | craft | TEAM-1234 |
+
+**Last significant impact:** 2026-08-03
+**Current gap:** None - recent entry added
+`);
+
+    const result = await migrateVaultRecordsFile(path, "impact-log", new Date("2026-08-26T00:00:00Z"));
+
+    expect(result).toMatchObject({ placeholders: 0, duplicates: 0, backup: "" });
+    expect(await readFile(path, "utf-8")).toContain("**Current gap:** 3 weeks");
+    expect(existsSync(`${path}.pre-dedupe.bak`)).toBe(false);
   });
 });

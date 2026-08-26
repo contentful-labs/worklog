@@ -1087,9 +1087,9 @@ function latestRowDate(rows: readonly string[]): string {
 export async function updateImpactLog(
   impactLogPath: string,
   entry: BragBookResult["impactLogEntry"],
+  now: Date = new Date(),
 ): Promise<VaultWriteResult> {
-  if (!entry || isPlaceholder(entry.achievement)) return writeResult("placeholder", { skipped: entry ? 1 : 0 });
-
+  const nothingToRecord = !entry || isPlaceholder(entry.achievement);
   const original = await readFile(impactLogPath, "utf-8");
   const eol = detectEol(original);
   const lines = toLines(original);
@@ -1097,62 +1097,50 @@ export async function updateImpactLog(
   const liveEnd = liveRegionEnd(scan);
 
   const headingIdx = findExactHeading(scan, IMPACT_TIMELINE_HEADING, liveEnd);
-  if (headingIdx === -1) return writeResult("no-section", { skipped: 1 });
+  if (headingIdx === -1) return writeResult("no-section", { skipped: nothingToRecord ? 0 : 1 });
 
   // Everything this function touches lives between the heading and the next one. A
   // table further down the file belongs to another section, and an archived era's
   // status lines record what was true when that era ended.
   const scope = sectionScope(scan, headingIdx, liveEnd);
   const table = findTableByHeader(scan, headingIdx, scope, IMPACT_HEADER);
-  if (!table) return writeResult("no-section", { skipped: 1 });
+  if (!table) return writeResult("no-section", { skipped: nothingToRecord ? 0 : 1 });
 
-  const rowEnd = Math.min(table.rowEnd, scope);
-  const rows = lines.slice(table.rowStart, rowEnd);
-  const incoming = [entry.date, entry.achievement, entry.scope, entry.coreValue, entry.evidence];
-  // The same claim on the same date is the same entry; a different scope or value is a
-  // different claim, not more evidence for this one.
-  const keys = rows.map(impactIdentity);
-  const idx = findIdentityIndex(keys, identityOf(IMPACT_IDENTITY_COLUMNS.map((column) => incoming[column])));
-
-  let changed = false;
   const counts = { added: 0, removed: 0, merged: 0, skipped: 0 };
-  if (idx === -1) {
-    lines.splice(rowEnd, 0, renderRow(incoming));
-    rows.push(renderRow(incoming));
-    counts.added = 1;
-    changed = true;
-  } else {
-    const folded = mergeRowCells(rows[idx], incoming, IMPACT_EVIDENCE_COLUMN, REFERENCE_LIST);
-    if (folded) {
-      lines[table.rowStart + idx] = folded;
-      rows[idx] = folded;
-      counts.merged = 1;
-      changed = true;
+  if (entry && !nothingToRecord) {
+    const rowEnd = Math.min(table.rowEnd, scope);
+    const rows = lines.slice(table.rowStart, rowEnd);
+    const incoming = [entry.date, entry.achievement, entry.scope, entry.coreValue, entry.evidence];
+    // The same claim on the same date is the same entry; a different scope or value is
+    // a different claim, not more evidence for this one.
+    const keys = rows.map(impactIdentity);
+    const idx = findIdentityIndex(keys, identityOf(IMPACT_IDENTITY_COLUMNS.map((column) => incoming[column])));
+
+    if (idx === -1) {
+      lines.splice(rowEnd, 0, renderRow(incoming));
+      counts.added = 1;
     } else {
-      counts.skipped = 1;
+      const folded = mergeRowCells(rows[idx], incoming, IMPACT_EVIDENCE_COLUMN, REFERENCE_LIST);
+      if (folded) {
+        lines[table.rowStart + idx] = folded;
+        counts.merged = 1;
+      } else {
+        counts.skipped = 1;
+      }
     }
+  } else {
+    counts.skipped = entry ? 1 : 0;
   }
 
-  // The status lines describe the file, not this entry. Regenerating an older week
-  // must not rewind them: the latest impact is whatever the table now says is latest,
-  // and the gap only closes when the entry just written is that latest one.
-  const latest = latestRowDate(rows);
-  if (latest.length > 0) {
-    // Recomputed: inserting the row moved every line below it, including these.
-    const shifted = maskFenced(lines);
-    const shiftedLive = liveRegionEnd(shifted);
-    const metadataEnd = sectionScope(shifted, headingIdx, shiftedLive);
-    changed = setStatusLine(lines, shifted, headingIdx, metadataEnd, shiftedLive, LAST_IMPACT_PREFIX, `${LAST_IMPACT_PREFIX} ${latest}`) || changed;
-    // Only a row that was actually added closes the gap. Replaying a week that is
-    // already recorded changes nothing, and saying "recent entry added" for it would
-    // erase a gap the user is meant to see.
-    if (counts.added === 1 && latest === entry.date) {
-      changed = setStatusLine(lines, shifted, headingIdx, metadataEnd, shiftedLive, CURRENT_GAP_PREFIX, `${CURRENT_GAP_PREFIX} ${GAP_CLOSED}`) || changed;
-    }
+  // The status lines describe the file rather than this entry, and the gap is measured
+  // from today, so it goes stale where the rows do not. Both are derived from the table
+  // on every run, which is also why replaying an older week cannot rewind them.
+  const next = refreshImpactStatus(lines.join(eol), eol, now);
+  if (next === toLines(original).join(eol)) {
+    return writeResult(nothingToRecord ? "placeholder" : "unchanged", counts);
   }
 
-  if (!changed) return writeResult("unchanged", counts);
-  await writeFile(impactLogPath, lines.join(eol), "utf-8");
+  await writeFile(impactLogPath, next, "utf-8");
   return writeResult("written", counts);
 }
 
@@ -1342,7 +1330,12 @@ export type VaultRecordKind = "memory" | "impact-log" | "work-context" | "my-pro
 export interface VaultRecordsMigration {
   placeholders: number;
   duplicates: number;
-  /** Where the file as it was before this run was kept. */
+  /**
+   * Where the file as it was before this run was kept, or "" when nothing was removed.
+   *
+   * A run that only refreshes a status line takes no backup: the gap ages every day,
+   * and a backup a day would bury the one copy that matters.
+   */
   backup: string;
 }
 
@@ -1546,7 +1539,8 @@ function cleanVaultRecords(content: string, kind: VaultRecordKind, now: Date): C
         (row) => ({ line: row, identity: impactIdentity(row), value: rowCell(row, 1) }),
         foldRowCells(IMPACT_EVIDENCE_COLUMN, REFERENCE_LIST),
       );
-      if (cleaned.placeholders === 0 && cleaned.duplicates === 0) return cleaned;
+      // Always, not only when rows moved: the gap is measured from today, so it goes
+      // stale on its own.
       return { ...cleaned, content: refreshImpactStatus(cleaned.content, eol, now) };
     }
 
@@ -1623,10 +1617,12 @@ export async function migrateVaultRecordsFile(
 
   const content = await readFile(path, "utf-8");
   const cleaned = cleanVaultRecords(content, kind, now);
-  if (cleaned.placeholders === 0 && cleaned.duplicates === 0) return null;
 
-  const backup = nextBackupPath(path);
-  await writeFile(backup, content, "utf-8");
+  const removedRecords = cleaned.placeholders > 0 || cleaned.duplicates > 0;
+  if (!removedRecords && cleaned.content === content) return null;
+
+  const backup = removedRecords ? nextBackupPath(path) : "";
+  if (removedRecords) await writeFile(backup, content, "utf-8");
   await writeFileAtomic(path, cleaned.content);
   return { placeholders: cleaned.placeholders, duplicates: cleaned.duplicates, backup };
 }
