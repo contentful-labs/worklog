@@ -593,8 +593,9 @@ export async function runWorklog(opts: {
 
     const markdown = generateMarkdown(issues, pages, prs, reviews, teamSprintItems, weekInfo, additionalContext, config, accountId);
     const workLogPath = `${paths.vault}/${weekInfo.filename}`;
-    await Bun.write(workLogPath, markdown);
-    log(`Work log written: ${workLogPath} (${markdown.length} chars)`);
+    // Held in memory until the whole week validates. Writing it here would mean a --force
+    // run destroyed the previous work log before the model had said anything usable.
+    log(`Work log built: ${workLogPath} (${markdown.length} chars, not yet written)`);
 
     // Load vault context
     log("Loading vault context files...");
@@ -652,8 +653,11 @@ export async function runWorklog(opts: {
     const bragMs = Math.round(performance.now() - bragStart);
     s.stop(`Brag book generated in ${formatDuration(bragMs)}`);
 
+    // The week is validated now, so both documents land together.
     const bragBookPath = `${paths.vault}/${wid} Brag Book.md`;
+    await Bun.write(workLogPath, markdown);
     await Bun.write(bragBookPath, bragBookContent);
+    log(`Work log written: ${workLogPath} (${markdown.length} chars)`);
     log(`Brag book written: ${bragBookPath} (${bragBookContent.length} chars)`);
     lastBragBookPath = bragBookPath;
     lastBragBookContent = bragBookContent;

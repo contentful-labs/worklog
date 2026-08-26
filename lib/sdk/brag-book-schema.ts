@@ -235,7 +235,14 @@ export function bragBookMarkdownProblem(markdown: string): string | null {
   const headings = trimmed.split("\n").filter((line) => line.startsWith("# ") || line.startsWith("## "));
   if (headings.length === 0) return "the brag book document has no markdown headings";
 
-  const hasAchievements = headings.some((line) => line.toLowerCase().includes("achievement"));
+  // Exact match on the heading text, not a substring: "## Achievement statistics" is a
+  // stats section, and accepting it would let a document with no achievements through.
+  const hasAchievements = headings.some((line) => {
+    let start = 0;
+    while (start < line.length && line[start] === "#") start++;
+    const text = line.slice(start).trim().toLowerCase();
+    return text === "achievements" || text === "achievement";
+  });
   if (!hasAchievements) return "the brag book document has no achievements section";
 
   return null;

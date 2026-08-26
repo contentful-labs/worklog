@@ -96,6 +96,13 @@ describe("validateBragBookMarkdown", () => {
     expect(() => validateBragBookMarkdown("# Notes\n\n## Stats\n\n- 0")).toThrow(/no achievements section/);
   });
 
+  it("rejects a heading that merely mentions achievements", () => {
+    // A substring test would accept this and let a document with no achievements through.
+    expect(() => validateBragBookMarkdown("# Brag Book\n\n## Achievement statistics\n\n- 0")).toThrow(
+      /no achievements section/,
+    );
+  });
+
   it("says nothing was written, because that is the whole point of failing here", () => {
     expect(() => validateBragBookMarkdown("")).toThrow(/Nothing was written to the vault/);
   });
