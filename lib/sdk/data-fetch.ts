@@ -4,10 +4,6 @@ import { normalizeTicketPrefix } from "../config";
 
 export const JIRA_ISSUE_FIELDS = ["summary", "status", "created", "updated", "resolutiondate", "description", "priority", "labels", "components", "timetracking", "comment"];
 
-function errorMessage(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
-}
-
 export interface FetchCredentials {
   atlassianApiToken: string;
   githubToken: string;
@@ -233,10 +229,12 @@ export async function fetchDataForWeek(
   const reviewQuery = `type:pr reviewed-by:${githubUsername} ${orgFilter} updated:${startDate}..${endDate}`;
 
   // Reviews are supplementary; a failed search shouldn't abort the week, but it must be reported.
-  const reviewPRs = await fetchGitHubPRs(headers, reviewQuery, "updated").catch((err: unknown) => {
-    onWarning?.(`GitHub reviewed-PR search failed, reviews will be missing from this week: ${errorMessage(err)}`);
-    return [] as GitHubPR[];
-  });
+  let reviewPRs: GitHubPR[] = [];
+  try {
+    reviewPRs = await fetchGitHubPRs(headers, reviewQuery, "updated");
+  } catch (err) {
+    onWarning?.(`GitHub reviewed-PR search failed, reviews will be missing from this week: ${String(err)}`);
+  }
 
   for (const pr of reviewPRs) {
     if (authoredUrls.has(pr.html_url)) continue;
@@ -280,14 +278,15 @@ export async function fetchDataForWeek(
   if (projectKeys.length > 0) {
     const sprintJql = buildTeamSprintJql(projectKeys, email);
     // Sprint context is supplementary; a failed query shouldn't abort the week, but it must be reported.
-    teamSprintItems = await fetchJiraIssues(
-      config, headers, sprintJql,
-      ["summary", "status", "priority", "labels", "components"],
-      { pageSize: 50, limit: 50 },
-    ).catch((err: unknown) => {
-      onWarning?.(`Team sprint query failed, sprint context will be missing from this week: ${errorMessage(err)}`);
-      return [];
-    });
+    try {
+      teamSprintItems = await fetchJiraIssues(
+        config, headers, sprintJql,
+        ["summary", "status", "priority", "labels", "components"],
+        { pageSize: 50, limit: 50 },
+      );
+    } catch (err) {
+      onWarning?.(`Team sprint query failed, sprint context will be missing from this week: ${String(err)}`);
+    }
   }
 
   return { issues, pages, prs, reviews, teamSprintItems };
