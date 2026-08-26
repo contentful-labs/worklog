@@ -57,6 +57,7 @@ const MEMORY_HEADER = ["Date", "Item", "Category", "Notes"];
 const IMPACT_HEADER = ["Date", "Achievement", "Scope", "Core Value", "Evidence"];
 
 /** Column indexes in a memory row: `| Date | Item | Category | Notes |`. */
+const MEMORY_DATE_COLUMN = 0;
 const MEMORY_ITEM_COLUMN = 1;
 const MEMORY_NOTES_COLUMN = 3;
 /** Column indexes in an impact row: `| Date | Achievement | Scope | Core Value | Evidence |`. */
@@ -311,6 +312,18 @@ function findTableByHeader(
   return null;
 }
 
+/**
+ * What makes a memory row that row.
+ *
+ * The date is part of it. Memory is where small work accumulates until it adds up to
+ * something, and the same task done again next week is another instance of it, not a
+ * repeat of the first: collapsing "Reviewed the incident runbook" on two dates into
+ * one row loses exactly the evidence the file exists to gather.
+ */
+function memoryIdentity(row: string): string {
+  return `${rowCell(row, MEMORY_DATE_COLUMN)} ${rowCell(row, MEMORY_ITEM_COLUMN)}`;
+}
+
 /** Cell of a table row, or "" when the row is shorter than expected. */
 function rowCell(row: string, index: number): string {
   return splitRow(row)[index] ?? "";
@@ -482,13 +495,25 @@ interface BulletItem {
   text: string;
 }
 
+/** True for a line that is structure rather than prose, and so ends the item above it. */
+function endsBullet(line: string): boolean {
+  const trimmed = line.trim();
+  if (trimmed.startsWith("|")) return true;
+  if (trimmed.length >= 3 && trimmed.split("").every((char) => char === "-")) return true;
+  return parseHeading(line) !== null;
+}
+
 /**
- * The bullets between `from` and `to`, each with the indented lines that continue it.
+ * The bullets between `from` and `to`, each with the lines that continue it.
  *
  * Reading only the marker line made two bullets that begin the same word for word into
- * one record, and the cleanup merged both continuations into whichever it kept. An
- * indented line this cannot attribute to the bullet above it returns null instead, and
- * the caller leaves the section alone: guessing here deletes what somebody wrote.
+ * one record, and the cleanup merged both continuations into whichever it kept. A
+ * continuation may be indented to the content column or not indented at all, which GFM
+ * calls a lazy continuation and is what a wrapped line in a hand-edited file usually
+ * looks like. Either way it ends at a blank line, the next bullet, or any structure.
+ *
+ * An indented line this cannot attribute to the bullet above it returns null instead,
+ * and the caller leaves the section alone: guessing here deletes what somebody wrote.
  */
 function readBullets(lines: readonly string[], from: number, to: number): BulletItem[] | null {
   const items: BulletItem[] = [];
@@ -502,19 +527,22 @@ function readBullets(lines: readonly string[], from: number, to: number): Bullet
       items.push(open);
       continue;
     }
-    if (line.trim().length === 0) {
+    if (line.trim().length === 0 || endsBullet(line)) {
       open = null;
       continue;
     }
 
-    const indent = line.length - line.trimStart().length;
-    if (indent < CONTINUATION_INDENT) {
-      open = null;
+    if (open && open.end === i) {
+      open.end = i + 1;
+      open.text = `${open.text} ${line.trim()}`;
       continue;
     }
-    if (!open || open.end !== i) return null;
-    open.end = i + 1;
-    open.text = `${open.text} ${line.trim()}`;
+
+    // Indented prose under no bullet is content this cannot place. Unindented prose is
+    // just the section's own text.
+    const indent = line.length - line.trimStart().length;
+    if (indent >= CONTINUATION_INDENT) return null;
+    open = null;
   }
 
   return items;
@@ -680,11 +708,17 @@ export async function updateMemory(
     const marker = removal.indexOf(GRADUATION_MARKER);
     const target = (marker === -1 ? removal : removal.slice(0, marker)).trim();
 
-    const exact = findCanonicalIndex(items, target, graduated);
-    if (exact !== -1) {
-      graduated.add(exact);
-      continue;
+    // The model names the item, not the day it happened, so every date of that item
+    // graduates together: they were all folded into the same achievement.
+    const canonical = canonicalText(target);
+    let found = false;
+    for (const [i, item] of items.entries()) {
+      if (canonicalText(item) !== canonical) continue;
+      graduated.add(i);
+      found = true;
     }
+    if (found) continue;
+
     const nearest = findRecordIndex(items, target, graduated);
     unmatchedGraduations.push({ requested: target, candidate: nearest === -1 ? "" : items[nearest] });
   }
@@ -693,7 +727,7 @@ export async function updateMemory(
   const newRows: string[] = [];
   // Rows already in the file, then rows queued by this batch, so a repeat inside one
   // batch is folded into the row queued moments earlier rather than added twice.
-  const pending = kept.map((row) => rowCell(row, MEMORY_ITEM_COLUMN));
+  const pending = kept.map(memoryIdentity);
   let merged = 0;
   let skipped = 0;
 
@@ -709,10 +743,11 @@ export async function updateMemory(
       continue;
     }
 
-    const idx = findCanonicalIndex(pending, item);
+    const identity = `${incoming[MEMORY_DATE_COLUMN] ?? ""} ${item}`;
+    const idx = findCanonicalIndex(pending, identity);
     if (idx === -1) {
       newRows.push(row);
-      pending.push(item);
+      pending.push(identity);
       continue;
     }
 
@@ -1188,10 +1223,9 @@ function cleanVaultRecords(content: string, kind: VaultRecordKind): CleanedRecor
         liveEnd,
         eol,
         MEMORY_HEADER,
-        (row) => {
-          const item = rowCell(row, MEMORY_ITEM_COLUMN);
-          return { line: row, identity: item, value: item };
-        },
+        // Identity is the date and the item together; only the item decides whether
+        // the row says anything.
+        (row) => ({ line: row, identity: memoryIdentity(row), value: rowCell(row, MEMORY_ITEM_COLUMN) }),
         foldRowCells([MEMORY_NOTES_COLUMN]),
       );
 

@@ -380,7 +380,7 @@ describe("updateMemory record identity", () => {
     await writeFile(path, CLEAN_MEMORY);
 
     await updateMemory(path, [
-      "| 2026-03-08 |   wrote the FALLBACK path for the Search Revamp indexer | project | TEAM-1234 |",
+      "| 2026-03-01 |   wrote the FALLBACK path for the Search Revamp indexer | project | TEAM-1234 |",
       "| 2026-03-08 | Reviewed the alert noise backlog with the on-call rota | support |  |",
     ], []);
 
@@ -470,10 +470,31 @@ describe("updateMemory record identity", () => {
 | 2026-03-02 | Reviewed the Search Revamp rollout plan with the platform team | project |  |
 `);
 
-    await updateMemory(path, [], ["Reviewed the Search Revamp rollout plan with the platform team (now part of: ran the rollout)"]);
+    const result = await updateMemory(path, [], [
+      "Reviewed the Search Revamp rollout plan with the platform team (now part of: ran the rollout)",
+    ]);
 
+    // The model names the item, not the day, so both dates of it graduate together.
+    expect(result.removed).toBe(2);
+    expect(await readFile(path, "utf-8")).not.toContain("rollout plan");
+  });
+
+  it("leaves an item the removal does not name", async () => {
+    const path = join(tmpDir, "memory.md");
+    await writeFile(path, `# Memory
+
+| Date | Item | Category | Notes |
+|------|------|----------|-------|
+| 2026-03-01 | Reviewed the Search Revamp rollout plan with the platform team | project |  |
+| 2026-03-02 | Reviewed the incident runbook | support |  |
+`);
+
+    const result = await updateMemory(path, [], ["Reviewed the incident runbook (now part of: on-call overhaul)"]);
+
+    expect(result.removed).toBe(1);
     const content = await readFile(path, "utf-8");
-    expect(content.match(/rollout plan/g)).toHaveLength(1);
+    expect(content).toContain("rollout plan");
+    expect(content).not.toContain("incident runbook");
   });
 
   it("compares against the current era only, leaving archived rows out of it", async () => {
@@ -727,7 +748,7 @@ _(Added automatically as significant achievements are recorded)_
 | Date | Item | Category | Notes |
 |------|------|----------|-------|
 | 2026-03-01 | Wrote the fallback path for the Search Revamp indexer | project | TEAM-1234 |
-| 2026-03-02 | Wrote the fallback path for the Search Revamp indexer | project | TEAM-1234 |
+| 2026-03-01 | Wrote the fallback path for the Search Revamp indexer | project | TEAM-1234 |
 | 2026-03-03 |  | project |  |
 
 ## Previous Team (2025) — HISTORICAL
@@ -970,7 +991,7 @@ describe("merging new evidence into a record already there", () => {
     await writeFile(path, CLEAN_MEMORY);
 
     await updateMemory(path, [
-      "| 2026-03-08 | Wrote the fallback path for the Search Revamp indexer | project | TEAM-1234, follow-up in TEAM-1240 |",
+      "| 2026-03-01 | Wrote the fallback path for the Search Revamp indexer | project | TEAM-1234, follow-up in TEAM-1240 |",
     ], []);
 
     const content = await readFile(path, "utf-8");
@@ -1193,7 +1214,7 @@ describe("migration carries evidence out of the rows it drops", () => {
 | Date | Item | Category | Notes |
 |------|------|----------|-------|
 | 2026-03-01 | Wrote the fallback path for the indexer | project | TEAM-1234 |
-| 2026-03-02 | Wrote the fallback path for the indexer | project | follow-up in TEAM-1240 |
+| 2026-03-01 | Wrote the fallback path for the indexer | project | follow-up in TEAM-1240 |
 `);
 
     const result = await migrateVaultRecordsFile(path, "memory");
@@ -1468,7 +1489,7 @@ describe("an ambiguous graduation removes nothing", () => {
     expect(content).toContain("frontend migration");
   });
 
-  it("still removes one of two rows that are the same record twice", async () => {
+  it("removes every date of the item a graduation names", async () => {
     const path = join(tmpDir, "memory.md");
     await writeFile(path, `# Memory
 
@@ -1478,10 +1499,12 @@ describe("an ambiguous graduation removes nothing", () => {
 | 2026-03-02 | Reviewed the Search Revamp rollout plan with the platform team | project |  |
 `);
 
-    await updateMemory(path, [], ["Reviewed the Search Revamp rollout plan with the platform team (now part of: ran the rollout)"]);
+    const result = await updateMemory(path, [], [
+      "Reviewed the Search Revamp rollout plan with the platform team (now part of: ran the rollout)",
+    ]);
 
-    const content = await readFile(path, "utf-8");
-    expect(content.match(/rollout plan/g)).toHaveLength(1);
+    expect(result.removed).toBe(2);
+    expect(await readFile(path, "utf-8")).not.toContain("rollout plan");
   });
 });
 
@@ -1890,7 +1913,7 @@ describe("what a batch did", () => {
     await writeFile(path, CLEAN_MEMORY);
 
     const result = await updateMemory(path, [
-      "| 2026-03-08 | Wrote the fallback path for the Search Revamp indexer | project | TEAM-1234, TEAM-1240 |",
+      "| 2026-03-01 | Wrote the fallback path for the Search Revamp indexer | project | TEAM-1234, TEAM-1240 |",
       "| 2026-03-08 | Cut the search index rebuild from 40 to 12 minutes | project | TEAM-1250 |",
       "| 2026-03-08 | (none) | project |  |",
     ], []);
@@ -1955,7 +1978,7 @@ ${row}
 
       // Same item, more evidence: the Notes cell changes and nothing else may.
       const result = await updateMemory(path, [
-        `| 2026-03-08 | Wrote the fallback path | ignored | TEAM-1234, TEAM-1240 |`,
+        `| 2026-03-01 | Wrote the fallback path | ignored | TEAM-1234, TEAM-1240 |`,
       ], []);
       expect(result.merged).toBe(1);
 
@@ -1972,7 +1995,7 @@ ${row}
 | Date | Item | Category | Notes |
 |------|------|----------|-------|
 ${survivor}
-| 2026-03-02 | Wrote the fallback path | \\*literal\\* | TEAM-1240 |
+| 2026-03-01 | Wrote the fallback path | \\*literal\\* | TEAM-1240 |
 `);
 
     expect((await migrateVaultRecordsFile(path, "memory"))?.duplicates).toBe(1);
@@ -2062,7 +2085,7 @@ describe("a table this code does not own", () => {
 
   it("leaves that table alone during the cleanup", async () => {
     const path = join(tmpDir, "memory.md");
-    await writeFile(path, `${WITH_SETTINGS_TABLE}| 2026-03-02 | Wrote the fallback path for the Search Revamp indexer | project | TEAM-1240 |\n`);
+    await writeFile(path, `${WITH_SETTINGS_TABLE}| 2026-03-01 | Wrote the fallback path for the Search Revamp indexer | project | TEAM-1240 |\n`);
 
     expect((await migrateVaultRecordsFile(path, "memory"))?.duplicates).toBe(1);
 
@@ -2118,7 +2141,7 @@ ${row}
 `);
 
     const result = await updateMemory(path, [
-      "| 2026-03-08 | Wrote the fallback path | project | TEAM-1240 |",
+      "| 2026-03-01 | Wrote the fallback path | project | TEAM-1240 |",
     ], []);
     expect(result.merged).toBe(1);
 
@@ -2157,7 +2180,7 @@ ${row}
 | 2026-03-01 | Wrote the fallback path | project | C:\\\\Users\\\\example |
 `);
 
-    await updateMemory(path, ["| 2026-03-08 | Wrote the fallback path | project | TEAM-1240 |"], []);
+    await updateMemory(path, ["| 2026-03-01 | Wrote the fallback path | project | TEAM-1240 |"], []);
 
     const row = (await readFile(path, "utf-8")).split("\n").find((line) => line.includes("fallback path")) ?? "";
     expect(splitRow(row)[3]).toBe("C:\\Users\\example, TEAM-1240");
@@ -2172,7 +2195,7 @@ ${row}
 | 2026-03-01 | Wrote the fallback path | project | \\*literal\\* |
 `);
 
-    const rows = ["| 2026-03-08 | Wrote the fallback path | project | TEAM-1240 |"];
+    const rows = ["| 2026-03-01 | Wrote the fallback path | project | TEAM-1240 |"];
     await updateMemory(path, rows, []);
     const first = await readFile(path, "utf-8");
     await updateMemory(path, rows, []);
@@ -2445,5 +2468,145 @@ aliases:
     const content = await readFile(path, "utf-8");
     expect(content).toContain('- "## Key Strengths"');
     expect(content.indexOf("Runs multi-team rollouts")).toBeGreaterThan(content.indexOf("# My Profile"));
+  });
+});
+
+describe("the same small work done again", () => {
+  const RECURRING = `# Memory
+
+| Date | Item | Category | Notes |
+|------|------|----------|-------|
+| 2026-03-01 | Reviewed the incident runbook | support |  |
+| 2026-03-08 | Reviewed the incident runbook | support |  |
+`;
+
+  it("keeps each date of a recurring item through the cleanup", async () => {
+    const path = join(tmpDir, "memory.md");
+    await writeFile(path, RECURRING);
+
+    expect(await migrateVaultRecordsFile(path, "memory")).toBeNull();
+    expect(await readFile(path, "utf-8")).toBe(RECURRING);
+  });
+
+  it("writes this week's instance of an item recorded before", async () => {
+    const path = join(tmpDir, "memory.md");
+    await writeFile(path, RECURRING);
+
+    const result = await updateMemory(path, ["| 2026-03-15 | Reviewed the incident runbook | support |  |"], []);
+
+    expect(result).toMatchObject({ status: "written", added: 1 });
+    expect((await readFile(path, "utf-8")).match(/Reviewed the incident runbook/g)).toHaveLength(3);
+  });
+
+  it("still refuses the same instance twice", async () => {
+    const path = join(tmpDir, "memory.md");
+    await writeFile(path, RECURRING);
+
+    const result = await updateMemory(path, ["| 2026-03-08 | Reviewed the incident runbook | support |  |"], []);
+
+    expect(result).toMatchObject({ status: "unchanged", added: 0 });
+    expect(await readFile(path, "utf-8")).toBe(RECURRING);
+  });
+
+  it("graduates every date of it at once", async () => {
+    const path = join(tmpDir, "memory.md");
+    await writeFile(path, RECURRING);
+
+    const result = await updateMemory(path, [], ["Reviewed the incident runbook (now part of: on-call overhaul)"]);
+
+    expect(result.removed).toBe(2);
+    expect(await readFile(path, "utf-8")).not.toContain("incident runbook");
+  });
+});
+
+describe("bullets continued without indentation", () => {
+  const LAZY = `# My Profile
+
+## Key Strengths
+
+- Leads release reviews
+across search
+- Leads release reviews
+across billing
+
+---
+
+*Last updated: 2026-02-01*
+`;
+
+  it("keeps two bullets whose difference is on the unindented next line", async () => {
+    const path = join(tmpDir, "my-profile.md");
+    await writeFile(path, LAZY);
+
+    expect(await migrateVaultRecordsFile(path, "my-profile")).toBeNull();
+    expect(await readFile(path, "utf-8")).toBe(LAZY);
+  });
+
+  it("treats the lazy continuation as part of the record", async () => {
+    const path = join(tmpDir, "my-profile.md");
+    await writeFile(path, LAZY);
+
+    // The whole item, written as one line: already there.
+    expect(await updateProfile(path, { achievement: "Reviews", bulletPoint: "Leads release reviews across search" }))
+      .toMatchObject({ status: "unchanged" });
+    // The marker line alone is a different record.
+    expect(await updateProfile(path, { achievement: "Reviews", bulletPoint: "Leads release reviews" }))
+      .toMatchObject({ status: "written" });
+  });
+
+  it("does not absorb a paragraph separated by a blank line", async () => {
+    const path = join(tmpDir, "work-context.md");
+    await writeFile(path, `# Work Context
+
+## Organizational Notes
+
+- **process:** Release trains ship on Tuesdays _(TEAM-1200)_
+
+Everything below here is prose, not part of the note above.
+
+---
+
+*Last updated: 2026-02-01*
+`);
+
+    // Were the paragraph absorbed, the note's identity would include it and this
+    // would be written as a new bullet instead of folding its source in.
+    const result = await updateWorkContext(path, [
+      { category: "process", info: "Release trains ship on Tuesdays", source: "TEAM-1300" },
+    ], new Date("2026-03-08T00:00:00Z"));
+
+    expect(result).toMatchObject({ status: "written", added: 0, merged: 1 });
+    const content = await readFile(path, "utf-8");
+    expect(content).toContain("_(TEAM-1200, TEAM-1300)_");
+    expect(content).toContain("Everything below here is prose");
+  });
+
+  it("stops a bullet at a table row or a heading", async () => {
+    const path = join(tmpDir, "work-context.md");
+    await writeFile(path, `# Work Context
+
+## Organizational Notes
+
+- **process:** Release trains ship on Tuesdays _(TEAM-1200)_
+| Date | Note |
+|------|------|
+
+### Previous era
+
+- **process:** Release trains ship on Tuesdays _(TEAM-1201)_
+
+---
+
+*Last updated: 2026-02-01*
+`);
+
+    // Both notes are the same record, so the cleanup collapses them; that only works
+    // if neither swallowed the table or the subsection heading.
+    expect((await migrateVaultRecordsFile(path, "work-context"))?.duplicates).toBe(1);
+
+    const content = await readFile(path, "utf-8");
+    expect(content).toContain("| Date | Note |");
+    expect(content).toContain("### Previous era");
+    expect(content).toContain("_(TEAM-1200, TEAM-1201)_");
   });
 });
