@@ -21,9 +21,13 @@ export function isTableSeparator(line: string): boolean {
 }
 
 /** Split a table row into trimmed cells, honouring `\\` and `\|` escapes. */
-export function splitRow(line: string): string[] {
+export function splitRow(rawLine: string): string[] {
+  // GFM allows a row without the outer pipes; only drop the empty strings that a real
+  // leading or trailing pipe produces, or the last cell of an unterminated row is lost.
+  const line = rawLine.trim();
   const cells: string[] = [];
   let current = "";
+  let lastDelimiter = -1;
   for (let i = 0; i < line.length; i++) {
     if (line[i] === "\\" && (line[i + 1] === "|" || line[i + 1] === "\\")) {
       current += line[i + 1];
@@ -31,13 +35,17 @@ export function splitRow(line: string): string[] {
     } else if (line[i] === "|") {
       cells.push(current);
       current = "";
+      lastDelimiter = i;
     } else {
       current += line[i];
     }
   }
   cells.push(current);
-  // Drop the empty strings either side of the outer pipes.
-  return cells.slice(1, -1).map((cell) => cell.trim());
+  // The scanner already knows which pipes were delimiters, so a cell ending in a literal
+  // backslash cannot be mistaken for an escaped closing pipe.
+  const start = line.startsWith("|") ? 1 : 0;
+  const end = line.length > 1 && lastDelimiter === line.length - 1 ? cells.length - 1 : cells.length;
+  return cells.slice(start, end).map((cell) => cell.trim());
 }
 
 /**

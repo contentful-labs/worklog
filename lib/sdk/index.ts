@@ -61,10 +61,11 @@ export { parseBragBookResult, parseReviewCycle, ensureBragBookFrontmatter } from
 // Focus tracking
 export type { FocusItem, FocusStatusUpdate, ApplyFocusOptions, ApplyFocusResult, FocusMigrationResult } from "./focus";
 export {
-  FOCUS_OPEN_STATUS, FOCUS_LAPSED_STATUS, FOCUS_TRACKING_TEMPLATE,
-  DEFAULT_LAPSE_AFTER, DEFAULT_INJECT_CAP,
+  FOCUS_OPEN_STATUS, FOCUS_ONGOING_STATUS, FOCUS_LAPSED_STATUS, FOCUS_TRACKING_TEMPLATE,
+  DEFAULT_LAPSE_AFTER, DEFAULT_INJECT_CAP, isOpenFocusStatus,
   normalizeFocusText, focusSimilarity, parseFocusItems, needsFocusMigration,
-  migrateFocusTracking, selectOpenFocusItems, summarizeFocusHistory, applyFocusUpdates,
+  migrateFocusTracking, lapseStaleOpenFocusItems, needsFocusFormatUpgrade, upgradeFocusFormat, focusFormatVersion, FOCUS_FORMAT_VERSION,
+  selectOpenFocusItems, summarizeFocusHistory, applyFocusUpdates,
 } from "./focus";
 
 // Markdown tables
@@ -78,6 +79,7 @@ export {
 } from "./prep";
 
 // Vault updates
+export type { FocusFileMigration } from "./vault-updates";
 export {
   updateMemory, updateImpactLog, updateWorkContext, updateProfile,
   updateFocusTracking, migrateFocusTrackingFile,

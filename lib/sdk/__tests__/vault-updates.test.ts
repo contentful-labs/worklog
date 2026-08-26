@@ -269,8 +269,8 @@ describe("migrateFocusTrackingFile", () => {
 | 2026-W10 | Newest still open | pending | |
 `);
 
-    const result = await migrateFocusTrackingFile(path);
-    expect(result).toEqual({ assigned: 3, collapsed: 1, lapsed: 1 });
+    const result = await migrateFocusTrackingFile(path, new Date("2026-03-11T12:00:00Z")); // 2026-W11
+    expect(result).toMatchObject({ kind: "ids", backup: `${path}.pre-ids.bak`, assigned: 3, collapsed: 1, lapsed: 1 });
 
     const content = await readFile(path, "utf-8");
     expect(content).toContain("| 2026-W01.1 | 2026-W01 | Ancient still open | lapsed |");
@@ -279,5 +279,25 @@ describe("migrateFocusTrackingFile", () => {
 
     // second run is a no-op
     expect(await migrateFocusTrackingFile(path)).toBeNull();
+  });
+
+  it("upgrades a 2.0.0 id-keyed file once, lapsing stale open rows, with its own backup", async () => {
+    const path = join(tmpDir, "focus.md");
+    await writeFile(path, `# Focus Tracking
+
+| ID | Week | Focus Item | Status | Reviews | Notes |
+|---|---|---|---|---|---|
+| 2026-W08.1 | 2026-W08 | Stale ongoing | ongoing | 0 |  |
+| 2026-W34.1 | 2026-W34 | Recent | pending | 0 |  |
+| 2026-W35.1 | 2026-W35 | Current | ongoing | 0 |  |
+`);
+    const now = new Date("2026-08-26T12:00:00Z"); // 2026-W35
+    expect(await migrateFocusTrackingFile(path, now)).toMatchObject({ kind: "format", backup: `${path}.pre-format2.bak`, lapsed: 1 });
+    const content = await readFile(path, "utf-8");
+    expect(content).toContain("worklog-focus-format: 2");
+    expect(content).toContain("| Stale ongoing | lapsed |");
+    expect(content).toContain("| Current | ongoing | 0 |");
+    expect(await readFile(`${path}.pre-format2.bak`, "utf-8")).not.toContain("worklog-focus-format");
+    expect(await migrateFocusTrackingFile(path, now)).toBeNull();
   });
 });
