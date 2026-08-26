@@ -67,9 +67,9 @@ function isWordChar(char: string): boolean {
  * Reduce text to words, keeping the punctuation that is part of a name.
  *
  * Stripping every symbol made "Builds C++ toolchains" and "Builds C# toolchains" the
- * same sentence, so the second one could never be written. A `+` or `#` attached to a
- * word stays, and a `.` stays only between two characters of one name (node.js, 1.22),
- * never as the full stop ending a sentence.
+ * same sentence, and split TEAM-1234 into two tokens that any other ticket also has.
+ * A `+` or `#` attached to a word stays; a `.` or `-` stays between two characters of
+ * one name, never as the punctuation that ends a word.
  *
  * A scan rather than a pattern: this is model output, and CodeQL flags regexes over it.
  */
@@ -87,7 +87,9 @@ function toWords(text: string): string {
       out += char;
       continue;
     }
-    if (char === "." && previous !== " " && isWordChar(text[i + 1] ?? " ")) {
+    // A dot or a hyphen inside a name binds it together: node.js, 1.22, TEAM-1234.
+    // Neither survives at the end of a word, where it is punctuation.
+    if ((char === "." || char === "-") && previous !== " " && isWordChar(text[i + 1] ?? " ")) {
       out += char;
       continue;
     }
@@ -126,7 +128,9 @@ const NEGATIONS = new Set(["not", "no", "never", "nor", "cannot", "without"]);
  */
 function isDistinguishing(token: string): boolean {
   for (const char of token) {
-    if ((char >= "0" && char <= "9") || char === "+" || char === "#" || char === ".") return true;
+    if ((char >= "0" && char <= "9") || char === "+" || char === "#" || char === "." || char === "-") {
+      return true;
+    }
   }
   return false;
 }
@@ -162,26 +166,28 @@ function isNegated(tokens: ReadonlySet<string>): boolean {
 const MIN_TOKENS_FOR_CONTAINMENT = 4;
 
 /**
- * Score at or above which one text is taken to be a restatement of another.
+ * Score at or above which one text may be taken as a restatement of another.
+ *
+ * Lookups only: finding the row a model named, or the focus item it re-raised. It must
+ * never decide that a new record is not new. Four review rounds each found another way
+ * for that to go wrong (negation, contractions, C++ against C#, one version against
+ * another, a general statement against a specific one), and the damage in a real vault
+ * was exact repeats, not rewordings. Inserts compare canonical text and nothing else.
  *
  * Tuned on real focus items, where the costly outcome is a miss: an unmatched item
- * stays open forever, and a false match only merges two commitments the coach can
- * still see. Use it for lookups, not for rejecting new records.
+ * stays open forever.
  */
 export const SIMILARITY_THRESHOLD = 0.6;
 
 /**
- * Score at or above which two prose records are the same fact written twice.
+ * How far ahead of its nearest rival a lookup match has to be.
  *
- * Higher than the lookup threshold because rejecting an insert throws information
- * away silently. Measured over 163 real organizational notes, scoring each against
- * all the others: 37 of them would be rejected at 0.60, 30 at 0.70, 22 from 0.75
- * through 0.85, and 11 at 0.90. Reading the pairs, everything scoring 0.85 or above
- * was a genuine rewording of the same fact, while the 0.60 to 0.75 band was mostly
- * distinct notes that share vocabulary because they describe the same system.
- * Do not lower this back to 0.6.
+ * "Ship Search Revamp migration" scores the same against a backend row and a frontend
+ * row. Picking either would delete a row the model did not name, so an ambiguous
+ * lookup finds nothing and the rows stay where they are.
  */
-export const PROSE_SIMILARITY_THRESHOLD = 0.85;
+export const LOOKUP_MARGIN = 0.15;
+
 
 /**
  * How much two suggestions are the same thing said differently.
@@ -202,12 +208,15 @@ export function textSimilarity(a: string, b: string): number {
   if (isNegated(left) !== isNegated(right)) return 0;
 
   // Versions, languages and ticket numbers are the whole difference between two records
-  // that otherwise read alike, and the short ones survive no other filter. When each
-  // text names one the other does not, they are different records: C++ against C#, Go
-  // 1.22 against Go 1.23. One naming a superset of the other's (the same ticket plus a
-  // second) is still the same record elaborated, which is what the score is for.
+  // that otherwise read alike, and the short ones survive no other filter. A statement
+  // about Go and a statement about Go 1.22 are not the same statement, so naming one at
+  // all when the other names none already separates them. Where both name something,
+  // each naming one the other does not separates them too: C++ against C#, 1.22 against
+  // 1.23. One naming a superset of the other's is the same record elaborated, which is
+  // what the score exists to recognise.
   const leftNames = distinguishingTokens(left);
   const rightNames = distinguishingTokens(right);
+  if ((leftNames.size === 0) !== (rightNames.size === 0)) return 0;
   if (!isSubsetOf(leftNames, rightNames) && !isSubsetOf(rightNames, leftNames)) return 0;
 
   let shared = 0;

@@ -1,11 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { PROSE_SIMILARITY_THRESHOLD, SIMILARITY_THRESHOLD, normalizeText, textSimilarity } from "../text-similarity";
+import { SIMILARITY_THRESHOLD, canonicalText, normalizeText, textSimilarity } from "../text-similarity";
 import { normalizeFocusText, focusSimilarity } from "../focus";
 
 describe("normalizeText", () => {
   it("drops link targets, markdown and punctuation", () => {
     expect(normalizeText("Get **[TEAM-1234](https://example.com/TEAM-1234)** through [[review]]"))
-      .toBe("get team 1234 through review");
+      .toBe("get team-1234 through review");
   });
 
   it("is idempotent, so already-normalized text can be compared again", () => {
@@ -55,12 +55,11 @@ describe("thresholds", () => {
     "The ingest service normalizes search-relevant events before they reach the indexer",
   ];
 
-  it("puts notes about the same system but different facts between the two thresholds", () => {
-    // Rejecting these on insert would lose real information, which is why records use
-    // the higher prose threshold and only lookups use the lower one.
+  it("clears the lookup threshold for two notes that say different things", () => {
+    // The score cannot tell these apart, which is the whole reason nothing on the
+    // insert path consults it: rejecting the second would lose what it says.
     const score = textSimilarity(relatedButDistinct[0], relatedButDistinct[1]);
-    expect(score).toBeGreaterThanOrEqual(SIMILARITY_THRESHOLD);
-    expect(score).toBeLessThan(PROSE_SIMILARITY_THRESHOLD);
+    expect(score).toBeGreaterThan(0.5);
   });
 
   it("scores a fact and its negation as unrelated", () => {
@@ -83,7 +82,7 @@ describe("thresholds", () => {
       "Release readiness reviews moved from Tuesday to Wednesday",
       "Release readiness reviews now happen on Wednesday, moved from Tuesday",
     );
-    expect(score).toBeGreaterThanOrEqual(PROSE_SIMILARITY_THRESHOLD);
+    expect(score).toBeGreaterThanOrEqual(SIMILARITY_THRESHOLD);
   });
 });
 
@@ -152,11 +151,32 @@ describe("versions, languages and ticket numbers", () => {
       "Close the Search Revamp correctness loop through TEAM-1234",
       "Close the Search Revamp correctness loop through TEAM-1234 and TEAM-1235",
     );
-    expect(score).toBeGreaterThanOrEqual(PROSE_SIMILARITY_THRESHOLD);
+    expect(score).toBeGreaterThanOrEqual(SIMILARITY_THRESHOLD);
   });
 
   it("still reads a plain rewording as the same record", () => {
     expect(textSimilarity("Release trains ship on Tuesdays", "Release trains now ship Tuesdays"))
-      .toBeGreaterThanOrEqual(PROSE_SIMILARITY_THRESHOLD);
+      .toBeGreaterThanOrEqual(SIMILARITY_THRESHOLD);
+  });
+});
+
+describe("canonical equality, the insert-side test", () => {
+  it("folds only case and spacing", () => {
+    expect(canonicalText("  Release   trains SHIP on Tuesdays ")).toBe("release trains ship on tuesdays");
+    expect(canonicalText("Builds C++ toolchains")).not.toBe(canonicalText("Builds C# toolchains"));
+    expect(canonicalText("Release trains ship on Tuesdays"))
+      .not.toBe(canonicalText("Release trains ship on Tuesdays and require manager approval"));
+  });
+});
+
+describe("a name on one side only", () => {
+  it("scores a general statement and a specific one as unrelated", () => {
+    expect(textSimilarity("Services run on Go in production", "Services run on Go 1.22 in production")).toBe(0);
+    expect(textSimilarity("Ship the rollout", "Ship the TEAM-1234 rollout")).toBe(0);
+  });
+
+  it("keeps a ticket key atomic so two keys never share a token", () => {
+    expect(normalizeText("TEAM-1234 and CORE-1234")).toBe("team-1234 and core-1234");
+    expect(textSimilarity("Ship the TEAM-1234 rollout to every space", "Ship the CORE-1234 rollout to every space")).toBe(0);
   });
 });

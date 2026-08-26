@@ -36,7 +36,7 @@ const FILE = `# Focus Tracking
 describe("normalizeFocusText / focusSimilarity", () => {
   it("strips markdown so links and emphasis do not affect comparison", () => {
     expect(normalizeFocusText("Get **[TEAM-1234](https://x/y)** through [[review]]"))
-      .toBe("get team 1234 through review");
+      .toBe("get team-1234 through review");
   });
 
   it("scores real rewordings of the same suggestion as the same item", () => {
