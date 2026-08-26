@@ -329,6 +329,81 @@ function rowCell(row: string, index: number): string {
   return splitRow(row)[index] ?? "";
 }
 
+interface Fence {
+  marker: string;
+  length: number;
+  info: string;
+}
+
+/** Read a fence line: up to three leading spaces, then three or more backticks or tildes. */
+function readFence(line: string): Fence | null {
+  let i = 0;
+  while (i < 3 && line[i] === " ") i++;
+
+  const marker = line[i];
+  if (marker !== "`" && marker !== "~") return null;
+
+  let length = 0;
+  while (line[i + length] === marker) length++;
+  if (length < 3) return null;
+
+  const info = line.slice(i + length).trim();
+  // A backtick fence's info string may not itself contain a backtick.
+  if (marker === "`" && info.includes("`")) return null;
+  return { marker, length, info };
+}
+
+/**
+ * The file's lines with everything inside a fenced code block blanked out.
+ *
+ * A vault file can hold an example of the very shape this code maintains: a fenced
+ * block showing "## Key Strengths" and a "- (none)" under it. Read as structure, the
+ * writers aimed at the example and the cleanup deleted a line out of it. Blanking the
+ * fenced lines keeps every index aligned with the real file, so locating structure and
+ * editing it stay in step.
+ */
+function maskFenced(lines: readonly string[]): string[] {
+  const masked = [...lines];
+  let open: { start: number; fence: Fence } | null = null;
+
+  for (const [i, line] of lines.entries()) {
+    const fence = readFence(line);
+    if (!open) {
+      if (fence) open = { start: i, fence };
+      continue;
+    }
+    // A closing fence matches the character, is at least as long, and carries no info.
+    if (fence && fence.marker === open.fence.marker && fence.length >= open.fence.length && fence.info.length === 0) {
+      for (let j = open.start; j <= i; j++) masked[j] = "";
+      open = null;
+    }
+  }
+  // An unclosed fence runs to the end of the file.
+  if (open) for (let j = open.start; j < masked.length; j++) masked[j] = "";
+
+  return masked;
+}
+
+/**
+ * True for a GFM thematic break: up to three leading spaces, then three or more of the
+ * same marker with nothing but spacing between them. A fourth leading space makes it a
+ * code line instead.
+ */
+function isThematicBreak(line: string): boolean {
+  let i = 0;
+  while (i < 3 && line[i] === " ") i++;
+
+  const marker = line[i];
+  if (marker !== "-" && marker !== "*" && marker !== "_") return false;
+
+  let count = 0;
+  for (const char of line.slice(i)) {
+    if (char === marker) count++;
+    else if (char !== " " && char !== "\t") return false;
+  }
+  return count >= 3;
+}
+
 /**
  * Index of the line closing a leading YAML frontmatter block, or -1 when there is none.
  * Delimiters sit at column 0; an indented `---` is content inside the block, not its end.
@@ -419,7 +494,7 @@ function endsSection(line: string): boolean {
 /** Where a section ends: the next heading of its own level or higher, a rule, or the end. */
 function sectionEnd(lines: readonly string[], headingIdx: number): number {
   for (let i = headingIdx + 1; i < lines.length; i++) {
-    if (endsSection(lines[i]) || lines[i].trim() === "---") return i;
+    if (endsSection(lines[i]) || isThematicBreak(lines[i])) return i;
   }
   return lines.length;
 }
@@ -459,13 +534,14 @@ function sectionScope(lines: readonly string[], headingIdx: number, limit: numbe
  */
 function replaceFirstLine(
   lines: string[],
+  scan: readonly string[],
   from: number,
   to: number,
   prefix: string,
   replacement: string,
 ): boolean {
   for (let i = Math.max(from, 0); i < to; i++) {
-    if (!lines[i].startsWith(prefix)) continue;
+    if (!scan[i].startsWith(prefix)) continue;
     if (lines[i] === replacement) return false;
     lines[i] = replacement;
     return true;
@@ -497,10 +573,8 @@ interface BulletItem {
 
 /** True for a line that is structure rather than prose, and so ends the item above it. */
 function endsBullet(line: string): boolean {
-  const trimmed = line.trim();
-  if (trimmed.startsWith("|")) return true;
-  if (trimmed.length >= 3 && trimmed.split("").every((char) => char === "-")) return true;
-  return parseHeading(line) !== null;
+  if (line.trim().startsWith("|")) return true;
+  return isThematicBreak(line) || parseHeading(line) !== null;
 }
 
 /**
@@ -682,13 +756,16 @@ export async function updateMemory(
   const original = existsSync(memoryPath) ? await readFile(memoryPath, "utf-8") : MEMORY_TEMPLATE;
   const eol = detectEol(original);
   const lines = toLines(original);
-  const liveEnd = liveRegionEnd(lines);
+  // Structure is located in the masked copy and edits are applied to the real lines;
+  // the two stay index-aligned.
+  const scan = maskFenced(lines);
+  const liveEnd = liveRegionEnd(scan);
 
   // The live era's memory table, or nothing. A memory.md whose only such table sits
   // under an archived heading has no live table: appending there would file this
   // week's work under a team the user left, and a graduation would delete a row from
   // that record.
-  const table = findTableByHeader(lines, bodyStart(lines), liveEnd, MEMORY_HEADER);
+  const table = findTableByHeader(scan, bodyStart(scan), liveEnd, MEMORY_HEADER);
   if (!table) {
     const skipped = itemsToAdd.length + itemsToRemove.length;
     const requested = itemsToRemove.map((removal) => ({ requested: removal, candidate: "" }));
@@ -810,16 +887,17 @@ export async function updateImpactLog(
   const original = await readFile(impactLogPath, "utf-8");
   const eol = detectEol(original);
   const lines = toLines(original);
-  const liveEnd = liveRegionEnd(lines);
+  const scan = maskFenced(lines);
+  const liveEnd = liveRegionEnd(scan);
 
-  const headingIdx = findExactHeading(lines, IMPACT_TIMELINE_HEADING, liveEnd);
+  const headingIdx = findExactHeading(scan, IMPACT_TIMELINE_HEADING, liveEnd);
   if (headingIdx === -1) return writeResult("no-section", { skipped: 1 });
 
   // Everything this function touches lives between the heading and the next one. A
   // table further down the file belongs to another section, and an archived era's
   // status lines record what was true when that era ended.
-  const scope = sectionScope(lines, headingIdx, liveEnd);
-  const table = findTableByHeader(lines, headingIdx, scope, IMPACT_HEADER);
+  const scope = sectionScope(scan, headingIdx, liveEnd);
+  const table = findTableByHeader(scan, headingIdx, scope, IMPACT_HEADER);
   if (!table) return writeResult("no-section", { skipped: 1 });
 
   const rowEnd = Math.min(table.rowEnd, scope);
@@ -854,10 +932,11 @@ export async function updateImpactLog(
   const latest = latestRowDate(rows);
   if (latest.length > 0) {
     // Recomputed: inserting the row moved every line below it, including these.
-    const metadataEnd = sectionScope(lines, headingIdx, liveRegionEnd(lines));
-    changed = replaceFirstLine(lines, headingIdx, metadataEnd, LAST_IMPACT_PREFIX, `${LAST_IMPACT_PREFIX} ${latest}`) || changed;
+    const shifted = maskFenced(lines);
+    const metadataEnd = sectionScope(shifted, headingIdx, liveRegionEnd(shifted));
+    changed = replaceFirstLine(lines, shifted, headingIdx, metadataEnd, LAST_IMPACT_PREFIX, `${LAST_IMPACT_PREFIX} ${latest}`) || changed;
     if (latest === entry.date) {
-      changed = replaceFirstLine(lines, headingIdx, metadataEnd, CURRENT_GAP_PREFIX, `${CURRENT_GAP_PREFIX} None - recent entry added`) || changed;
+      changed = replaceFirstLine(lines, shifted, headingIdx, metadataEnd, CURRENT_GAP_PREFIX, `${CURRENT_GAP_PREFIX} None - recent entry added`) || changed;
     }
   }
 
@@ -876,15 +955,16 @@ export async function updateWorkContext(
   const original = await readFile(workContextPath, "utf-8");
   const eol = detectEol(original);
   const lines = toLines(original);
-  const liveEnd = liveRegionEnd(lines);
+  const scan = maskFenced(lines);
+  const liveEnd = liveRegionEnd(scan);
 
   // Exact, like the cleanup: a section merely named like this one belongs to someone
   // else, and notes filed under it are notes the user will not find again.
-  const headingIdx = findExactHeading(lines, ORG_NOTES_HEADING, liveEnd);
+  const headingIdx = findExactHeading(scan, ORG_NOTES_HEADING, liveEnd);
   if (headingIdx === -1) return writeResult("no-section", { skipped: updates.length });
 
-  const end = Math.min(sectionEnd(lines, headingIdx), liveEnd);
-  const bullets = readBullets(lines, headingIdx + 1, end);
+  const end = Math.min(sectionEnd(scan, headingIdx), liveEnd);
+  const bullets = readBullets(scan, headingIdx + 1, end);
   if (!bullets) return writeResult("no-section", { skipped: updates.length });
 
   // Notes already in the file, then notes queued by this batch. Queued notes stay
@@ -938,7 +1018,8 @@ export async function updateWorkContext(
     // The stamp says when a note was last added, so it only moves when one was. Moving
     // it on every run made a rerun of the same week differ from the first run.
     const stamp = now.toISOString().split("T")[0];
-    replaceFirstLine(lines, 0, liveRegionEnd(lines), LAST_UPDATED_PREFIX, `*Last updated: ${stamp}*`);
+    const shifted = maskFenced(lines);
+    replaceFirstLine(lines, shifted, 0, liveRegionEnd(shifted), LAST_UPDATED_PREFIX, `*Last updated: ${stamp}*`);
   }
 
   const counts = { added: queued.length, removed: 0, merged, skipped };
@@ -956,13 +1037,14 @@ export async function updateProfile(
   const original = await readFile(profilePath, "utf-8");
   const eol = detectEol(original);
   const lines = toLines(original);
-  const liveEnd = liveRegionEnd(lines);
+  const scan = maskFenced(lines);
+  const liveEnd = liveRegionEnd(scan);
 
-  const headingIdx = findExactHeading(lines, KEY_STRENGTHS_HEADING, liveEnd);
+  const headingIdx = findExactHeading(scan, KEY_STRENGTHS_HEADING, liveEnd);
   if (headingIdx === -1) return writeResult("no-section", { skipped: 1 });
 
-  const end = Math.min(sectionEnd(lines, headingIdx), liveEnd);
-  const bullets = readBullets(lines, headingIdx + 1, end);
+  const end = Math.min(sectionEnd(scan, headingIdx), liveEnd);
+  const bullets = readBullets(scan, headingIdx + 1, end);
   if (!bullets) return writeResult("no-section", { skipped: 1 });
   if (findCanonicalIndex(bullets.map((bullet) => bullet.text), update.bulletPoint) !== -1) {
     return writeResult("unchanged", { skipped: 1 });
@@ -1126,6 +1208,7 @@ function unchanged(lines: readonly string[], eol: string): CleanedRecords {
 
 function cleanTable(
   lines: string[],
+  scan: readonly string[],
   fromLine: number,
   limit: number,
   eol: string,
@@ -1133,10 +1216,10 @@ function cleanTable(
   recordOf: (row: string) => StoredRecord,
   fold: FoldRecord,
 ): CleanedRecords {
-  // Both bounds and the header have to hold: a table further down the file, or one
-  // this code does not recognise, belongs to someone else and deleting rows from it
-  // would be deleting their data.
-  const table = findTableByHeader(lines, fromLine, limit, header);
+  // Both bounds and the header have to hold: a table further down the file, one inside
+  // a fenced example, or one this code does not recognise, belongs to someone else and
+  // deleting rows from it would be deleting their data.
+  const table = findTableByHeader(scan, fromLine, limit, header);
   if (!table) return unchanged(lines, eol);
 
   const rowEnd = Math.min(table.rowEnd, limit);
@@ -1149,6 +1232,7 @@ function cleanTable(
 
 function cleanBullets(
   lines: string[],
+  scan: readonly string[],
   headingIdx: number,
   limit: number,
   eol: string,
@@ -1156,8 +1240,8 @@ function cleanBullets(
   contentOf: (bullet: string) => string,
   fold: FoldRecord,
 ): CleanedRecords {
-  const end = Math.min(sectionEnd(lines, headingIdx), limit);
-  const bullets = readBullets(lines, headingIdx + 1, end);
+  const end = Math.min(sectionEnd(scan, headingIdx), limit);
+  const bullets = readBullets(scan, headingIdx + 1, end);
   if (!bullets) return unchanged(lines, eol);
 
   // A note is folded into, and identified by, its whole self; the `_(source)_` a fold
@@ -1211,7 +1295,8 @@ function foldNothing(): null {
 function cleanVaultRecords(content: string, kind: VaultRecordKind): CleanedRecords {
   const eol = detectEol(content);
   const lines = toLines(content);
-  const liveEnd = liveRegionEnd(lines);
+  const scan = maskFenced(lines);
+  const liveEnd = liveRegionEnd(scan);
 
   switch (kind) {
     case "memory":
@@ -1219,7 +1304,8 @@ function cleanVaultRecords(content: string, kind: VaultRecordKind): CleanedRecor
       // written.
       return cleanTable(
         lines,
-        bodyStart(lines),
+        scan,
+        bodyStart(scan),
         liveEnd,
         eol,
         MEMORY_HEADER,
@@ -1230,15 +1316,16 @@ function cleanVaultRecords(content: string, kind: VaultRecordKind): CleanedRecor
       );
 
     case "impact-log": {
-      const headingIdx = findExactHeading(lines, IMPACT_TIMELINE_HEADING, liveEnd);
+      const headingIdx = findExactHeading(scan, IMPACT_TIMELINE_HEADING, liveEnd);
       if (headingIdx === -1) return unchanged(lines, eol);
       // Identity is the date and the achievement together, but only the achievement
       // decides whether the row says anything: a date in front of "(none)" would
       // otherwise make the placeholder row look like real content.
       return cleanTable(
         lines,
+        scan,
         headingIdx,
-        sectionScope(lines, headingIdx, liveEnd),
+        sectionScope(scan, headingIdx, liveEnd),
         eol,
         IMPACT_HEADER,
         (row) => ({
@@ -1251,16 +1338,16 @@ function cleanVaultRecords(content: string, kind: VaultRecordKind): CleanedRecor
     }
 
     case "work-context": {
-      const headingIdx = findExactHeading(lines, ORG_NOTES_HEADING, liveEnd);
+      const headingIdx = findExactHeading(scan, ORG_NOTES_HEADING, liveEnd);
       if (headingIdx === -1) return unchanged(lines, eol);
-      return cleanBullets(lines, headingIdx, liveEnd, eol, orgNoteIdentity, orgNoteText, foldNoteSource);
+      return cleanBullets(lines, scan, headingIdx, liveEnd, eol, orgNoteIdentity, orgNoteText, foldNoteSource);
     }
 
     case "my-profile": {
-      const headingIdx = findExactHeading(lines, KEY_STRENGTHS_HEADING, liveEnd);
+      const headingIdx = findExactHeading(scan, KEY_STRENGTHS_HEADING, liveEnd);
       if (headingIdx === -1) return unchanged(lines, eol);
       const itself = (text: string) => text;
-      return cleanBullets(lines, headingIdx, liveEnd, eol, itself, itself, foldNothing);
+      return cleanBullets(lines, scan, headingIdx, liveEnd, eol, itself, itself, foldNothing);
     }
   }
 }

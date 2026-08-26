@@ -2610,3 +2610,169 @@ Everything below here is prose, not part of the note above.
     expect(content).toContain("_(TEAM-1200, TEAM-1201)_");
   });
 });
+
+describe("fenced code is not structure", () => {
+  const FENCED_PROFILE = `# My Profile
+
+## Notes on this file
+
+\`\`\`md
+## Key Strengths
+
+- (none)
+\`\`\`
+
+## Key Strengths
+
+- Untangles flaky test suites other people avoid
+
+---
+
+*Last updated: 2026-02-01*
+`;
+
+  it("writes to the real section, not the one in the example", async () => {
+    const path = join(tmpDir, "my-profile.md");
+    await writeFile(path, FENCED_PROFILE);
+
+    expect(await updateProfile(path, { achievement: "Rollout", bulletPoint: "Runs multi-team rollouts" }))
+      .toMatchObject({ status: "written" });
+
+    const content = await readFile(path, "utf-8");
+    const fenceStart = content.indexOf("```md");
+    const fenceEnd = content.indexOf("```", fenceStart + 5);
+    const written = content.indexOf("- Runs multi-team rollouts");
+    expect(written).toBeGreaterThan(fenceEnd);
+  });
+
+  it("leaves a fenced placeholder bullet alone", async () => {
+    const path = join(tmpDir, "my-profile.md");
+    await writeFile(path, FENCED_PROFILE);
+
+    expect(await migrateVaultRecordsFile(path, "my-profile")).toBeNull();
+    expect(await readFile(path, "utf-8")).toBe(FENCED_PROFILE);
+  });
+
+  it("ignores an example table inside a fence", async () => {
+    const path = join(tmpDir, "memory.md");
+    await writeFile(path, `# Memory
+
+\`\`\`
+| Date | Item | Category | Notes |
+|------|------|----------|-------|
+| 2026-01-01 | An example row | example |  |
+\`\`\`
+
+| Date | Item | Category | Notes |
+|------|------|----------|-------|
+| 2026-03-01 | Wrote the fallback path | project | TEAM-1234 |
+`);
+
+    expect(await updateMemory(path, ["| 2026-03-08 | Cut the index rebuild time | project |  |"], []))
+      .toMatchObject({ status: "written", added: 1 });
+
+    const content = await readFile(path, "utf-8");
+    expect(content).toContain("| 2026-01-01 | An example row | example |  |");
+    expect(content.indexOf("Cut the index rebuild time")).toBeGreaterThan(content.indexOf("An example row"));
+  });
+
+  it("ignores an archived-looking heading inside a fence", async () => {
+    const path = join(tmpDir, "memory.md");
+    await writeFile(path, `# Memory
+
+\`\`\`md
+## Previous Team — ARCHIVED
+\`\`\`
+
+| Date | Item | Category | Notes |
+|------|------|----------|-------|
+| 2026-03-01 | Wrote the fallback path | project | TEAM-1234 |
+`);
+
+    // The fenced heading would otherwise end the live region above the real table.
+    expect(await updateMemory(path, ["| 2026-03-08 | Cut the index rebuild time | project |  |"], []))
+      .toMatchObject({ status: "written", added: 1 });
+  });
+
+  it("treats an unclosed fence as running to the end of the file", async () => {
+    const path = join(tmpDir, "my-profile.md");
+    const file = `# My Profile
+
+\`\`\`md
+## Key Strengths
+
+- (none)
+- (none)
+`;
+    await writeFile(path, file);
+
+    expect(await migrateVaultRecordsFile(path, "my-profile")).toBeNull();
+    expect(await updateProfile(path, { achievement: "Rollout", bulletPoint: "Runs multi-team rollouts" }))
+      .toMatchObject({ status: "no-section" });
+    expect(await readFile(path, "utf-8")).toBe(file);
+  });
+
+  it("recognises a tilde fence", async () => {
+    const path = join(tmpDir, "my-profile.md");
+    const file = `# My Profile
+
+~~~md
+## Key Strengths
+
+- (none)
+~~~
+
+## Key Strengths
+
+- Untangles flaky test suites other people avoid
+`;
+    await writeFile(path, file);
+
+    expect(await migrateVaultRecordsFile(path, "my-profile")).toBeNull();
+    expect(await readFile(path, "utf-8")).toBe(file);
+  });
+});
+
+describe("thematic breaks", () => {
+  const breakBefore = (rule: string) => `# My Profile
+
+## Key Strengths
+
+- Untangles flaky test suites other people avoid
+
+${rule}
+
+- A bullet below the break
+`;
+
+  for (const rule of ["* * *", "_ _ _", "- - -", "***", "___"]) {
+    it(`ends the section at ${rule}`, async () => {
+      const path = join(tmpDir, "my-profile.md");
+      await writeFile(path, breakBefore(rule));
+
+      expect(await updateProfile(path, { achievement: "Rollout", bulletPoint: "Runs multi-team rollouts" }))
+        .toMatchObject({ status: "written" });
+
+      const content = await readFile(path, "utf-8");
+      expect(content.indexOf("Runs multi-team rollouts")).toBeLessThan(content.indexOf(rule));
+      expect(content).toContain("- A bullet below the break");
+    });
+  }
+
+  it("does not read an indented rule as a break", async () => {
+    const path = join(tmpDir, "my-profile.md");
+    await writeFile(path, `# My Profile
+
+## Key Strengths
+
+- Untangles flaky test suites other people avoid
+    ---
+`);
+
+    // Four spaces makes it a code line, so it is a continuation of the bullet above.
+    expect(await updateProfile(path, {
+      achievement: "Cleanup",
+      bulletPoint: "Untangles flaky test suites other people avoid",
+    })).toMatchObject({ status: "written" });
+  });
+});
