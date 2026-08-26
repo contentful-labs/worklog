@@ -1,213 +1,140 @@
 import { describe, it, expect } from "vitest";
-import { parseBragBookResult, parseReviewCycle, ensureBragBookFrontmatter } from "../brag-book";
+import { toBragBookResult, parseReviewCycle, ensureBragBookFrontmatter } from "../brag-book";
+import { bragBookOutputSchema, type BragBookOutput } from "../brag-book-schema";
 
-describe("parseBragBookResult", () => {
-  it("returns raw content when no markers present", () => {
-    const result = parseBragBookResult("# Brag Book\nGreat week!");
-    expect(result.bragBookContent).toBe("# Brag Book\nGreat week!");
-    expect(result.itemsToAdd).toEqual([]);
-    expect(result.itemsToRemove).toEqual([]);
-    expect(result.impactLogEntry).toBeNull();
-    expect(result.focusItems).toEqual([]);
+const emptyOutput: BragBookOutput = {
+  bragBookMarkdown: "# Brag Book",
+  memoryItemsToAdd: [],
+  memoryGraduations: [],
+  impactLogEntry: null,
+  workContextUpdates: [],
+  profileUpdate: null,
+  focusStatuses: [],
+  newFocusItems: [],
+};
+
+function output(overrides: Partial<BragBookOutput>): BragBookOutput {
+  return { ...emptyOutput, ...overrides };
+}
+
+describe("bragBookOutputSchema", () => {
+  it("accepts a fully empty week", () => {
+    expect(bragBookOutputSchema.parse(emptyOutput)).toEqual(emptyOutput);
   });
 
-  it("parses memory items to add", () => {
-    const raw = `# Brag Book
-Content here
-
----
-
-<!-- MEMORY_UPDATE -->
-
-## Items to Add to Memory
-
-| Category | Item | Source |
-|----------|------|--------|
-| project | Shipped auth | CORE-42 |
-
-## Items to Remove from Memory
-
-- Old item no longer relevant
-
-<!-- /MEMORY_UPDATE -->`;
-
-    const result = parseBragBookResult(raw);
-    expect(result.itemsToAdd).toHaveLength(1);
-    expect(result.itemsToAdd[0]).toContain("Shipped auth");
-    expect(result.itemsToRemove).toEqual(["Old item no longer relevant"]);
+  it("rejects a focus status outside the allowed set", () => {
+    // `open` is what a model reaches for, and it is the one value that must not get
+    // through: applyFocusUpdates treats any non-pending status as an answered item.
+    const bad = { ...emptyOutput, focusStatuses: [{ id: "2026-W09.1", status: "open", notes: "" }] };
+    expect(bragBookOutputSchema.safeParse(bad).success).toBe(false);
   });
 
-  it("strips machine-parseable sections from brag book content", () => {
-    const raw = `# Brag Book
-Content here
-
----
-
-<!-- MEMORY_UPDATE -->
-## Items to Add to Memory
-None
-<!-- /MEMORY_UPDATE -->`;
-
-    const result = parseBragBookResult(raw);
-    expect(result.bragBookContent).not.toContain("MEMORY_UPDATE");
-    expect(result.bragBookContent).toContain("# Brag Book");
+  it("rejects a missing field rather than filling in a default", () => {
+    const { focusStatuses, ...withoutFocus } = emptyOutput;
+    expect(focusStatuses).toEqual([]);
+    expect(bragBookOutputSchema.safeParse(withoutFocus).success).toBe(false);
   });
 
-  it("parses impact log entry", () => {
-    const raw = `Content
+  it("rejects a memory item that is missing its category", () => {
+    const bad = { ...emptyOutput, memoryItemsToAdd: [{ date: "2026-03-05", item: "Fixed a flake", notes: "" }] };
+    expect(bragBookOutputSchema.safeParse(bad).success).toBe(false);
+  });
+});
 
----
+describe("toBragBookResult", () => {
+  it("renders memory items as table rows in memory.md column order", () => {
+    const result = toBragBookResult(
+      output({
+        memoryItemsToAdd: [
+          { date: "2026-03-05", item: "Fixed a flaky test", category: "bugfix", notes: "Part of a reliability push" },
+        ],
+      }),
+    );
 
-<!-- CONTEXT_UPDATES -->
+    expect(result.itemsToAdd).toEqual(["| 2026-03-05 | Fixed a flaky test | bugfix | Part of a reliability push |"]);
+  });
 
-## Impact Log Update
+  it("escapes pipes in memory items so a row cannot split a table", () => {
+    const result = toBragBookResult(
+      output({ memoryItemsToAdd: [{ date: "2026-03-05", item: "Renamed a | b", category: "docs", notes: "" }] }),
+    );
 
-| Date | Achievement | Scope | Core Value | Evidence |
-|------|-------------|-------|------------|----------|
-| 2026-03-05 | Shipped auth | team | quality | CORE-42 merged |
+    expect(result.itemsToAdd).toEqual(["| 2026-03-05 | Renamed a \\| b | docs |  |"]);
+  });
 
-<!-- /CONTEXT_UPDATES -->`;
+  it("keeps the graduation phrasing updateMemory splits on", () => {
+    const result = toBragBookResult(
+      output({ memoryGraduations: [{ item: "Three small perf PRs", nowPartOf: "Search latency initiative" }] }),
+    );
 
-    const result = parseBragBookResult(raw);
-    expect(result.impactLogEntry).toEqual({
+    expect(result.itemsToRemove).toEqual(["Three small perf PRs (now part of: Search latency initiative)"]);
+    expect(result.itemsToRemove[0].split("(now part of")[0].trim()).toBe("Three small perf PRs");
+  });
+
+  it("passes impact, work context and profile through unchanged", () => {
+    const impactLogEntry = {
       date: "2026-03-05",
       achievement: "Shipped auth",
-      scope: "team",
+      scope: "Team",
       coreValue: "quality",
-      evidence: "CORE-42 merged",
-    });
+      evidence: "TEAM-1234 merged",
+    };
+    const profileUpdate = { achievement: "Led auth migration", bulletPoint: "Designed and shipped OAuth integration" };
+    const workContextUpdates = [{ category: "process", info: "Sprints moved to two weeks", source: "team meeting" }];
+
+    const result = toBragBookResult(output({ impactLogEntry, profileUpdate, workContextUpdates }));
+
+    expect(result.impactLogEntry).toEqual(impactLogEntry);
+    expect(result.profileUpdate).toEqual(profileUpdate);
+    expect(result.workContextUpdates).toEqual(workContextUpdates);
   });
 
-  it("parses work context updates", () => {
-    const raw = `Content
+  it("drops entries the model filled with empty strings", () => {
+    const result = toBragBookResult(
+      output({
+        memoryItemsToAdd: [{ date: "", item: "   ", category: "", notes: "" }],
+        memoryGraduations: [{ item: "", nowPartOf: "Something" }],
+        workContextUpdates: [{ category: "process", info: "", source: "" }],
+        impactLogEntry: { date: "2026-03-05", achievement: "  ", scope: "", coreValue: "", evidence: "" },
+        profileUpdate: { achievement: "", bulletPoint: "something" },
+        newFocusItems: ["", "  "],
+        focusStatuses: [{ id: " ", status: "completed", notes: "" }],
+      }),
+    );
 
----
-
-<!-- CONTEXT_UPDATES -->
-
-## Work Context Updates
-
-| Category | Info | Source |
-|----------|------|--------|
-| current_work | Auth migration | CORE-42 |
-| tech_stack | Added OAuth | PR #99 |
-
-<!-- /CONTEXT_UPDATES -->`;
-
-    const result = parseBragBookResult(raw);
-    expect(result.workContextUpdates).toHaveLength(2);
-    expect(result.workContextUpdates[0].category).toBe("current_work");
-  });
-
-  it("parses profile update", () => {
-    const raw = `Content
-
----
-
-<!-- CONTEXT_UPDATES -->
-
-**Achievement to add:** Led auth migration
-**Suggested bullet point:** Designed and shipped OAuth integration
-
-<!-- /CONTEXT_UPDATES -->`;
-
-    const result = parseBragBookResult(raw);
-    expect(result.profileUpdate).toEqual({
-      achievement: "Led auth migration",
-      bulletPoint: "Designed and shipped OAuth integration",
-    });
-  });
-
-  it("skips placeholder profile update", () => {
-    const raw = `Content
-
----
-
-<!-- CONTEXT_UPDATES -->
-
-**Achievement to add:** (leave blank if none - bar is CV-worthy)
-**Suggested bullet point:** (leave blank if none)
-
-<!-- /CONTEXT_UPDATES -->`;
-
-    const result = parseBragBookResult(raw);
+    expect(result.itemsToAdd).toEqual([]);
+    expect(result.itemsToRemove).toEqual([]);
+    expect(result.workContextUpdates).toEqual([]);
+    expect(result.impactLogEntry).toBeNull();
     expect(result.profileUpdate).toBeNull();
+    expect(result.focusItems).toEqual([]);
+    expect(result.focusUpdates).toEqual([]);
   });
 
-  it("ignores focus suggestions in the coaching prose", () => {
-    // The coaching section states the same suggestions for the reader. Parsing it too is
-    // what used to turn two suggestions into four rows a week.
-    const raw = `Content
-
----
-
-<!-- COACHING_SESSION -->
-
-### Focus for Next Week
-
-- Ship the auth PR
-- Review team RFC
-
-<!-- /COACHING_SESSION -->`;
-
-    expect(parseBragBookResult(raw).focusItems).toEqual([]);
+  it("caps new focus items at two", () => {
+    const result = toBragBookResult(output({ newFocusItems: ["one", "two", "three"] }));
+    expect(result.focusItems).toEqual(["one", "two"]);
   });
 
-  it("parses focus updates keyed by id, and new items only from FOCUS_UPDATE", () => {
-    const raw = `Content
+  it("keeps focus statuses keyed by id", () => {
+    const result = toBragBookResult(
+      output({
+        focusStatuses: [
+          { id: "2026-W09.1", status: "completed", notes: "Approved" },
+          { id: "2026-W09.2", status: "ongoing", notes: "" },
+        ],
+      }),
+    );
 
----
-
-<!-- FOCUS_UPDATE -->
-
-## Focus Items Status
-
-| ID | New Status | Notes |
-|----|------------|-------|
-| 2026-W09.1 | completed | Approved |
-| 2026-W09.2 | ongoing | In review |
-
-## New Focus Items
-
-- Write migration docs
-
-<!-- /FOCUS_UPDATE -->`;
-
-    const result = parseBragBookResult(raw);
     expect(result.focusUpdates).toEqual([
       { id: "2026-W09.1", status: "completed", notes: "Approved" },
-      { id: "2026-W09.2", status: "ongoing", notes: "In review" },
+      { id: "2026-W09.2", status: "ongoing", notes: "" },
     ]);
-    expect(result.focusItems).toEqual(["Write migration docs"]);
   });
 
-  it("drops status rows that are not keyed by a valid id", () => {
-    const raw = `<!-- FOCUS_UPDATE -->
-
-## Focus Items Status
-
-| ID | New Status | Notes |
-|----|------------|-------|
-| Review the RFC | completed | pasted the item text instead of the id |
-| 2026-W09.1 | completed | |
-
-<!-- /FOCUS_UPDATE -->`;
-
-    const result = parseBragBookResult(raw);
-    expect(result.focusUpdates).toEqual([{ id: "2026-W09.1", status: "completed", notes: "" }]);
-  });
-
-  it("ignores the template placeholder lines in New Focus Items", () => {
-    const raw = `<!-- FOCUS_UPDATE -->
-
-## New Focus Items
-
-- Real item
-- (This list is the ONLY place new focus items are recorded.)
-
-<!-- /FOCUS_UPDATE -->`;
-
-    expect(parseBragBookResult(raw).focusItems).toEqual(["Real item"]);
+  it("uses the markdown field as the brag book content", () => {
+    const result = toBragBookResult(output({ bragBookMarkdown: "\n# Brag Book\nGreat week!\n" }));
+    expect(result.bragBookContent).toBe("# Brag Book\nGreat week!");
   });
 });
 

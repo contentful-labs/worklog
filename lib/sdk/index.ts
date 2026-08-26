@@ -48,15 +48,23 @@ export {
 } from "./vault";
 
 // AI
-export type { AIQueryOptions } from "./ai";
-export { aiQuery, postProcess } from "./ai";
+export type { AIQueryOptions, StructuredQueryOptions } from "./ai";
+export { aiQuery, aiQueryStructured, postProcess, toAnthropicJsonSchema } from "./ai";
 
 // Markdown generation
 export { generateMarkdown } from "./markdown";
 
-// Brag book parsing
+// Brag book result
 export type { BragBookResult, ReviewInfo } from "./brag-book";
-export { parseBragBookResult, parseReviewCycle, ensureBragBookFrontmatter } from "./brag-book";
+export { toBragBookResult, parseReviewCycle, ensureBragBookFrontmatter } from "./brag-book";
+
+// Brag book output schema
+export type { BragBookOutput, MemoryItem, MemoryGraduation, FocusStatus } from "./brag-book-schema";
+export {
+  FOCUS_STATUSES, MAX_NEW_FOCUS_ITEMS,
+  bragBookOutputSchema, memoryItemSchema, memoryGraduationSchema,
+  impactLogEntrySchema, workContextUpdateSchema, profileUpdateSchema, focusStatusSchema,
+} from "./brag-book-schema";
 
 // Focus tracking
 export type {

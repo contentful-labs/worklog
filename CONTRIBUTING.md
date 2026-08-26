@@ -39,10 +39,11 @@ To test the full pipeline you'll need API tokens (Jira, GitHub) and an AI provid
 │   ├── types.ts               # API response types (JiraIssue, ConfluencePage, GitHubPR)
 │   ├── utils.ts               # extractText, formatDate
 │   └── sdk/                   # Core logic, no CLI I/O. Re-exported from lib/sdk/index.ts
-│       ├── ai.ts              # aiQuery: Anthropic (Claude Agent SDK) or OpenAI (Vercel AI SDK)
+│       ├── ai.ts              # aiQuery / aiQueryStructured: Anthropic (Claude Agent SDK) or OpenAI (Vercel AI SDK)
 │       ├── data-fetch.ts      # Jira/Confluence/GitHub fetchers, fetchDataForWeek
 │       ├── markdown.ts        # Work log markdown from fetched data
-│       ├── brag-book.ts       # Parse AI output into brag book + memory/focus/context updates
+│       ├── brag-book-schema.ts # Zod schema the weekly generation is constrained to
+│       ├── brag-book.ts       # Schema output -> brag book + memory/focus/context updates
 │       ├── vault.ts           # Vault paths and readers (profile, memory, brag books, team timeline)
 │       ├── vault-updates.ts   # Write memory/impact-log/work-context/profile/focus-tracking
 │       ├── text-similarity.ts # Normalized text and containment score used to spot repeats

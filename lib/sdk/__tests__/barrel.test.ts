@@ -41,16 +41,20 @@ describe("SDK barrel exports", () => {
 
   it("exports AI functions", () => {
     expect(sdk.aiQuery).toBeTypeOf("function");
+    expect(sdk.aiQueryStructured).toBeTypeOf("function");
     expect(sdk.postProcess).toBeTypeOf("function");
+    expect(sdk.toAnthropicJsonSchema).toBeTypeOf("function");
   });
 
   it("exports markdown generation", () => {
     expect(sdk.generateMarkdown).toBeTypeOf("function");
   });
 
-  it("exports brag book parsing", () => {
-    expect(sdk.parseBragBookResult).toBeTypeOf("function");
+  it("exports brag book result handling", () => {
+    expect(sdk.toBragBookResult).toBeTypeOf("function");
     expect(sdk.parseReviewCycle).toBeTypeOf("function");
+    expect(sdk.bragBookOutputSchema).toBeDefined();
+    expect(sdk.FOCUS_STATUSES).toBeDefined();
   });
 
   it("exports prep doc utilities", () => {
