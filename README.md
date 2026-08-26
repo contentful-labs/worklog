@@ -67,7 +67,6 @@ worklog prep self-review   Self-review draft
 worklog prep promotion     Promotion case
 worklog prep skip-level    Skip-level meeting prep
 worklog prep resume        Resume bullet points
-worklog perf-data          Raw Jira/Confluence/GitHub dump since a date
 worklog init               First-time setup
 worklog configure          Update settings
 ```
@@ -99,15 +98,6 @@ worklog prep resume        # resume bullet points (default: 26 weeks)
 ```
 
 Options: `--weeks N`, `--since YYYY-MM-DD`, `--until YYYY-MM-DD`, `--extended`
-
-### `worklog perf-data`
-
-Dump raw activity (no AI) into one markdown file, for when you want the underlying data rather than a brag book:
-
-```bash
-worklog perf-data                                    # since Jan 1 this year → performance-review-data.md
-worklog perf-data --since 2025-07-01 --output h2.md
-```
 
 ### `worklog init`
 
