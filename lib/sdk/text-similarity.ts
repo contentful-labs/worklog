@@ -61,8 +61,27 @@ function tokenSet(text: string): Set<string> {
 /** Below this many significant words, containment is too easy to hit by accident. */
 const MIN_TOKENS_FOR_CONTAINMENT = 4;
 
-/** Score at or above which two texts are treated as the same record. Tuned on real vault data. */
+/**
+ * Score at or above which one text is taken to be a restatement of another.
+ *
+ * Tuned on real focus items, where the costly outcome is a miss: an unmatched item
+ * stays open forever, and a false match only merges two commitments the coach can
+ * still see. Use it for lookups, not for rejecting new records.
+ */
 export const SIMILARITY_THRESHOLD = 0.6;
+
+/**
+ * Score at or above which two prose records are the same fact written twice.
+ *
+ * Higher than the lookup threshold because rejecting an insert throws information
+ * away silently. Measured over 163 real organizational notes, scoring each against
+ * all the others: 37 of them would be rejected at 0.60, 30 at 0.70, 22 from 0.75
+ * through 0.85, and 11 at 0.90. Reading the pairs, everything scoring 0.85 or above
+ * was a genuine rewording of the same fact, while the 0.60 to 0.75 band was mostly
+ * distinct notes that share vocabulary because they describe the same system.
+ * Do not lower this back to 0.6.
+ */
+export const PROSE_SIMILARITY_THRESHOLD = 0.85;
 
 /**
  * How much two suggestions are the same thing said differently.

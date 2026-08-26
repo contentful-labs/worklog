@@ -703,3 +703,74 @@ _(Added automatically as significant achievements are recorded)_
     expect(await readFile(backupPath, "utf-8")).toBe("sentinel");
   });
 });
+
+describe("record dedupe threshold", () => {
+  it("keeps two notes about the same system that state different facts", async () => {
+    const path = join(tmpDir, "work-context.md");
+    await writeFile(path, `# Work Context
+
+## Organizational Notes
+
+- **architecture:** The ingest service is the intake and normalization layer for search-relevant events _(TEAM-1200)_
+
+---
+
+*Last updated: 2026-02-01*
+`);
+
+    await updateWorkContext(path, [
+      {
+        category: "architecture",
+        info: "TEAM-1234 proposes moving automatic-start matching out of the ingest service into the indexer",
+        source: "TEAM-1234",
+      },
+      {
+        category: "architecture",
+        info: "The ingest service normalizes search-relevant events before they reach the indexer",
+        source: "TEAM-1235",
+      },
+    ]);
+
+    const content = await readFile(path, "utf-8");
+    expect(content).toContain("automatic-start matching");
+    expect(content).toContain("before they reach the indexer");
+    expect(content.match(/intake and normalization layer/g)).toHaveLength(1);
+  });
+
+  it("still rejects the same fact written a different way", async () => {
+    const path = join(tmpDir, "work-context.md");
+    await writeFile(path, `# Work Context
+
+## Organizational Notes
+
+- **process:** Release readiness reviews moved from Tuesday to Wednesday _(TEAM-1200)_
+
+---
+
+*Last updated: 2026-02-01*
+`);
+
+    await updateWorkContext(path, [
+      {
+        category: "process",
+        info: "Release readiness reviews now happen on Wednesday, moved from Tuesday",
+        source: "TEAM-1300",
+      },
+    ]);
+
+    const content = await readFile(path, "utf-8");
+    expect(content.match(/Release readiness reviews/g)).toHaveLength(1);
+    expect(content).not.toContain("TEAM-1300");
+  });
+
+  it("finds the row a graduation names even when the wording drifts below the prose threshold", async () => {
+    const path = join(tmpDir, "memory.md");
+    await writeFile(path, CLEAN_MEMORY);
+
+    // 0.83 similarity: too low to reject an insert, high enough to identify a row the
+    // model has explicitly asked to close.
+    await updateMemory(path, [], ["Fallback path work for the Search Revamp indexer (now part of: shipped indexer resilience)"]);
+
+    expect(await readFile(path, "utf-8")).not.toContain("fallback path");
+  });
+});

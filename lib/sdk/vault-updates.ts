@@ -15,7 +15,7 @@ import type { BragBookResult } from "./brag-book";
 
 import { appendToFirstTable, findTable, splitRow } from "./markdown-table";
 import { weekIdForDate } from "./week-utils";
-import { SIMILARITY_THRESHOLD, normalizeText, textSimilarity } from "./text-similarity";
+import { PROSE_SIMILARITY_THRESHOLD, SIMILARITY_THRESHOLD, normalizeText, textSimilarity } from "./text-similarity";
 import {
   FOCUS_TRACKING_TEMPLATE,
   applyFocusUpdates,
@@ -80,11 +80,15 @@ export function isPlaceholder(text: string): boolean {
  * Gate for text entering a vault file: rejects placeholders, anything the file already
  * says, and anything already accepted in this same batch.
  *
- * Identity is the normalized text, with the same containment score focus tracking uses,
- * because the model rewords its own entries between runs and an exact-string check
- * would let every rewording through as new.
+ * Identity is the normalized text, then the containment score, because the model
+ * rewords its own entries between runs and an exact-string check would let every
+ * rewording through as new. The score has to clear the prose threshold: these records
+ * describe one system, so unrelated notes share plenty of vocabulary.
  */
-function createRecordFilter(existing: readonly string[]): (text: string) => boolean {
+function createRecordFilter(
+  existing: readonly string[],
+  threshold: number = PROSE_SIMILARITY_THRESHOLD,
+): (text: string) => boolean {
   const seen = existing.map(normalizeText).filter((value) => value.length > 0);
 
   return (text: string): boolean => {
@@ -93,14 +97,20 @@ function createRecordFilter(existing: readonly string[]): (text: string) => bool
     if (normalized.length === 0) return false;
     for (const prior of seen) {
       if (prior === normalized) return false;
-      if (textSimilarity(prior, normalized) >= SIMILARITY_THRESHOLD) return false;
+      if (textSimilarity(prior, normalized) >= threshold) return false;
     }
     seen.push(normalized);
     return true;
   };
 }
 
-/** Row index whose text is the same record as `target`, or -1. */
+/**
+ * Row index whose text is the same record as `target`, or -1.
+ *
+ * This is a lookup of a row the model has explicitly named, so it uses the lower
+ * restatement threshold and takes the single best match. Missing here leaves the row
+ * where it is, which is the failure the graduation step already had.
+ */
 function findRecordIndex(texts: readonly string[], target: string, excluded: ReadonlySet<number>): number {
   const normalizedTarget = normalizeText(target);
   if (normalizedTarget.length === 0) return -1;

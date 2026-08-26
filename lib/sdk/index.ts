@@ -73,7 +73,7 @@ export type { TableBounds } from "./markdown-table";
 export { isTableSeparator, splitRow, escapeCell, renderRow, appendToFirstTable, findTable } from "./markdown-table";
 
 // Text similarity
-export { SIMILARITY_THRESHOLD, normalizeText, textSimilarity } from "./text-similarity";
+export { SIMILARITY_THRESHOLD, PROSE_SIMILARITY_THRESHOLD, normalizeText, textSimilarity } from "./text-similarity";
 
 // Prep doc generation
 export type { PrepType, PrepContext, PrepOptions } from "./prep";

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { SIMILARITY_THRESHOLD, normalizeText, textSimilarity } from "../text-similarity";
+import { PROSE_SIMILARITY_THRESHOLD, SIMILARITY_THRESHOLD, normalizeText, textSimilarity } from "../text-similarity";
 import { normalizeFocusText, focusSimilarity } from "../focus";
 
 describe("normalizeText", () => {
@@ -46,5 +46,28 @@ describe("focus re-exports", () => {
   it("keeps the focus-named helpers pointing at the shared implementation", () => {
     expect(normalizeFocusText).toBe(normalizeText);
     expect(focusSimilarity).toBe(textSimilarity);
+  });
+});
+
+describe("thresholds", () => {
+  const relatedButDistinct = [
+    "The ingest service is the intake and normalization layer for search-relevant events",
+    "The ingest service normalizes search-relevant events before they reach the indexer",
+  ];
+
+  it("puts notes about the same system but different facts between the two thresholds", () => {
+    // Rejecting these on insert would lose real information, which is why records use
+    // the higher prose threshold and only lookups use the lower one.
+    const score = textSimilarity(relatedButDistinct[0], relatedButDistinct[1]);
+    expect(score).toBeGreaterThanOrEqual(SIMILARITY_THRESHOLD);
+    expect(score).toBeLessThan(PROSE_SIMILARITY_THRESHOLD);
+  });
+
+  it("scores a genuine rewording above the prose threshold", () => {
+    const score = textSimilarity(
+      "Release readiness reviews moved from Tuesday to Wednesday",
+      "Release readiness reviews now happen on Wednesday, moved from Tuesday",
+    );
+    expect(score).toBeGreaterThanOrEqual(PROSE_SIMILARITY_THRESHOLD);
   });
 });
