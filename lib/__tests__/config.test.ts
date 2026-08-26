@@ -1,5 +1,11 @@
 import { describe, it, expect } from "vitest";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import {
+  expandHome,
+  contractHome,
+  expandConfigPaths,
+  contractConfigPaths,
   validateAtlassianUrl,
   validateEmail,
   validateISODate,
@@ -8,6 +14,74 @@ import {
   normalizeTicketPrefix,
   parseReviewCycleDates,
 } from "../config";
+
+describe("expandHome / contractHome", () => {
+  const home = homedir();
+
+  it("expands a leading tilde", () => {
+    expect(expandHome("~/Documents/vault")).toBe(join(home, "Documents/vault"));
+    expect(expandHome("~")).toBe(home);
+  });
+
+  it("expands $HOME and braced HOME", () => {
+    expect(expandHome("$HOME/vault")).toBe(join(home, "vault"));
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: literal shell syntax, not a template
+    expect(expandHome("${HOME}/vault")).toBe(join(home, "vault"));
+  });
+
+  it("leaves other paths alone, including another user's home", () => {
+    expect(expandHome("/opt/vault")).toBe("/opt/vault");
+    expect(expandHome("relative/vault")).toBe("relative/vault");
+    expect(expandHome("~someoneelse/vault")).toBe("~someoneelse/vault");
+  });
+
+  it("only touches a leading tilde, not one inside the path", () => {
+    // Real case: iCloud vault paths look like ~/Library/Mobile Documents/iCloud~md~obsidian/...
+    const icloud = "~/Library/Mobile Documents/iCloud~md~obsidian/Documents/pkm";
+    expect(expandHome(icloud)).toBe(join(home, "Library/Mobile Documents/iCloud~md~obsidian/Documents/pkm"));
+    expect(contractHome(expandHome(icloud))).toBe(icloud);
+  });
+
+  it("contracts a path inside the home directory", () => {
+    expect(contractHome(join(home, "Documents/vault"))).toBe("~/Documents/vault");
+    expect(contractHome(home)).toBe("~");
+  });
+
+  it("leaves paths outside the home directory absolute", () => {
+    expect(contractHome("/opt/vault")).toBe("/opt/vault");
+    expect(contractHome(`${home}-other/vault`)).toBe(`${home}-other/vault`);
+  });
+
+  it("round trips", () => {
+    const original = join(home, "Library/Mobile Documents/vault");
+    expect(expandHome(contractHome(original))).toBe(original);
+  });
+});
+
+describe("expandConfigPaths / contractConfigPaths", () => {
+  const home = homedir();
+  const base = {
+    vault: "~/vault",
+    career: { careerDocPaths: ["~/docs/framework.md", "/opt/shared/ladder.md"] },
+    profile: { fullName: "Test" },
+  } as unknown as Parameters<typeof expandConfigPaths>[0];
+
+  it("expands only the path fields", () => {
+    const expanded = expandConfigPaths(base);
+    expect(expanded.vault).toBe(join(home, "vault"));
+    expect(expanded.career.careerDocPaths).toEqual([join(home, "docs/framework.md"), "/opt/shared/ladder.md"]);
+    expect(expanded.profile.fullName).toBe("Test");
+  });
+
+  it("does not mutate the input", () => {
+    expandConfigPaths(base);
+    expect(base.vault).toBe("~/vault");
+  });
+
+  it("contracting an expanded config restores the stored form", () => {
+    expect(contractConfigPaths(expandConfigPaths(base))).toEqual(base);
+  });
+});
 
 describe("normalizeTicketPrefix", () => {
   it("strips trailing dashes so the value is a valid JQL project key", () => {
