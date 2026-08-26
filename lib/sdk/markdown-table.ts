@@ -78,3 +78,31 @@ export function appendToFirstTable(content: string, rows: string[]): string {
   lines.splice(lastRowIdx + 1, 0, ...rows);
   return lines.join("\n");
 }
+
+export interface TableBounds {
+  /** Line index of the `|---|` separator. */
+  separatorIdx: number;
+  /** Line index of the first data row. */
+  rowStart: number;
+  /** One past the last data row. */
+  rowEnd: number;
+}
+
+/**
+ * Locate the first table at or after `fromLine`, so a caller can read or rewrite the
+ * rows of one era's table without disturbing the archived tables below it.
+ */
+export function findTable(lines: string[], fromLine = 0): TableBounds | null {
+  let separatorIdx = -1;
+  for (let i = Math.max(fromLine, 0); i < lines.length; i++) {
+    if (isTableSeparator(lines[i])) {
+      separatorIdx = i;
+      break;
+    }
+  }
+  if (separatorIdx === -1) return null;
+
+  let rowEnd = separatorIdx + 1;
+  while (rowEnd < lines.length && lines[rowEnd].startsWith("|")) rowEnd++;
+  return { separatorIdx, rowStart: separatorIdx + 1, rowEnd };
+}

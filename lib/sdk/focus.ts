@@ -13,6 +13,10 @@
 
 import { isTableSeparator, splitRow, renderRow, appendToFirstTable } from "./markdown-table";
 import { weekIdForDate } from "./week-utils";
+import { SIMILARITY_THRESHOLD, textSimilarity } from "./text-similarity";
+
+// Kept under the focus names so existing callers and the SDK barrel do not move.
+export { normalizeText as normalizeFocusText, textSimilarity as focusSimilarity } from "./text-similarity";
 
 export interface FocusItem {
   /** Stable short key, `<week>.<n>` — what the model quotes to close an item. */
@@ -74,7 +78,7 @@ const FORMAT_MARKER_PREFIX = "<!-- worklog-focus-format:";
 const FORMAT_MARKER = `${FORMAT_MARKER_PREFIX} ${FOCUS_FORMAT_VERSION} -->`;
 const WEEK_PATTERN = /^\d{4}-W\d{2}$/;
 /** Token overlap above this counts as the same suggestion reworded. */
-const RESTATEMENT_SIMILARITY = 0.6;
+const RESTATEMENT_SIMILARITY = SIMILARITY_THRESHOLD;
 
 export const FOCUS_TRACKING_TEMPLATE = `# Focus Tracking
 ${FORMAT_MARKER}
@@ -85,84 +89,6 @@ close as \`lapsed\` after ${DEFAULT_LAPSE_AFTER} reviews without follow-through.
 ${HEADER}
 ${SEPARATOR}
 `;
-
-/**
- * Drop the target of every markdown link, keeping the label.
- *
- * A scan rather than a `\[([^\]]*)\]\([^)]*\)` regex: that pattern backtracks
- * polynomially on crafted input (CodeQL js/polynomial-redos), and this text comes
- * straight from model output.
- */
-function stripLinkTargets(text: string): string {
-  let result = "";
-  let i = 0;
-  while (i < text.length) {
-    if (text[i] === "]" && text[i + 1] === "(") {
-      const end = text.indexOf(")", i + 2);
-      if (end !== -1) {
-        i = end + 1;
-        continue;
-      }
-    }
-    result += text[i];
-    i++;
-  }
-  return result;
-}
-
-/** Strip markdown down to comparable words. */
-export function normalizeFocusText(text: string): string {
-  // Bracket syntax is left to the alphanumeric filter below; only the URL has to go,
-  // since otherwise every item carrying a Jira link would look alike.
-  return stripLinkTargets(text)
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, " ")
-    .trim();
-}
-
-/**
- * Function words carry no identity, so counting them drags the score of two short
- * rewordings of the same suggestion below the threshold.
- */
-const STOP_WORDS = new Set([
-  "the", "and", "for", "with", "that", "this", "from", "into", "your", "you", "are", "was",
-  "were", "has", "have", "had", "its", "our", "their", "them", "then", "than", "but", "not",
-  "all", "any", "can", "out", "off", "per", "via", "get", "through", "before", "after",
-]);
-
-function tokenSet(text: string): Set<string> {
-  return new Set(
-    normalizeFocusText(text)
-      .split(" ")
-      .filter((token) => token.length > 2 && !STOP_WORDS.has(token)),
-  );
-}
-
-/** Below this many significant words, containment is too easy to hit by accident. */
-const MIN_TOKENS_FOR_CONTAINMENT = 4;
-
-/**
- * How much two suggestions are the same thing said differently.
- *
- * Jaccard alone is too strict here: one item is usually an elaboration of the other,
- * so the extra ticket numbers and trailing clauses in the longer one drag real
- * duplicates down to ~0.3. Containment (shared / smaller set) separates them cleanly,
- * but it reaches 1.0 whenever the shorter item is tiny, so it is only trusted once
- * both items carry enough substance.
- */
-export function focusSimilarity(a: string, b: string): number {
-  const left = tokenSet(a);
-  const right = tokenSet(b);
-  if (left.size === 0 || right.size === 0) return 0;
-
-  let shared = 0;
-  for (const token of left) if (right.has(token)) shared++;
-
-  const jaccard = shared / (left.size + right.size - shared);
-  const smaller = Math.min(left.size, right.size);
-  if (smaller < MIN_TOKENS_FOR_CONTAINMENT) return jaccard;
-  return Math.max(jaccard, shared / smaller);
-}
 
 interface LiveTable {
   lines: string[];
@@ -451,7 +377,7 @@ export function migrateFocusTracking(content: string, keepSinceWeek: string = de
     const duplicate = kept.find(
       (candidate) =>
         candidate.week === item.week &&
-        focusSimilarity(candidate.item, item.item) >= RESTATEMENT_SIMILARITY &&
+        textSimilarity(candidate.item, item.item) >= RESTATEMENT_SIMILARITY &&
         carriesNothingBeyond(item, candidate),
     );
     if (duplicate) {
@@ -625,7 +551,7 @@ export function applyFocusUpdates(content: string, options: ApplyFocusOptions): 
     if (!trimmed) continue;
 
     const open = [...items, ...created].filter((item) => isOpenFocusStatus(item.status));
-    const existing = open.find((item) => focusSimilarity(item.item, trimmed) >= RESTATEMENT_SIMILARITY);
+    const existing = open.find((item) => textSimilarity(item.item, trimmed) >= RESTATEMENT_SIMILARITY);
     if (existing) {
       // Re-raised rather than new: keep one row, reset its clock, and record the repeat.
       existing.reviews = 0;

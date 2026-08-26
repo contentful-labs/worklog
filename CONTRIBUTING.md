@@ -45,6 +45,7 @@ To test the full pipeline you'll need API tokens (Jira, GitHub) and an AI provid
 │       ├── brag-book.ts       # Parse AI output into brag book + memory/focus/context updates
 │       ├── vault.ts           # Vault paths and readers (profile, memory, brag books, team timeline)
 │       ├── vault-updates.ts   # Write memory/impact-log/work-context/profile/focus-tracking
+│       ├── text-similarity.ts # Normalized text and containment score used to spot repeats
 │       ├── prep.ts            # Prep types, defaults, prompt builder, output naming
 │       ├── doc-generators.ts  # Seed docs written by init (profile, work context, coach persona)
 │       ├── template.ts        # {{placeholder}} filling and config-derived context

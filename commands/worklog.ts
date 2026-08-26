@@ -60,6 +60,7 @@ import {
   updateProfile,
   updateFocusTracking,
   migrateFocusTrackingFile,
+  migrateVaultRecordsFile,
 } from "../lib/sdk/vault-updates";
 import { createLogger } from "../lib/sdk/logger";
 
@@ -484,6 +485,23 @@ export async function runWorklog(opts: {
     );
   } else if (migration?.kind === "format") {
     p.log.info(`Cleaned focus-tracking.md: ${migration.lapsed} stale open item(s) closed. Backup: ${migration.backup}`);
+  }
+
+  // The other four vault files were written for months without a placeholder or
+  // duplicate check; clean up what that left behind before anything reads them.
+  for (const [kind, recordPath] of [
+    ["memory", paths.memory],
+    ["impact-log", paths.impactLog],
+    ["work-context", paths.workContext],
+    ["my-profile", paths.profile],
+  ] as const) {
+    const cleanup = await migrateVaultRecordsFile(recordPath, kind);
+    if (cleanup) {
+      p.log.info(
+        `Cleaned ${kind}.md: ${cleanup.placeholders} placeholder rows removed, ` +
+        `${cleanup.duplicates} duplicates collapsed. Backup: ${recordPath}.pre-dedupe.bak`,
+      );
+    }
   }
 
   const weeksToGenerate = await getWeeksToGenerate(paths.vault, weeksBack, specificWeek, force, sinceDate);

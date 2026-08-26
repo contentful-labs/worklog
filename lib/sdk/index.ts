@@ -69,7 +69,11 @@ export {
 } from "./focus";
 
 // Markdown tables
-export { isTableSeparator, splitRow, escapeCell, renderRow, appendToFirstTable } from "./markdown-table";
+export type { TableBounds } from "./markdown-table";
+export { isTableSeparator, splitRow, escapeCell, renderRow, appendToFirstTable, findTable } from "./markdown-table";
+
+// Text similarity
+export { SIMILARITY_THRESHOLD, normalizeText, textSimilarity } from "./text-similarity";
 
 // Prep doc generation
 export type { PrepType, PrepContext, PrepOptions } from "./prep";
@@ -79,10 +83,10 @@ export {
 } from "./prep";
 
 // Vault updates
-export type { FocusFileMigration } from "./vault-updates";
+export type { FocusFileMigration, VaultRecordKind, VaultRecordsMigration } from "./vault-updates";
 export {
   updateMemory, updateImpactLog, updateWorkContext, updateProfile,
-  updateFocusTracking, migrateFocusTrackingFile,
+  updateFocusTracking, migrateFocusTrackingFile, migrateVaultRecordsFile, isPlaceholder,
 } from "./vault-updates";
 
 // Data fetching

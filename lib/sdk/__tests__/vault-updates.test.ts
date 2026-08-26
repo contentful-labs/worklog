@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
   updateMemory, updateImpactLog, updateWorkContext, updateProfile,
-  updateFocusTracking, migrateFocusTrackingFile,
+  updateFocusTracking, migrateFocusTrackingFile, migrateVaultRecordsFile, isPlaceholder,
 } from "../vault-updates";
 import { appendToFirstTable } from "../markdown-table";
 
@@ -299,5 +299,407 @@ describe("migrateFocusTrackingFile", () => {
     expect(content).toContain("| Current | ongoing | 0 |");
     expect(await readFile(`${path}.pre-format2.bak`, "utf-8")).not.toContain("worklog-focus-format");
     expect(await migrateFocusTrackingFile(path, now)).toBeNull();
+  });
+});
+
+// --- Record identity: placeholders, duplicates, idempotency ---
+
+const CLEAN_MEMORY = `# Memory
+
+## Current Team (2026 - present)
+
+| Date | Item | Category | Notes |
+|------|------|----------|-------|
+| 2026-03-01 | Wrote the fallback path for the Search Revamp indexer | project | TEAM-1234 |
+`;
+
+const CLEAN_WORK_CONTEXT = `# Work Context
+
+## Organizational Notes
+
+- **process:** Release trains ship on Tuesdays _(TEAM-1200)_
+
+---
+
+*Last updated: 2026-02-01*
+`;
+
+const CLEAN_PROFILE = `# My Profile
+
+## Key Strengths
+
+_(Added automatically as significant achievements are recorded)_
+- Untangles flaky test suites other people avoid
+
+---
+
+*Last updated: 2026-02-01*
+`;
+
+const CLEAN_IMPACT_LOG = `# Impact Log
+
+## Impact Timeline
+
+| Date | Achievement | Scope | Core Value | Evidence |
+|------|-------------|-------|------------|----------|
+
+**Last significant impact:** 2026-02-01
+**Current gap:** 4 weeks
+`;
+
+describe("isPlaceholder", () => {
+  it("rejects blanks, parenthesised asides, template hints and bare sentinels", () => {
+    for (const text of [
+      "",
+      "   ",
+      "(none)",
+      "(leave blank if none)",
+      "_(Added automatically as new information is discovered)_",
+      "<!-- TODO: add your technical skills -->",
+      "n/a",
+      "None",
+    ]) {
+      expect(isPlaceholder(text), text).toBe(true);
+    }
+  });
+
+  it("keeps real text, including text with a parenthesis in it", () => {
+    for (const text of [
+      "Shipped the Search Revamp indexer fallback",
+      "(TEAM-1234) rollout finished without a rollback",
+      "Nothing shipped this week, but the design doc landed",
+    ]) {
+      expect(isPlaceholder(text), text).toBe(false);
+    }
+  });
+});
+
+describe("updateMemory record identity", () => {
+  it("drops a reworded repeat of a row already in the current table", async () => {
+    const path = join(tmpDir, "memory.md");
+    await writeFile(path, CLEAN_MEMORY);
+
+    await updateMemory(path, [
+      "| 2026-03-08 | Wrote a fallback path for the Search Revamp indexer | project | TEAM-1234 |",
+      "| 2026-03-08 | Reviewed the alert noise backlog with the on-call rota | support |  |",
+    ], []);
+
+    const content = await readFile(path, "utf-8");
+    expect(content.match(/fallback path/g)).toHaveLength(1);
+    expect(content).toContain("alert noise backlog");
+  });
+
+  it("drops placeholder rows the model emits when it has nothing to add", async () => {
+    const path = join(tmpDir, "memory.md");
+    await writeFile(path, CLEAN_MEMORY);
+    await updateMemory(path, ["| 2026-03-08 | (none) | misc |  |"], []);
+    expect(await readFile(path, "utf-8")).toBe(CLEAN_MEMORY);
+  });
+
+  it("graduates the row the coach paraphrased", async () => {
+    const path = join(tmpDir, "memory.md");
+    await writeFile(path, CLEAN_MEMORY);
+
+    await updateMemory(path, [], [
+      "Fallback path work for the Search Revamp indexer (now part of: shipped indexer resilience)",
+    ]);
+
+    const content = await readFile(path, "utf-8");
+    expect(content).not.toContain("fallback path");
+    expect(content).toContain("| Date | Item | Category | Notes |");
+  });
+
+  it("graduates one row per removal, not every row that reads alike", async () => {
+    const path = join(tmpDir, "memory.md");
+    await writeFile(path, `# Memory
+
+| Date | Item | Category | Notes |
+|------|------|----------|-------|
+| 2026-03-01 | Reviewed the Search Revamp rollout plan with the platform team | project |  |
+| 2026-03-02 | Reviewed the Search Revamp rollout plan with the platform team | project |  |
+`);
+
+    await updateMemory(path, [], ["Search Revamp rollout plan review with the platform team (now part of: ran the rollout)"]);
+
+    const content = await readFile(path, "utf-8");
+    expect(content.match(/rollout plan/g)).toHaveLength(1);
+  });
+
+  it("compares against the current era only, leaving archived rows out of it", async () => {
+    const path = join(tmpDir, "memory.md");
+    await writeFile(path, TWO_ERA_MEMORY);
+    await updateMemory(path, ["| 2026-03-01 | Old item | Fix | |"], []);
+    const content = await readFile(path, "utf-8");
+    expect(content.match(/Old item/g)).toHaveLength(2);
+  });
+});
+
+describe("updateWorkContext record identity", () => {
+  it("drops placeholder info and collapses repeats inside one batch", async () => {
+    const path = join(tmpDir, "work-context.md");
+    await writeFile(path, CLEAN_WORK_CONTEXT);
+
+    await updateWorkContext(path, [
+      { category: "process", info: "(none)", source: "unknown" },
+      { category: "process", info: "Release trains now ship on Tuesdays", source: "TEAM-1200" },
+      { category: "team", info: "Design review happens on Thursday afternoons", source: "TEAM-1300" },
+      { category: "team", info: "Design review happens Thursday afternoons", source: "TEAM-1301" },
+    ]);
+
+    const content = await readFile(path, "utf-8");
+    expect(content).not.toContain("(none)");
+    expect(content.match(/ship on Tuesdays/g)).toHaveLength(1);
+    expect(content.match(/Design review happens/g)).toHaveLength(1);
+    expect(content).toContain("_(TEAM-1300)_");
+  });
+
+  it("keeps new notes inside the Organizational Notes section", async () => {
+    const path = join(tmpDir, "work-context.md");
+    await writeFile(path, CLEAN_WORK_CONTEXT);
+    await updateWorkContext(path, [{ category: "team", info: "Support rota rotates fortnightly", source: "TEAM-1400" }]);
+
+    const content = await readFile(path, "utf-8");
+    const noteIdx = content.indexOf("Support rota");
+    expect(noteIdx).toBeGreaterThan(content.indexOf("## Organizational Notes"));
+    expect(noteIdx).toBeLessThan(content.indexOf("---"));
+  });
+});
+
+describe("updateProfile record identity", () => {
+  it("rejects the placeholder bullets that filled the file with (none)", async () => {
+    const path = join(tmpDir, "my-profile.md");
+    await writeFile(path, CLEAN_PROFILE);
+    await updateProfile(path, { achievement: "(none)", bulletPoint: "(none)" });
+    await updateProfile(path, { achievement: "none", bulletPoint: "(leave blank if none)" });
+    expect(await readFile(path, "utf-8")).toBe(CLEAN_PROFILE);
+  });
+
+  it("rejects a reworded repeat of a strength already listed", async () => {
+    const path = join(tmpDir, "my-profile.md");
+    await writeFile(path, CLEAN_PROFILE);
+    await updateProfile(path, {
+      achievement: "Test suite cleanup",
+      bulletPoint: "Untangles the flaky test suites that other people avoid",
+    });
+    expect(await readFile(path, "utf-8")).toBe(CLEAN_PROFILE);
+  });
+
+  it("adds a genuinely new strength inside the section", async () => {
+    const path = join(tmpDir, "my-profile.md");
+    await writeFile(path, CLEAN_PROFILE);
+    await updateProfile(path, {
+      achievement: "Search Revamp rollout",
+      bulletPoint: "Runs multi-team rollouts without a rollback",
+    });
+
+    const content = await readFile(path, "utf-8");
+    const bulletIdx = content.indexOf("- Runs multi-team rollouts");
+    expect(bulletIdx).toBeGreaterThan(content.indexOf("## Key Strengths"));
+    expect(bulletIdx).toBeLessThan(content.indexOf("---"));
+  });
+});
+
+describe("updateImpactLog record identity", () => {
+  it("does not append the same achievement on the same date twice", async () => {
+    const path = join(tmpDir, "impact-log.md");
+    await writeFile(path, CLEAN_IMPACT_LOG);
+    const entry = {
+      date: "2026-03-05",
+      achievement: "Led the Search Revamp rollout across three teams",
+      scope: "org",
+      coreValue: "craft",
+      evidence: "TEAM-1234",
+    };
+
+    await updateImpactLog(path, entry);
+    await updateImpactLog(path, { ...entry, evidence: "TEAM-1234, TEAM-1235" });
+
+    const content = await readFile(path, "utf-8");
+    expect(content.match(/Search Revamp rollout/g)).toHaveLength(1);
+    expect(content).toContain("**Last significant impact:** 2026-03-05");
+  });
+});
+
+describe("applying the same week twice", () => {
+  it("leaves all four record files byte-identical", async () => {
+    const memoryPath = join(tmpDir, "memory.md");
+    const workContextPath = join(tmpDir, "work-context.md");
+    const profilePath = join(tmpDir, "my-profile.md");
+    const impactLogPath = join(tmpDir, "impact-log.md");
+
+    await writeFile(memoryPath, CLEAN_MEMORY);
+    await writeFile(workContextPath, CLEAN_WORK_CONTEXT);
+    await writeFile(profilePath, CLEAN_PROFILE);
+    await writeFile(impactLogPath, CLEAN_IMPACT_LOG);
+
+    const result = {
+      itemsToAdd: [
+        "| 2026-03-08 | Cut the search index rebuild from 40 to 12 minutes | project | TEAM-1234 |",
+        "| 2026-03-08 | Documented the on-call escalation path | support |  |",
+      ],
+      itemsToRemove: ["Fallback path work for the Search Revamp indexer (now part of: shipped indexer resilience)"],
+      impactLogEntry: {
+        date: "2026-03-08",
+        achievement: "Led the Search Revamp rollout across three teams",
+        scope: "org",
+        coreValue: "craft",
+        evidence: "TEAM-1234",
+      },
+      workContextUpdates: [
+        { category: "process", info: "Release readiness reviews moved to Wednesday", source: "TEAM-1300" },
+      ],
+      profileUpdate: {
+        achievement: "Search Revamp rollout",
+        bulletPoint: "Runs multi-team rollouts without a rollback",
+      },
+    };
+
+    const apply = async () => {
+      await updateMemory(memoryPath, result.itemsToAdd, result.itemsToRemove);
+      await updateImpactLog(impactLogPath, result.impactLogEntry);
+      await updateWorkContext(workContextPath, result.workContextUpdates);
+      await updateProfile(profilePath, result.profileUpdate);
+      return Promise.all([
+        readFile(memoryPath, "utf-8"),
+        readFile(impactLogPath, "utf-8"),
+        readFile(workContextPath, "utf-8"),
+        readFile(profilePath, "utf-8"),
+      ]);
+    };
+
+    const first = await apply();
+    const second = await apply();
+
+    expect(second).toEqual(first);
+    expect(first[0]).toContain("Cut the search index rebuild");
+    expect(first[1]).toContain("Led the Search Revamp rollout");
+    expect(first[2]).toContain("Release readiness reviews moved to Wednesday");
+    expect(first[3]).toContain("Runs multi-team rollouts without a rollback");
+  });
+});
+
+describe("migrateVaultRecordsFile", () => {
+  it("returns null for a file that is not there", async () => {
+    expect(await migrateVaultRecordsFile(join(tmpDir, "missing.md"), "memory")).toBeNull();
+  });
+
+  it("strips the (none) rows from Key Strengths and keeps the template hint", async () => {
+    const path = join(tmpDir, "my-profile.md");
+    await writeFile(path, `# My Profile
+
+## Key Strengths
+
+_(Added automatically as significant achievements are recorded)_
+- (none)
+- (none)
+- (leave blank)
+- Untangles flaky test suites other people avoid
+- Untangles flaky test suites other people avoid
+
+---
+
+*Last updated: 2026-02-01*
+`);
+
+    expect(await migrateVaultRecordsFile(path, "my-profile")).toEqual({ placeholders: 3, duplicates: 1 });
+
+    const content = await readFile(path, "utf-8");
+    expect(content).not.toContain("(none)");
+    expect(content).toContain("_(Added automatically as significant achievements are recorded)_");
+    expect(content.match(/Untangles flaky test suites/g)).toHaveLength(1);
+    expect(await readFile(`${path}.pre-dedupe.bak`, "utf-8")).toContain("- (none)");
+  });
+
+  it("collapses the repeated organizational notes", async () => {
+    const path = join(tmpDir, "work-context.md");
+    await writeFile(path, `# Work Context
+
+## Organizational Notes
+
+- **process:** Release trains ship on Tuesdays _(TEAM-1200)_
+- **process:** Release trains ship on Tuesdays _(TEAM-1200)_
+- **process:** Release trains ship on Tuesdays _(TEAM-1201)_
+- **process:** (none) _(unknown)_
+- **team:** Design review happens on Thursday afternoons _(TEAM-1300)_
+
+---
+
+*Last updated: 2026-02-01*
+`);
+
+    expect(await migrateVaultRecordsFile(path, "work-context")).toEqual({ placeholders: 1, duplicates: 2 });
+
+    const content = await readFile(path, "utf-8");
+    expect(content.match(/ship on Tuesdays/g)).toHaveLength(1);
+    expect(content).toContain("Design review happens on Thursday afternoons");
+    expect(content).not.toContain("(none)");
+  });
+
+  it("collapses repeated memory rows in the current era only", async () => {
+    const path = join(tmpDir, "memory.md");
+    await writeFile(path, `# Memory
+
+## Current Team (2026 - present)
+
+| Date | Item | Category | Notes |
+|------|------|----------|-------|
+| 2026-03-01 | Wrote the fallback path for the Search Revamp indexer | project | TEAM-1234 |
+| 2026-03-02 | Wrote the fallback path for the Search Revamp indexer | project | TEAM-1234 |
+| 2026-03-03 |  | project |  |
+
+## Previous Team (2025) — HISTORICAL
+
+| Date | Item | Category | Notes |
+|------|------|----------|-------|
+| 2025-05-01 | Old item | Fix | |
+| 2025-05-02 | Old item | Fix | |
+`);
+
+    expect(await migrateVaultRecordsFile(path, "memory")).toEqual({ placeholders: 1, duplicates: 1 });
+
+    const content = await readFile(path, "utf-8");
+    expect(content.match(/fallback path/g)).toHaveLength(1);
+    expect(content.match(/Old item/g)).toHaveLength(2);
+  });
+
+  it("collapses impact entries repeated on the same date", async () => {
+    const path = join(tmpDir, "impact-log.md");
+    await writeFile(path, `# Impact Log
+
+## Impact Timeline
+
+| Date | Achievement | Scope | Core Value | Evidence |
+|------|-------------|-------|------------|----------|
+| 2026-03-05 | Led the Search Revamp rollout | org | craft | TEAM-1234 |
+| 2026-03-05 | Led the Search Revamp rollout | org | craft | TEAM-1234 |
+| 2026-03-06 | Led the Search Revamp rollout | org | craft | TEAM-1235 |
+
+**Last significant impact:** 2026-03-06
+**Current gap:** None - recent entry added
+`);
+
+    expect(await migrateVaultRecordsFile(path, "impact-log")).toEqual({ placeholders: 0, duplicates: 1 });
+    const content = await readFile(path, "utf-8");
+    expect(content.match(/Search Revamp rollout/g)).toHaveLength(2);
+  });
+
+  it("rewrites nothing on a second run", async () => {
+    const path = join(tmpDir, "my-profile.md");
+    const backupPath = `${path}.pre-dedupe.bak`;
+    await writeFile(path, `# My Profile
+
+## Key Strengths
+
+- (none)
+- Untangles flaky test suites other people avoid
+`);
+
+    expect(await migrateVaultRecordsFile(path, "my-profile")).toEqual({ placeholders: 1, duplicates: 0 });
+    const cleaned = await readFile(path, "utf-8");
+    await writeFile(backupPath, "sentinel", "utf-8");
+
+    expect(await migrateVaultRecordsFile(path, "my-profile")).toBeNull();
+    expect(await readFile(path, "utf-8")).toBe(cleaned);
+    expect(await readFile(backupPath, "utf-8")).toBe("sentinel");
   });
 });
