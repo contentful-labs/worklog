@@ -357,6 +357,28 @@ describe("fetchDataForWeek", () => {
     expect(data.reviews[0].comment_count).toBe(0);
   });
 
+  it("keeps the review when the comments fetch throws", async () => {
+    server.use(
+      reviewedPRHandler,
+      http.get("https://api.github.com/repos/test-org/repo/pulls/7/reviews", () =>
+        HttpResponse.json([
+          { user: { login: "testuser" }, state: "APPROVED", submitted_at: "2026-03-04", html_url: "https://github.com/test-org/repo/pull/7#r1" },
+        ]),
+      ),
+      http.get("https://api.github.com/repos/test-org/repo/pulls/7/comments", () => HttpResponse.error()),
+    );
+
+    const warnings: string[] = [];
+    const h = buildHeaders(mockConfig, mockCreds);
+    const data = await fetchDataForWeek(mockConfig, h, "abc123", "testuser", weekInfo, {
+      onWarning: (message) => warnings.push(message),
+    });
+
+    expect(warnings.some((w) => w.includes("Could not read review comments for test-org/repo#7"))).toBe(true);
+    expect(data.reviews).toHaveLength(1);
+    expect(data.reviews[0].comment_count).toBe(0);
+  });
+
   it("warns when a PR's review fetch throws", async () => {
     server.use(
       reviewedPRHandler,

@@ -252,13 +252,18 @@ export async function fetchDataForWeek(
 
       const latestReview = userReviews[userReviews.length - 1];
 
-      const commentsRes = await fetch(`https://api.github.com/repos/${repoPath}/pulls/${pr.number}/comments`, { headers: headers.github });
+      // Own try/catch: the review is already fetched, so a comment count failure must not drop it.
       let commentCount = 0;
-      if (commentsRes.ok) {
-        const prComments = await commentsRes.json();
-        commentCount = prComments.filter((c: { user?: { login: string } }) => c.user?.login === githubUsername).length;
-      } else {
-        onWarning?.(`Could not read review comments for ${repoPath}#${pr.number}, its comment count will read 0: HTTP ${commentsRes.status}`);
+      try {
+        const commentsRes = await fetch(`https://api.github.com/repos/${repoPath}/pulls/${pr.number}/comments`, { headers: headers.github });
+        if (commentsRes.ok) {
+          const prComments = await commentsRes.json();
+          commentCount = prComments.filter((c: { user?: { login: string } }) => c.user?.login === githubUsername).length;
+        } else {
+          onWarning?.(`Could not read review comments for ${repoPath}#${pr.number}, its comment count will read 0: HTTP ${commentsRes.status}`);
+        }
+      } catch (err) {
+        onWarning?.(`Could not read review comments for ${repoPath}#${pr.number}, its comment count will read 0: ${String(err)}`);
       }
 
       reviews.push({
