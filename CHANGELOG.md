@@ -1,5 +1,23 @@
 # Changelog
 
+## [2.0.0](https://github.com/contentful-labs/worklog/compare/v1.6.1...v2.0.0) (2026-08-26)
+
+
+### ⚠ BREAKING CHANGES
+
+* updateFocusTracking takes an options object, getPendingFocusItems and expireStaleFocusItems are removed, and BragBookResult.focusUpdates is keyed by id instead of week plus item text.
+
+### Features
+
+* provider-neutral tools, focus-tracking rebuild, prompt-size guards ([71acbe3](https://github.com/contentful-labs/worklog/commit/71acbe3356a9460235ecf3668b2cbf9b7476ae05))
+
+
+### Bug Fixes
+
+* limit CI workflow token permissions ([4d3cf29](https://github.com/contentful-labs/worklog/commit/4d3cf29297e6aa387b2277abe06e8e0734808870))
+* limit CI workflow token permissions ([b377479](https://github.com/contentful-labs/worklog/commit/b3774798843d61ea7a44817cddcdf595f7afe06e))
+* store config paths relative to home ([301952d](https://github.com/contentful-labs/worklog/commit/301952dfeae1c5aa676b87ce54fb3e6c99b0efd7))
+
 ## [1.6.1](https://github.com/contentful-labs/worklog/compare/v1.6.0...v1.6.1) (2026-03-30)
 
 
