@@ -115,10 +115,16 @@ text comes back the same way and is written into your local work log. Nothing el
 
 The subprocess is locked down because its input is Slack text anyone can write. It runs with
 every built-in tool removed (`--tools ""`), with only the Glean MCP server loaded
-(`--strict-mcp-config`), with no settings files read (`--setting-sources ""`, so none of your
-hooks see the Glean traffic), in an empty temporary directory, and with an environment cut down
-to what it needs to authenticate and reach the network. An instruction hidden in a message has no
+(`--strict-mcp-config`), with your user, project and local settings not loaded
+(`--setting-sources ""`), in an empty temporary directory, and with an environment cut down to
+what it needs to authenticate and reach the network. An instruction hidden in a message has no
 file, shell, browser or other MCP tool to reach for. Verified against Claude Code 2.1.246.
+
+One thing that flag does not cover: settings your organisation manages by policy still apply,
+including any hooks they define. If your organisation has managed hooks, they run in this
+subprocess like any other Claude Code session and can see the Glean tool responses. Disabling
+those needs `--bare`, which forces API-key authentication and never reads your OAuth login, so
+worklog does not use it. If that matters for your organisation, use `--no-slack`.
 
 Your Glean MCP server also has to be configured in your own user config over `https`; a
 project-scoped or local entry, which a checked-out repository could supply, is refused.

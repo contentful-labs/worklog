@@ -1,8 +1,10 @@
-import { describe, it, expect, afterEach, vi } from "vitest";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync } from "node:fs";
+import { realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  childEnvironment,
   createSlackSource,
   slackMessagesFrom,
   withEmptyCwd,
@@ -223,7 +225,9 @@ describe("slack source child process isolation", () => {
     await createSlackSource(watching).fetchWindow(WINDOW, ctx);
 
     expect(observed).toBeDefined();
-    expect(observed?.startsWith(tmpdir())).toBe(true);
+    // The real temp root, not the possibly-symlinked TMPDIR: on macOS /var is a link to
+    // /private/var, and the source resolves it before creating anything.
+    expect(observed?.startsWith(realpathSync(tmpdir()))).toBe(true);
     expect(observed).not.toBe(process.cwd());
     // Both the status probe and the fetch share the one directory.
     expect(new Set(runner.options.map((o) => o.cwd)).size).toBe(1);
@@ -500,35 +504,168 @@ describe("slack source time budget", () => {
 });
 
 describe("withEmptyCwd", () => {
+  // The real TMPDIR is redirected rather than the directory factory being injected: production
+  // code must have no seam a caller could hand a path to, because the cleanup is an rm -rf.
+  let sandbox = "";
+  let originalTmpdir: string | undefined;
+
+  beforeEach(() => {
+    originalTmpdir = process.env.TMPDIR;
+    sandbox = mkdtempSync(join(realpathSync(tmpdir()), "worklog-test-"));
+    process.env.TMPDIR = sandbox;
+  });
+
+  afterEach(() => {
+    if (originalTmpdir === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = originalTmpdir;
+    rmSync(sandbox, { recursive: true, force: true });
+  });
+
   it("makes an empty directory under the temp dir and removes it afterwards", async () => {
+    const warnings: string[] = [];
     let seen = "";
+
     await withEmptyCwd(async (cwd) => {
       seen = cwd;
       expect(readdirSync(cwd)).toEqual([]);
-      expect(cwd.startsWith(tmpdir())).toBe(true);
-    });
+      expect(cwd.startsWith(sandbox)).toBe(true);
+    }, (message) => warnings.push(message));
 
     expect(existsSync(seen)).toBe(false);
+    expect(warnings).toEqual([]);
   });
 
-  // The cleanup is an rm -rf, so it has to refuse a path it did not create. A mutation that
-  // pointed it at process.cwd() once deleted a whole working tree. Both cases below hand it a
-  // throwaway directory, so a broken guard costs nothing but that directory.
-  it.each([
-    ["a directory whose name is not ours", () => mkdtempSync(join(tmpdir(), "not-worklog-"))],
-    ["a directory that is not directly under the temp dir", () => {
-      const nested = join(mkdtempSync(join(tmpdir(), "worklog-slack-")), "nested");
-      mkdirSync(nested);
-      return nested;
-    }],
-  ])("removes nothing given %s", async (_name, make) => {
-    const decoy = make();
-    try {
-      await withEmptyCwd(async () => undefined, async () => decoy);
-      expect(existsSync(decoy)).toBe(true);
-    } finally {
-      rmSync(decoy, { recursive: true, force: true });
-    }
+  it("leaves a same-prefix decoy alone: only the directory it created is removed", async () => {
+    // A name that would satisfy a prefix check but is not the directory this call made.
+    const decoy = mkdtempSync(join(sandbox, "worklog-slack-"));
+
+    await withEmptyCwd(async () => undefined, () => {});
+
+    expect(existsSync(decoy)).toBe(true);
+  });
+
+  it("refuses to remove the path once it has been retargeted at a symlink", async () => {
+    const treasure = join(sandbox, "treasure");
+    mkdirSync(treasure);
+    const warnings: string[] = [];
+    let seen = "";
+
+    await withEmptyCwd(async (cwd) => {
+      seen = cwd;
+      // Swap the directory for a symlink pointing somewhere that must survive.
+      rmSync(cwd, { recursive: true, force: true });
+      symlinkSync(treasure, cwd);
+    }, (message) => warnings.push(message));
+
+    expect(lstatSync(seen).isSymbolicLink()).toBe(true);
+    expect(existsSync(treasure)).toBe(true);
+    expect(warnings.join(" ")).toContain("no longer the directory worklog created");
+  });
+
+  it("keeps the body's result when cleanup cannot run", async () => {
+    const warnings: string[] = [];
+
+    const result = await withEmptyCwd(async (cwd) => {
+      rmSync(cwd, { recursive: true, force: true });
+      symlinkSync(sandbox, cwd);
+      return "kept";
+    }, (message) => warnings.push(message));
+
+    expect(result).toBe("kept");
+    expect(warnings).toHaveLength(1);
+  });
+
+  it("says nothing when the directory is already gone", async () => {
+    const warnings: string[] = [];
+
+    await withEmptyCwd(async (cwd) => {
+      rmSync(cwd, { recursive: true, force: true });
+    }, (message) => warnings.push(message));
+
+    expect(warnings).toEqual([]);
+  });
+});
+
+describe("slack source when the temp directory cannot be made", () => {
+  let originalTmpdir: string | undefined;
+
+  beforeEach(() => {
+    originalTmpdir = process.env.TMPDIR;
+    process.env.TMPDIR = join(tmpdir(), "worklog-does-not-exist", "nor-does-this");
+  });
+
+  afterEach(() => {
+    if (originalTmpdir === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = originalTmpdir;
+  });
+
+  it("reports itself unavailable instead of throwing", async () => {
+    const result = await createSlackSource(fakeRunner([MCP_CONNECTED])).isAvailable(ctx);
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toContain("isolated working directory");
+  });
+
+  it("returns an empty batch with a warning instead of throwing", async () => {
+    const runner = fetchRunner(json([]));
+    const batch = await createSlackSource(runner).fetchWindow(WINDOW, ctx);
+
+    // Nothing was spawned: the failure happens before the first call.
+    expect(runner.calls).toEqual([]);
+    expect(batch.events).toEqual([]);
+    expect(batch.warnings.join(" ")).toContain("isolated working directory");
+  });
+});
+
+describe("childEnvironment", () => {
+  it("keeps what the CLI needs to find its config, credentials and the network", () => {
+    const env = childEnvironment({
+      HOME: "/home/test",
+      PATH: "/usr/bin",
+      CLAUDE_CONFIG_DIR: "/home/test/.claude-alt",
+      CLAUDE_CODE_OAUTH_TOKEN: "token",
+      XDG_CONFIG_HOME: "/home/test/.config",
+      ANTHROPIC_API_KEY: "key",
+      HTTPS_PROXY: "http://proxy.example:3128",
+      NODE_EXTRA_CA_CERTS: "/etc/ca.pem",
+    });
+
+    expect(env).toEqual({
+      HOME: "/home/test",
+      PATH: "/usr/bin",
+      CLAUDE_CONFIG_DIR: "/home/test/.claude-alt",
+      CLAUDE_CODE_OAUTH_TOKEN: "token",
+      XDG_CONFIG_HOME: "/home/test/.config",
+      ANTHROPIC_API_KEY: "key",
+      HTTPS_PROXY: "http://proxy.example:3128",
+      NODE_EXTRA_CA_CERTS: "/etc/ca.pem",
+    });
+  });
+
+  it("drops the nesting markers, which stop Claude Code starting at all", () => {
+    const env = childEnvironment({
+      HOME: "/home/test",
+      CLAUDECODE: "1",
+      CLAUDE_CODE_SSE_PORT: "1234",
+      CLAUDE_CODE_ENTRYPOINT: "cli",
+    });
+
+    expect(env).toEqual({ HOME: "/home/test" });
+  });
+
+  it("drops everything else this process happens to hold", () => {
+    const env = childEnvironment({
+      HOME: "/home/test",
+      GITHUB_TOKEN: "ghp_secret",
+      ATLASSIAN_API_TOKEN: "atl_secret",
+      AWS_SECRET_ACCESS_KEY: "aws_secret",
+    });
+
+    expect(Object.keys(env)).toEqual(["HOME"]);
+  });
+
+  it("omits keys that are not set rather than passing undefined through", () => {
+    expect(childEnvironment({})).toEqual({});
   });
 });
 

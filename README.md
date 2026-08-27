@@ -131,8 +131,10 @@ worklog configure coaching
 All data stays local. What leaves your machine: API calls to OpenAI or Anthropic to generate text,
 and API calls to Jira/GitHub/Confluence to fetch your own activity. If the optional Slack source is
 on, worklog also starts a `claude` subprocess and sends it your profile name and the week's date
-range; Claude Code and Glean see that query and return your messages. Pass `--no-slack`, or leave
-`glean_default` disconnected, to turn that off. See
+range; Claude Code and Glean see that query and return your messages. The subprocess runs with no
+tools, no MCP server but Glean, and your own settings and hooks not loaded — though hooks your
+organisation manages by policy still apply and would see the Glean traffic. Pass `--no-slack`, or
+leave `glean_default` disconnected, to turn all of it off. See
 [docs/setup.md](docs/setup.md#what-leaves-your-machine).
 
 ## Weekly workflow

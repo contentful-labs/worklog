@@ -18,7 +18,9 @@
  *   without it the child inherits every MCP server the user has, mail and browser included.
  * - `--setting-sources ""` stops user, project and local settings loading. A project
  *   `UserPromptSubmit` hook fires in the child without it and does not fire with it, so
- *   without this flag a hook would see every Glean tool response.
+ *   without this flag a hook would see every Glean tool response. Policy settings an
+ *   organisation manages are not covered: only `--bare` disables those, and `--bare` never
+ *   reads an OAuth login, so it would log out every subscription user.
  * - a fresh empty working directory means no project CLAUDE.md, settings or memory to discover.
  *
  * The environment is an allowlist for the same reason: a process started to read untrusted text
@@ -26,9 +28,9 @@
  */
 
 import { execFile } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { lstat, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { join } from "node:path";
 import { promisify } from "node:util";
 import { z } from "zod";
 import type { WorklogConfig } from "../types";
@@ -81,8 +83,10 @@ const REASON_MAX_CHARS = 200;
  *
  * Note what is absent: CLAUDECODE, CLAUDE_CODE_SSE_PORT and CLAUDE_CODE_ENTRYPOINT. Claude Code
  * refuses to start when those say it is nested inside another session.
+ *
+ * Exported so the child's environment can be checked without spawning anything.
  */
-const CHILD_ENV_KEYS = [
+export const CHILD_ENV_KEYS = [
   "HOME",
   "PATH",
   "USER",
@@ -95,6 +99,11 @@ const CHILD_ENV_KEYS = [
   "ANTHROPIC_API_KEY",
   "ANTHROPIC_AUTH_TOKEN",
   "ANTHROPIC_BASE_URL",
+  // Where the CLI keeps its own credentials and settings. Dropping these logs out any user who
+  // has moved them, so the child would find no auth at all.
+  "CLAUDE_CONFIG_DIR",
+  "CLAUDE_CODE_OAUTH_TOKEN",
+  "XDG_CONFIG_HOME",
   "HTTP_PROXY",
   "HTTPS_PROXY",
   "NO_PROXY",
@@ -123,18 +132,26 @@ export type ProcessRunner = (args: readonly string[], options: RunOptions) => Pr
 const execFileAsync = promisify(execFile);
 
 /**
- * What `execFile` puts on the error it rejects with: `code` is a spawn errno such as ENOENT,
- * `killed` is set when the timeout fired. Parsed rather than asserted, because a rejection can
- * carry anything.
+ * A thrown value, parsed rather than asserted, because a rejection can carry anything. `code` is
+ * an errno such as ENOENT from a spawn or a filesystem call, `killed` is set when a timeout
+ * fired, and `stderr` is what the child printed.
  */
-const execFailureSchema = z
+const thrownSchema = z
   .object({
     // A spawn failure puts an errno string here; a non-zero exit puts the exit code.
     code: z.union([z.string(), z.number()]).optional(),
     killed: z.boolean().optional(),
     stderr: z.string().optional(),
+    message: z.string().optional(),
   })
   .catch({});
+
+type Thrown = z.infer<typeof thrownSchema>;
+
+/** The one line of a thrown value worth putting in front of a person. */
+function describeError(failure: Thrown): string {
+  return firstLine(failure.message ?? "unknown error");
+}
 
 function firstLine(value: string): string {
   const newline = value.indexOf("\n");
@@ -143,12 +160,17 @@ function firstLine(value: string): string {
 }
 
 /** Spawns `claude` directly, never through a shell, with stdin closed and a minimal environment. */
-export const runClaudeCli: ProcessRunner = async (args, { timeoutMs, cwd }) => {
+export function childEnvironment(source: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
   for (const key of CHILD_ENV_KEYS) {
-    const value = process.env[key];
+    const value = source[key];
     if (value !== undefined) env[key] = value;
   }
+  return env;
+}
+
+export const runClaudeCli: ProcessRunner = async (args, { timeoutMs, cwd }) => {
+  const env = childEnvironment();
 
   try {
     const pending = execFileAsync("claude", [...args], {
@@ -161,7 +183,7 @@ export const runClaudeCli: ProcessRunner = async (args, { timeoutMs, cwd }) => {
     const { stdout } = await pending;
     return { ok: true, stdout };
   } catch (err) {
-    const failure = execFailureSchema.parse(err);
+    const failure = thrownSchema.parse(err);
     if (failure.code === "ENOENT") {
       return { ok: false, kind: "missing", message: "`claude` was not found on PATH" };
     }
@@ -321,30 +343,67 @@ function keepOwnPublic(messages: SlackMessage[], config: WorklogConfig): OwnPubl
 const CWD_PREFIX = "worklog-slack-";
 
 /**
- * Only ever delete a directory this module made. `rm -rf` on a path someone else chose is how a
- * cleanup step turns into data loss, and the cost of being wrong here is somebody's working
- * directory. Proved the hard way while mutation-testing this function.
+ * Enough of an `lstat` to tell whether a path is still the same directory later. A path string
+ * is not identity: it can be swapped for a symlink between the two calls.
  */
-function isOwnTempDir(path: string): boolean {
-  const parent = dirname(path);
-  return parent === tmpdir() && basename(path).startsWith(CWD_PREFIX);
+interface DirIdentity {
+  dev: number;
+  ino: number;
+}
+
+async function directoryIdentity(path: string): Promise<DirIdentity | null> {
+  const stats = await lstat(path);
+  // lstat does not follow the link, so a retargeted path shows up here rather than silently
+  // resolving to whatever it now points at.
+  return stats.isDirectory() ? { dev: stats.dev, ino: stats.ino } : null;
 }
 
 /**
  * Run something with a working directory that has nothing in it. Claude Code discovers project
  * settings, CLAUDE.md and memory by walking up from its cwd, so the child is given a directory
  * where there is nothing to find.
+ *
+ * Cleanup is an `rm -rf`, so it only ever runs against the exact directory this function
+ * created: the temp root is resolved with `realpath` first, and the directory's dev/ino are
+ * recorded at creation and checked again before removal. Anything else, including the path
+ * having become a symlink, is left alone with a warning. This function once deleted a whole
+ * working tree during a mutation test, which is the only reason any of that is here.
+ *
+ * Neither failure is fatal. Slack is an optional source: it may decline to run, but it may not
+ * take the week's Jira, Confluence and GitHub data down with it.
  */
 export async function withEmptyCwd<T>(
   body: (cwd: string) => Promise<T>,
-  /** Injectable so the refusal above can be tested without an fs stub. */
-  makeDir: () => Promise<string> = () => mkdtemp(join(tmpdir(), CWD_PREFIX)),
+  onWarning: (message: string) => void,
 ): Promise<T> {
-  const cwd = await makeDir();
+  const root = await realpath(tmpdir());
+  const cwd = await mkdtemp(join(root, CWD_PREFIX));
+  const created = await directoryIdentity(cwd);
+
   try {
     return await body(cwd);
   } finally {
-    if (isOwnTempDir(cwd)) await rm(cwd, { recursive: true, force: true });
+    await removeIfUnchanged(cwd, created, onWarning);
+  }
+}
+
+async function removeIfUnchanged(
+  cwd: string,
+  created: DirIdentity | null,
+  onWarning: (message: string) => void,
+): Promise<void> {
+  try {
+    const current = await directoryIdentity(cwd);
+    if (!created || !current || current.dev !== created.dev || current.ino !== created.ino) {
+      onWarning(`Left ${cwd} in place: it is no longer the directory worklog created.`);
+      return;
+    }
+    await rm(cwd, { recursive: true, force: true });
+  } catch (err) {
+    const failure = thrownSchema.parse(err);
+    // The directory being gone already is not a problem worth telling anyone about.
+    if (failure.code === "ENOENT") return;
+    onWarning(`Could not remove the temporary directory ${cwd}: ${describeError(failure)}`);
   }
 }
 
@@ -688,64 +747,92 @@ function rejectionWarnings(counts: RejectionCounts): string[] {
 // --- Source ---
 
 export function createSlackSource(runner: ProcessRunner = runClaudeCli): Source {
-  function ask(
+  async function ask(
     instruction: string,
     ctx: SourceContext,
     inRange: (message: SlackMessage) => boolean,
     known: ReadonlySet<string> = new Set(),
   ): Promise<SourceBatch> {
-    return withEmptyCwd(async (cwd) => {
-      const server = await resolveGleanServer(runner, cwd);
-      if (!server.ok) {
-        return emptyBatch(`Slack fetch skipped, this week has no Slack material: ${server.reason}`);
-      }
+    // Cleanup problems are reported with the week's other warnings rather than thrown.
+    const housekeeping: string[] = [];
+    const withHousekeeping = (batch: SourceBatch): SourceBatch =>
+      housekeeping.length === 0
+        ? batch
+        : { ...batch, warnings: [...batch.warnings, ...housekeeping] };
 
-      const started = Date.now();
-      const deadline = started + FETCH_BUDGET_MS;
-      const elapsed = () => `${Math.round((Date.now() - started) / 1000)}s`;
-
-      for (const retry of [false, true]) {
-        const remainingMs = deadline - Date.now();
-        if (retry && remainingMs < MIN_RETRY_MS) {
-          ctx.log?.(`slack: no time left to retry after ${elapsed()}`);
-          break;
+    try {
+      const batch = await withEmptyCwd(async (cwd) => {
+        const server = await resolveGleanServer(runner, cwd);
+        if (!server.ok) {
+          return emptyBatch(`Slack fetch skipped, this week has no Slack material: ${server.reason}`);
         }
 
-        ctx.log?.(`slack: asking Glean via claude (retry=${retry}, budget=${Math.round(remainingMs / 1000)}s)`);
-        const result = await runner(claudeArgs(buildPrompt(instruction, ctx.config, retry), server.mcpConfig), {
-          timeoutMs: remainingMs,
-          cwd,
-        });
-        if (!result.ok) {
-          return emptyBatch(`Slack fetch failed after ${elapsed()}, this week has no Slack material: ${result.message}`);
+        const started = Date.now();
+        const deadline = started + FETCH_BUDGET_MS;
+        const elapsed = () => `${Math.round((Date.now() - started) / 1000)}s`;
+
+        for (const retry of [false, true]) {
+          const remainingMs = deadline - Date.now();
+          if (retry && remainingMs < MIN_RETRY_MS) {
+            ctx.log?.(`slack: no time left to retry after ${elapsed()}`);
+            break;
+          }
+
+          ctx.log?.(`slack: asking Glean via claude (retry=${retry}, budget=${Math.round(remainingMs / 1000)}s)`);
+          const result = await runner(claudeArgs(buildPrompt(instruction, ctx.config, retry), server.mcpConfig), {
+            timeoutMs: remainingMs,
+            cwd,
+          });
+          if (!result.ok) {
+            return emptyBatch(`Slack fetch failed after ${elapsed()}, this week has no Slack material: ${result.message}`);
+          }
+
+          const parsed = extractMessages(result.stdout);
+          if (parsed === null) continue;
+
+          const { messages, malformed } = parsed;
+          const { kept: mine, notMine, notPublic } = keepOwnPublic(messages, ctx.config);
+          const { kept, outOfRange } = select(mine, inRange, known);
+
+          ctx.log?.(
+            `slack: finished in ${elapsed()} — ${kept.length} kept, ${notPublic} not public, ` +
+              `${notMine} not yours, ${malformed} malformed, ${outOfRange} outside the range`,
+          );
+          return toBatch(kept, rejectionWarnings({ malformed, notMine, notPublic, outOfRange }));
         }
 
-        const parsed = extractMessages(result.stdout);
-        if (parsed === null) continue;
-
-        const { messages, malformed } = parsed;
-        const { kept: mine, notMine, notPublic } = keepOwnPublic(messages, ctx.config);
-        const { kept, outOfRange } = select(mine, inRange, known);
-
-        ctx.log?.(
-          `slack: finished in ${elapsed()} — ${kept.length} kept, ${notPublic} not public, ` +
-            `${notMine} not yours, ${malformed} malformed, ${outOfRange} outside the range`,
+        return emptyBatch(
+          `Slack fetch returned no usable JSON after ${elapsed()}, this week has no Slack material.`,
         );
-        return toBatch(kept, rejectionWarnings({ malformed, notMine, notPublic, outOfRange }));
-      }
-
-      return emptyBatch(
-        `Slack fetch returned no usable JSON after ${elapsed()}, this week has no Slack material.`,
+      }, (message) => housekeeping.push(message));
+      return withHousekeeping(batch);
+    } catch (err) {
+      // Preparing the isolated directory can fail on its own, TMPDIR pointing nowhere being the
+      // obvious way. Slack goes missing for the week; the run carries on.
+      return withHousekeeping(
+        emptyBatch(
+          `Slack fetch skipped, this week has no Slack material: could not prepare an isolated working directory: ${describeError(thrownSchema.parse(err))}`,
+        ),
       );
-    });
+    }
   }
 
   return {
     name: SLACK_SOURCE_NAME,
 
-    async isAvailable(_ctx: SourceContext): Promise<SourceAvailability> {
-      const server = await withEmptyCwd((cwd) => resolveGleanServer(runner, cwd));
-      return server.ok ? { ok: true } : { ok: false, reason: server.reason };
+    async isAvailable(ctx: SourceContext): Promise<SourceAvailability> {
+      try {
+        const server = await withEmptyCwd(
+          (cwd) => resolveGleanServer(runner, cwd),
+          (message) => ctx.log?.(`slack: ${message}`),
+        );
+        return server.ok ? { ok: true } : { ok: false, reason: server.reason };
+      } catch (err) {
+        return {
+          ok: false,
+          reason: `could not prepare an isolated working directory: ${describeError(thrownSchema.parse(err))}`,
+        };
+      }
     },
 
     fetchWindow(window, ctx) {
