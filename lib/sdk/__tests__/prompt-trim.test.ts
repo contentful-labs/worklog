@@ -297,9 +297,12 @@ describe("markdown structure, not lines", () => {
 
     const trimmed = capOrganizationalNotes(content, 2);
 
+    // A setext heading spans two lines; the section has to start at the text, not the underline.
+    expect(trimmed).toContain("Organizational Notes\n--------------------");
     expect(trimmed).toContain("- Note one");
     expect(trimmed).toContain("- Note two");
     expect(trimmed).not.toContain("- Note three");
+    expect(trimmed).not.toContain("ARCHIVED - Old Era");
     expect(trimmed).not.toContain("- Old note");
   });
 
