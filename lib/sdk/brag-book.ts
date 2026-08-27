@@ -1,3 +1,18 @@
+import {
+  MAX_NEW_FOCUS_ITEMS,
+  bragBookMarkdownProblem,
+  validFocusStatusSchema,
+  validImpactLogEntrySchema,
+  validMemoryGraduationSchema,
+  validMemoryItemSchema,
+  validNewFocusItemSchema,
+  validProfileUpdateSchema,
+  validWorkContextUpdateSchema,
+  type BragBookOutput,
+} from "./brag-book-schema";
+import { renderRow } from "./markdown-table";
+import type { z } from "zod";
+
 export interface BragBookResult {
   bragBookContent: string;
   itemsToAdd: string[];
@@ -17,139 +32,94 @@ export interface ReviewInfo {
   urgency: "normal" | "attention" | "urgent";
 }
 
-/** Extract data rows from a markdown table section (skips header and separator rows). */
-function extractTableRows(section: string, headingPattern: RegExp): string[] {
-  const match = section.match(headingPattern);
-  if (!match) return [];
-  const afterHeading = section.slice(match.index! + match[0].length);
-  const untilNextSection = afterHeading.split(/(?=^##)/m)[0];
-  const allRows = untilNextSection
-    .trim()
-    .split("\n")
-    .filter(row => row.startsWith("|"));
-
-  // Skip header row and separator (first two rows of a markdown table)
-  const separatorIdx = allRows.findIndex(row => /^\|[\s-|]+$/.test(row));
-  if (separatorIdx === -1) return [];
-  return allRows.slice(separatorIdx + 1);
+/**
+ * Undo the escaping `escapeCell` applies, so a graduation target survives the round trip.
+ *
+ * The model reads memory.md as rendered markdown, where a stored item reads `Perf \| work`.
+ * Copying that faithfully is the behaviour the prompt asks for, but `updateMemory` matches
+ * against the cell `splitRow` parsed, which is `Perf | work`, so the escaped copy would
+ * match nothing and the item would never graduate.
+ *
+ * Same escape rule as `splitRow`, without the splitting: a target that contains a bare
+ * pipe because the model did not escape it has to come through unchanged rather than be
+ * torn into two cells.
+ */
+function unescapeCell(value: string): string {
+  let out = "";
+  for (let i = 0; i < value.length; i++) {
+    if (value[i] === "\\" && (value[i + 1] === "|" || value[i + 1] === "\\")) {
+      out += value[i + 1];
+      i++;
+    } else {
+      out += value[i];
+    }
+  }
+  return out;
 }
 
-/** Parse raw AI output into structured brag book result. */
-export function parseBragBookResult(raw: string): BragBookResult {
-  const memoryMarkerStart = "<!-- MEMORY_UPDATE -->";
-  const memoryMarkerEnd = "<!-- /MEMORY_UPDATE -->";
-  const contextMarkerStart = "<!-- CONTEXT_UPDATES -->";
-  const contextMarkerEnd = "<!-- /CONTEXT_UPDATES -->";
-  // COACHING_SESSION is deliberately left in the brag book for the reader and is not parsed.
-  const focusMarkerStart = "<!-- FOCUS_UPDATE -->";
-  const focusMarkerEnd = "<!-- /FOCUS_UPDATE -->";
-
-  let bragBookContent = raw;
-  let itemsToAdd: string[] = [];
-  let itemsToRemove: string[] = [];
-  let impactLogEntry: BragBookResult["impactLogEntry"] = null;
-  const workContextUpdates: BragBookResult["workContextUpdates"] = [];
-  let profileUpdate: BragBookResult["profileUpdate"] = null;
-  let focusItems: string[] = [];
-  const focusUpdates: BragBookResult["focusUpdates"] = [];
-
-  const memoryStartIdx = raw.indexOf(memoryMarkerStart);
-  const memoryEndIdx = raw.indexOf(memoryMarkerEnd);
-
-  if (memoryStartIdx !== -1 && memoryEndIdx !== -1) {
-    // Strip machine-parseable sections, keep COACHING_SESSION for human reading
-    bragBookContent = raw
-      .replace(new RegExp(`\\n---\\s*\\n${memoryMarkerStart}[\\s\\S]*?${memoryMarkerEnd}`, "g"), "")
-      .replace(new RegExp(`\\n---\\s*\\n${focusMarkerStart}[\\s\\S]*?${focusMarkerEnd}`, "g"), "")
-      .replace(new RegExp(`\\n---\\s*\\n${contextMarkerStart}[\\s\\S]*?${contextMarkerEnd}`, "g"), "")
-      .replace(/(\n---\s*)+$/, "")
-      .trim();
-
-    const memorySection = raw.substring(memoryStartIdx + memoryMarkerStart.length, memoryEndIdx);
-
-    const addRows = extractTableRows(memorySection, /## Items to Add to (?:Memory|\[\[memory\]\])/);
-    itemsToAdd = addRows.map(row => row.trim());
-
-    const removeMatch = memorySection.match(/## Items to Remove from (?:Memory|\[\[memory\]\])[\s\S]*?\n([\s\S]*?)$/);
-    if (removeMatch) {
-      const listItems = removeMatch[1].trim().split("\n").filter(line => line.startsWith("-"));
-      itemsToRemove = listItems.map(item => item.replace(/^-\s*/, "").trim());
-    }
+/** Keep only the elements that satisfy `schema`, dropping the rest. */
+function keepValid<T>(rows: unknown[], schema: z.ZodType<T>): T[] {
+  const kept: T[] = [];
+  for (const row of rows) {
+    const result = schema.safeParse(row);
+    if (result.success) kept.push(result.data);
   }
+  return kept;
+}
 
-  // Parse CONTEXT_UPDATES section
-  const contextStartIdx = raw.indexOf(contextMarkerStart);
-  const contextEndIdx = raw.indexOf(contextMarkerEnd);
-
-  if (contextStartIdx !== -1 && contextEndIdx !== -1) {
-    const contextSection = raw.substring(contextStartIdx + contextMarkerStart.length, contextEndIdx);
-
-    const impactRows = extractTableRows(contextSection, /## (?:\[\[impact-log\]\]|Impact Log) Update/);
-    for (const row of impactRows) {
-      const parts = row.split("|").map(p => p.trim()).filter(Boolean);
-      if (parts.length >= 5 && parts[0] && parts[1]) {
-        impactLogEntry = {
-          date: parts[0],
-          achievement: parts[1],
-          scope: parts[2] || "",
-          coreValue: parts[3] || "",
-          evidence: parts[4] || "",
-        };
-        break;
-      }
-    }
-
-    const wcRows = extractTableRows(contextSection, /## (?:\[\[work-context\]\]|Work Context) Updates/);
-    for (const row of wcRows) {
-      const parts = row.split("|").map(p => p.trim()).filter(Boolean);
-      if (parts.length >= 3 && parts[0] && parts[1]) {
-        workContextUpdates.push({
-          category: parts[0],
-          info: parts[1],
-          source: parts[2] || "",
-        });
-      }
-    }
-
-    const achievementMatch = contextSection.match(/\*\*Achievement to add:\*\*\s*(.+)/);
-    const bulletMatch = contextSection.match(/\*\*Suggested bullet point:\*\*\s*(.+)/);
-    if (achievementMatch && bulletMatch && achievementMatch[1].trim() && bulletMatch[1].trim()) {
-      const achievement = achievementMatch[1].trim();
-      const bulletPoint = bulletMatch[1].trim();
-      if (achievement && achievement !== "(leave blank if none - bar is CV-worthy)" && bulletPoint && bulletPoint !== "(leave blank if none)") {
-        profileUpdate = { achievement, bulletPoint };
-      }
-    }
+/**
+ * Reject a brag book document that must not be written over the vault's copy.
+ *
+ * Everything else in this file drops the offending element and lets the week through,
+ * because losing one memory row beats losing a 225k-token generation. The document is the
+ * exception: it is the week's only record, `worklog --force` regenerates over an existing
+ * file, and a blank string would silently replace a real entry with nothing.
+ *
+ * The check stays shallow on purpose. Live runs on both providers produced `## Achievements`
+ * every time but the mandated `# Brag Book` H1 only sometimes, and the codebase already
+ * assumes models drop mandated boilerplate: that is what ensureBragBookFrontmatter exists
+ * for. Requiring the exact H1 would turn a cosmetic slip into a failed week.
+ */
+export function validateBragBookMarkdown(markdown: string): void {
+  const problem = bragBookMarkdownProblem(markdown);
+  if (problem !== null) {
+    throw new Error(
+      `Refusing to write the brag book: ${problem}. Nothing was written to the vault. ` +
+      `Re-run the week; if it repeats, the prompt's output_format section and the model are out of step.`,
+    );
   }
+}
 
-  // FOCUS_UPDATE is the only machine-read source of focus items. The coaching section
-  // states the same suggestions in prose for the reader; parsing both is what used to
-  // turn two suggestions into four rows a week.
-  const focusStartIdx = raw.indexOf(focusMarkerStart);
-  const focusEndIdx = raw.indexOf(focusMarkerEnd);
+/**
+ * Turn the model's schema-constrained output into the shape the vault writers consume.
+ *
+ * The writers still speak in rendered markdown rows, so memory items are rendered here
+ * with the same helper the writers use. Elements that fail their rules are dropped, so a
+ * single malformed row costs one row rather than the week. The one hard failure is the
+ * document itself, which throws before the caller writes anything.
+ */
+export function toBragBookResult(output: BragBookOutput): BragBookResult {
+  validateBragBookMarkdown(output.bragBookMarkdown);
 
-  if (focusStartIdx !== -1 && focusEndIdx !== -1) {
-    const focusSection = raw.substring(focusStartIdx + focusMarkerStart.length, focusEndIdx);
+  const impact = validImpactLogEntrySchema.safeParse(output.impactLogEntry);
+  const profile = validProfileUpdateSchema.safeParse(output.profileUpdate);
 
-    const statusRows = extractTableRows(focusSection, /## (?:\[\[focus-tracking\]\]|Focus Items) Status/);
-    for (const row of statusRows) {
-      const parts = row.split("|").map(p => p.trim()).filter(Boolean);
-      const [id, status, notes] = parts;
-      if (FOCUS_ID_PATTERN.test(id ?? "") && status) {
-        focusUpdates.push({ id, status, notes: notes || "" });
-      }
-    }
-
-    const newFocusMatch = focusSection.match(/## New Focus Items[\s\S]*?$/);
-    if (newFocusMatch) {
-      const newFocusLines = newFocusMatch[0].split("\n").filter(line => line.startsWith("-"));
-      focusItems = newFocusLines
-        .map(line => line.replace(/^-\s*/, "").trim())
-        .filter(item => item && !item.startsWith("(") && !FOCUS_ID_PATTERN.test(item));
-    }
-  }
-
-  return { bragBookContent, itemsToAdd, itemsToRemove, impactLogEntry, workContextUpdates, profileUpdate, focusItems, focusUpdates };
+  return {
+    bragBookContent: output.bragBookMarkdown.trim(),
+    itemsToAdd: keepValid(output.memoryItemsToAdd, validMemoryItemSchema)
+      .map((row) => renderRow([row.date, row.item, row.category, row.notes])),
+    // Just the item: updateMemory matches on it and has no use for the achievement.
+    // The whole string is the target now, so an item may contain any punctuation.
+    itemsToRemove: keepValid(output.memoryGraduations, validMemoryGraduationSchema)
+      .map((row) => unescapeCell(row.item)),
+    impactLogEntry: impact.success ? impact.data : null,
+    workContextUpdates: keepValid(output.workContextUpdates, validWorkContextUpdateSchema),
+    profileUpdate: profile.success ? profile.data : null,
+    focusItems: keepValid(output.newFocusItems, validNewFocusItemSchema).slice(0, MAX_NEW_FOCUS_ITEMS),
+    // An id the model invented is inert: applyFocusUpdates looks ids up in a map and
+    // ignores misses, which leaves the real item to age toward lapsing.
+    focusUpdates: keepValid(output.focusStatuses, validFocusStatusSchema),
+  };
 }
 
 const BRAG_BOOK_FRONTMATTER = "---\ntags:\n  - areas/work\n  - areas/work/brag-book\n---\n\n";
@@ -158,9 +128,6 @@ const BRAG_BOOK_FRONTMATTER = "---\ntags:\n  - areas/work\n  - areas/work/brag-b
 export function ensureBragBookFrontmatter(content: string): string {
   return content.startsWith("---") ? content : BRAG_BOOK_FRONTMATTER + content;
 }
-
-/** Focus item ids look like `2026-W35.1`. See lib/sdk/focus.ts. */
-const FOCUS_ID_PATTERN = /^\d{4}-W\d{2}\.\d+$/;
 
 /** Parse review cycle info from work context markdown. */
 export function parseReviewCycle(workContext: string, today: Date = new Date()): ReviewInfo | null {

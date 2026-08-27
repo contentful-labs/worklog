@@ -133,7 +133,7 @@ You will receive these documents as context:
   1. Review every open item against this week's work
   2. In coaching, acknowledge what was or wasn't addressed
   3. Be direct: "Last week I suggested X. I see you [did/didn't] act on it."
-  4. In FOCUS_UPDATE, return one status row for EVERY id you were given, keyed by id.
+  4. Return one `focusStatuses` entry for EVERY id you were given, keyed by id.
      An item you leave out stays open and closes itself as `lapsed` after two reviews,
      so silence is recorded as a miss rather than as nothing.
 </focus_followthrough>
@@ -179,8 +179,17 @@ Also link to previous brag books when referencing them: `[[2026-W07 Brag Book]]`
 Use Jira/GitHub links as regular markdown links (not wikilinks) since they're external.
 </linking_convention>
 
+<writing_style>
+{{writing_style}}
+</writing_style>
+
 <output_format>
-Output as markdown with clearly separated sections. Start with YAML frontmatter:
+You return an object, not a document. The object is described by the schema you were given.
+
+`bragBookMarkdown` holds the whole brag book as markdown, in the shape below. Everything the
+vault files need goes in the other fields of the object, so the markdown carries no
+machine-readable blocks: no update tables, no HTML comment markers other than
+COACHING_SESSION, no repetition of the object's contents in prose.
 
 ```markdown
 ---
@@ -208,21 +217,6 @@ tags:
 ## Week in Review
 
 2-3 sentence first-person blurb synthesizing the week's themes. Write as if for a weekly status update to manager. Capture the narrative arc, don't repeat achievement items.
-
----
-<!-- MEMORY_UPDATE -->
-
-## Items to Add to [[memory]]
-
-| Date | Item | Category | Notes |
-|------|------|----------|-------|
-| | | | Potential future correlation: ... |
-
-## Items to Remove from [[memory]] (Graduated)
-
-- Item description (now part of: "Achievement name")
-
-<!-- /MEMORY_UPDATE -->
 
 ---
 <!-- COACHING_SESSION -->
@@ -255,55 +249,32 @@ If the work log includes a "Team Sprint Items" section, use it to ground suggest
 (Optional: connection to longer-term goals, skills to develop, or opportunities spotted)
 
 <!-- /COACHING_SESSION -->
-
----
-<!-- FOCUS_UPDATE -->
-
-## [[focus-tracking]] Status
-
-| ID | New Status | Notes |
-|----|------------|-------|
-(One row for EVERY id in open_focus_items. Copy the id exactly, e.g. 2026-W35.1.
- New Status must be one of: completed / ongoing / dropped.
- Do not paste the item text here - the id is what identifies it.)
-
-## New Focus Items
-
-- Item 1 from this week's coaching (reference [[My Focus]] tiers where applicable)
-- Item 2 if applicable
-
-(This list is the ONLY place new focus items are recorded. Maximum 2, and they must be
- the same suggestions you gave in "Focus for Next Week" above. Do not repeat an item
- that is already open in open_focus_items - update its status instead.)
-
-<!-- /FOCUS_UPDATE -->
-
----
-<!-- CONTEXT_UPDATES -->
-
-## [[impact-log]] Update
-
-| Date | Achievement | Scope | Core Value | Evidence |
-|------|-------------|-------|------------|----------|
-| | | | | |
-
-Scope: Team / Department / Organization
-Core Value: {{company_values}}
-(Leave empty if no significant impact this week)
-
-## [[work-context]] Updates
-
-| Category | Information | Source |
-|----------|-------------|--------|
-(Leave empty if nothing new discovered)
-
-## [[my-profile]] Updates
-
-**Achievement to add:** (leave blank if none - bar is CV-worthy)
-**Suggested bullet point:** (leave blank if none)
-
-<!-- /CONTEXT_UPDATES -->
 ```
+
+The remaining fields of the object feed the vault files directly:
+
+- `memoryItemsToAdd` — this week's small contributions, one entry each. These are the items
+  that did not clear the brag book bar.
+- `memoryGraduations` — memory items that an achievement above absorbed. `item` must equal
+  the Item cell of the [[memory]] row exactly as it appears in the table. Copy it, do not
+  paraphrase, shorten or re-punctuate it: a target that is not identical to the cell
+  matches no row, and the item stays in memory.
+- `impactLogEntry` — at most one entry for the week, or null. `scope` is Team, Department or
+  Organization. `coreValue` is one of: {{company_values}}.
+- `workContextUpdates` — facts about the company or org learned this week, or an empty list.
+- `profileUpdate` — null unless the achievement is CV-worthy.
+- `focusStatuses` — one entry per id in open_focus_items, keyed by id. See focus_followthrough.
+- `newFocusItems` — at most 2, and they must be the same suggestions you wrote under "Focus
+  for Next Week". Do not restate an item that is already open in open_focus_items.
+
+Empty means empty. An empty list or a null is the correct answer when there is nothing to
+report; a placeholder row saying "(none)" or "N/A" is not.
+
+Every field outside `bragBookMarkdown` lands in a markdown table cell or a list bullet, so:
+
+- dates are `YYYY-MM-DD` and must be real dates;
+- text stays on one line, with no newlines;
+- an entry that breaks these rules is dropped, and the work it described goes unrecorded.
 </output_format>
 
 <available_research_tools>
@@ -334,8 +305,10 @@ When you discover via research that a ticket's current status differs from the w
 </available_research_tools>
 
 <parsing_notes>
-- MEMORY_UPDATE section: parsed by script to update memory.md
-- COACHING_SESSION section: personal development tracking only
-- FOCUS_UPDATE section: parsed by script to update focus-tracking.md (status rows keyed by id; New Focus Items is the only source of new items)
-- CONTEXT_UPDATES section: parsed by script to update impact-log.md, work-context.md, my-profile.md
+- `bragBookMarkdown` is written to the vault as the week's Brag Book file. Nothing is read
+  back out of it, so anything that only exists there never reaches the other vault files.
+- The COACHING_SESSION block inside it is for the reader. The CLI prints it at the end of a
+  run. It is not parsed.
+- Every other field of the object is applied to a vault file: memory.md, impact-log.md,
+  work-context.md, my-profile.md, focus-tracking.md.
 </parsing_notes>

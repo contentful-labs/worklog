@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { Command } from "commander";
 import * as p from "@clack/prompts";
 import { requireConfig, STATS_PATH, TEAM_TIMELINE_PATH } from "../lib/config";
-import { aiQuery } from "../lib/sdk/ai";
+import { aiQueryStructured } from "../lib/sdk/ai";
 import { fillTemplate, buildConfigContext } from "../lib/sdk/template";
 import {
   buildVaultPaths,
@@ -42,10 +42,11 @@ import {
 } from "../lib/sdk/data-fetch";
 import { generateMarkdown } from "../lib/sdk/markdown";
 import {
-  parseBragBookResult,
+  toBragBookResult,
   parseReviewCycle,
   ensureBragBookFrontmatter,
 } from "../lib/sdk/brag-book";
+import { bragBookOutputSchema } from "../lib/sdk/brag-book-schema";
 import {
   selectOpenFocusItems,
   summarizeFocusHistory,
@@ -62,6 +63,7 @@ import {
   migrateFocusTrackingFile,
   migrateVaultRecordsFile,
   isIsoDate,
+  writeFileAtomic,
 } from "../lib/sdk/vault-updates";
 import { createLogger } from "../lib/sdk/logger";
 
@@ -337,6 +339,7 @@ function getEnvTokens(): { apiToken: string; githubToken: string } {
 // --- Brag book prompt builder ---
 
 const PROMPT_TEMPLATE_PATH = new URL("../prompts/weekly-brag-prompt.md", import.meta.url).pathname;
+const WRITING_STYLE_PATH = new URL("../prompts/_writing-style.md", import.meta.url).pathname;
 
 async function buildBragBookPrompt(
   workLogContent: string,
@@ -357,7 +360,10 @@ async function buildBragBookPrompt(
   weekInfo: WeekInfo | undefined,
   config: Parameters<typeof buildConfigContext>[0],
 ): Promise<string> {
-  const rawPromptTemplate = await Bun.file(PROMPT_TEMPLATE_PATH).text();
+  const [rawPromptTemplate, writingStyle] = await Promise.all([
+    Bun.file(PROMPT_TEMPLATE_PATH).text(),
+    Bun.file(WRITING_STYLE_PATH).text(),
+  ]);
   const teamForWeek = weekInfo ? getTeamForDate(timeline, weekInfo.startDate) : getCurrentTeam(timeline);
   const currentTeamLabel = teamForWeek?.team ?? "Unknown Team";
   const currentRole = `${config.profile.jobTitle} / ${config.profile.level} (${config.profile.company} - ${currentTeamLabel})`;
@@ -366,6 +372,7 @@ async function buildBragBookPrompt(
     ...buildConfigContext(config),
     current_team: currentTeamLabel,
     current_role: currentRole,
+    writing_style: writingStyle,
   });
 
   const vaultNotesSection = vaultNotes.length > 0
@@ -377,7 +384,7 @@ async function buildBragBookPrompt(
     : "";
 
   const openFocusSection = openFocusItems.length > 0
-    ? `\n---\n\n<open_focus_items>\nCommitments from previous coaching sessions that are still open. Check each against this week's work\nand return a status row for EVERY id in your FOCUS_UPDATE section.\n\n${openFocusItems.map((f) => `  - ${f.id} (week ${f.week}, reviewed ${f.reviews}x): ${f.item}`).join("\n")}\n${focusHistorySummary ? `\n${focusHistorySummary}\n` : ""}</open_focus_items>`
+    ? `\n---\n\n<open_focus_items>\nCommitments from previous coaching sessions that are still open. Check each against this week's work\nand return a focusStatuses entry for EVERY id below.\n\n${openFocusItems.map((f) => `  - ${f.id} (week ${f.week}, reviewed ${f.reviews}x): ${f.item}`).join("\n")}\n${focusHistorySummary ? `\n${focusHistorySummary}\n` : ""}</open_focus_items>`
     : "";
 
   const generationContext = (() => {
@@ -453,7 +460,7 @@ ${workLogContent}
 
 ---
 
-Write the brag book entry as markdown. Output ONLY the markdown content, no explanations.`;
+Return the object described by the schema. The brag book markdown goes in bragBookMarkdown.`;
 }
 
 // --- Main worklog runner ---
@@ -587,8 +594,9 @@ export async function runWorklog(opts: {
 
     const markdown = generateMarkdown(issues, pages, prs, reviews, teamSprintItems, weekInfo, additionalContext, config, accountId);
     const workLogPath = `${paths.vault}/${weekInfo.filename}`;
-    await Bun.write(workLogPath, markdown);
-    log(`Work log written: ${workLogPath} (${markdown.length} chars)`);
+    // Held in memory until the whole week validates. Writing it here would mean a --force
+    // run destroyed the previous work log before the model had said anything usable.
+    log(`Work log built: ${workLogPath} (${markdown.length} chars, not yet written)`);
 
     // Load vault context
     log("Loading vault context files...");
@@ -631,18 +639,30 @@ export async function runWorklog(opts: {
     );
     log(`AI query — provider: ${provider}, model: ${config.ai.model ?? "default"}, prompt: ${fullPrompt.length} chars`);
 
-    const rawResult = await aiQuery({ prompt: fullPrompt, config, log });
-    log(`AI response: ${rawResult.length} chars`);
+    const output = await aiQueryStructured({
+      prompt: fullPrompt,
+      config,
+      schema: bragBookOutputSchema,
+      schemaName: "brag_book_update",
+      log,
+    });
+    log(`AI response: ${output.bragBookMarkdown.length} chars of markdown plus the vault updates`);
 
-    const parsed = parseBragBookResult(rawResult);
+    const parsed = toBragBookResult(output);
     const { itemsToAdd, itemsToRemove, impactLogEntry, workContextUpdates, profileUpdate, focusItems, focusUpdates } = parsed;
     const bragBookContent = ensureBragBookFrontmatter(parsed.bragBookContent);
     const bragMs = Math.round(performance.now() - bragStart);
     s.stop(`Brag book generated in ${formatDuration(bragMs)}`);
 
+    // The week is validated now, so both documents land. Each write is atomic, and the
+    // brag book goes first: it is the record that cannot be rebuilt without another
+    // generation, so a failure there must leave the previous week intact, while a failure
+    // on the work log leaves a brag book that is already correct.
     const bragBookPath = `${paths.vault}/${wid} Brag Book.md`;
-    await Bun.write(bragBookPath, bragBookContent);
+    await writeFileAtomic(bragBookPath, bragBookContent);
     log(`Brag book written: ${bragBookPath} (${bragBookContent.length} chars)`);
+    await writeFileAtomic(workLogPath, markdown);
+    log(`Work log written: ${workLogPath} (${markdown.length} chars)`);
     lastBragBookPath = bragBookPath;
     lastBragBookContent = bragBookContent;
 

@@ -1,213 +1,533 @@
-import { describe, it, expect } from "vitest";
-import { parseBragBookResult, parseReviewCycle, ensureBragBookFrontmatter } from "../brag-book";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { mkdtemp, writeFile, readFile, rm } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { toBragBookResult, validateBragBookMarkdown, parseReviewCycle, ensureBragBookFrontmatter } from "../brag-book";
+import { updateMemory } from "../vault-updates";
+import { escapeCell, renderRow } from "../markdown-table";
+import { bragBookOutputSchema, isFocusItemId, type BragBookOutput } from "../brag-book-schema";
 
-describe("parseBragBookResult", () => {
-  it("returns raw content when no markers present", () => {
-    const result = parseBragBookResult("# Brag Book\nGreat week!");
-    expect(result.bragBookContent).toBe("# Brag Book\nGreat week!");
-    expect(result.itemsToAdd).toEqual([]);
-    expect(result.itemsToRemove).toEqual([]);
-    expect(result.impactLogEntry).toBeNull();
-    expect(result.focusItems).toEqual([]);
+const MARKDOWN = "# Brag Book - Week 09, 2026\n\n## Achievements\n\n- Shipped auth";
+
+const emptyOutput: BragBookOutput = {
+  bragBookMarkdown: MARKDOWN,
+  memoryItemsToAdd: [],
+  memoryGraduations: [],
+  impactLogEntry: null,
+  workContextUpdates: [],
+  profileUpdate: null,
+  focusStatuses: [],
+  newFocusItems: [],
+};
+
+function output(overrides: Partial<BragBookOutput>): BragBookOutput {
+  return { ...emptyOutput, ...overrides };
+}
+
+describe("bragBookOutputSchema", () => {
+  it("accepts a week with nothing to report", () => {
+    expect(bragBookOutputSchema.parse(emptyOutput)).toEqual(emptyOutput);
   });
 
-  it("parses memory items to add", () => {
-    const raw = `# Brag Book
-Content here
+  it("rejects a blank document, so a whitespace answer can never reach the vault", () => {
+    expect(bragBookOutputSchema.safeParse({ ...emptyOutput, bragBookMarkdown: "   " }).success).toBe(false);
+  });
 
----
+  it("rejects a focus status outside the allowed set", () => {
+    // `open` is what a model reaches for, and it is the one value that must not get
+    // through: applyFocusUpdates would record it as an answered, non-open status.
+    const bad = { ...emptyOutput, focusStatuses: [{ id: "2026-W09.1", status: "open", notes: "" }] };
+    expect(bragBookOutputSchema.safeParse(bad).success).toBe(false);
+  });
 
-<!-- MEMORY_UPDATE -->
+  it("rejects an impact scope outside the allowed set", () => {
+    const entry = { date: "2026-03-05", achievement: "Shipped auth", scope: "global", coreValue: "q", evidence: "e" };
+    expect(bragBookOutputSchema.safeParse({ ...emptyOutput, impactLogEntry: entry }).success).toBe(false);
+  });
 
-## Items to Add to Memory
+  it("rejects a missing field rather than filling in a default", () => {
+    const { focusStatuses, ...withoutFocus } = emptyOutput;
+    expect(focusStatuses).toEqual([]);
+    expect(bragBookOutputSchema.safeParse(withoutFocus).success).toBe(false);
+  });
 
-| Category | Item | Source |
-|----------|------|--------|
-| project | Shipped auth | CORE-42 |
+  it("rejects a memory item that is missing its category", () => {
+    const bad = { ...emptyOutput, memoryItemsToAdd: [{ date: "2026-03-05", item: "Fixed a flake", notes: "" }] };
+    expect(bragBookOutputSchema.safeParse(bad).success).toBe(false);
+  });
 
-## Items to Remove from Memory
+  it("does not constrain individual rows, so one bad cell cannot cost the whole week", () => {
+    // The per-element rules live in the adapter for exactly this reason. If this starts
+    // failing, someone moved a rule into the wire schema and made it all-or-nothing.
+    const loose = { ...emptyOutput, memoryItemsToAdd: [{ date: "whenever", item: "|", category: "", notes: "" }] };
+    expect(bragBookOutputSchema.safeParse(loose).success).toBe(true);
+  });
+});
 
-- Old item no longer relevant
+describe("isFocusItemId", () => {
+  it("accepts real ids", () => {
+    expect(isFocusItemId("2026-W35.1")).toBe(true);
+    expect(isFocusItemId("2026-W05.12")).toBe(true);
+  });
 
-<!-- /MEMORY_UPDATE -->`;
+  it("rejects item text and near misses", () => {
+    for (const bad of ["Review the RFC", "2026-W35", "2026-W35.", "2026-Q35.1", "26-W35.1", "2026-W3X.1", ""]) {
+      expect(isFocusItemId(bad)).toBe(false);
+    }
+  });
+});
 
-    const result = parseBragBookResult(raw);
+describe("validateBragBookMarkdown", () => {
+  it("accepts a document with an achievements section", () => {
+    expect(() => validateBragBookMarkdown(MARKDOWN)).not.toThrow();
+  });
+
+  it("accepts the singular heading models actually write", () => {
+    expect(() => validateBragBookMarkdown("## Achievement\n\n- Shipped auth")).not.toThrow();
+  });
+
+  it("rejects a blank document", () => {
+    expect(() => validateBragBookMarkdown("   \n  ")).toThrow(/empty brag book/);
+  });
+
+  it("rejects prose with no headings", () => {
+    expect(() => validateBragBookMarkdown("Sorry, I could not complete this request.")).toThrow(/no markdown headings/);
+  });
+
+  it("rejects a document with headings but no achievements section", () => {
+    expect(() => validateBragBookMarkdown("# Notes\n\n## Stats\n\n- 0")).toThrow(/no achievements section/);
+  });
+
+  it("accepts closing hashes, which CommonMark allows and models write", () => {
+    expect(() => validateBragBookMarkdown("# Brag Book #\n\n## Achievements ##\n\n- Shipped auth")).not.toThrow();
+  });
+
+  it("accepts the three spaces of indentation CommonMark allows", () => {
+    expect(() => validateBragBookMarkdown("# Brag Book\n\n   ## Achievements\n\n- Shipped auth")).not.toThrow();
+  });
+
+  it("accepts a setext heading", () => {
+    expect(() => validateBragBookMarkdown("Achievements\n============\n\n- Shipped auth")).not.toThrow();
+  });
+
+  it("accepts a trailing colon", () => {
+    expect(() => validateBragBookMarkdown("# Brag Book\n\n## Achievements:\n\n- Shipped auth")).not.toThrow();
+  });
+
+  it("accepts emphasis inside the heading", () => {
+    expect(() => validateBragBookMarkdown("# Brag Book\n\n## **Achievements**\n\n- Shipped auth")).not.toThrow();
+  });
+
+  it("does not mistake the frontmatter fence for a heading", () => {
+    const withFrontmatter = "---\ntags:\n  - areas/work\n---\n\nJust a sentence, no headings at all.";
+    expect(() => validateBragBookMarkdown(withFrontmatter)).toThrow(/no markdown headings/);
+  });
+
+  it("rejects an achievements section with nothing under it", () => {
+    // A bare heading passed every check and replaced the week's only record with itself.
+    expect(() => validateBragBookMarkdown("## Achievements")).toThrow(/achievements section is empty/);
+    expect(() => validateBragBookMarkdown("# Brag Book - Week 09, 2026\n\n## Achievements\n\n## Stats\n\n- 0")).toThrow(
+      /achievements section is empty/,
+    );
+  });
+
+  it.each([
+    ["a bare comment", "<!-- nothing to report -->\n\n---"],
+    ["a comment inside a list item", "- <!-- nothing to report -->"],
+    ["a comment inside a blockquote", "> <!-- nothing to report -->"],
+    ["a comment nested two deep", "> - <!-- nothing to report -->"],
+  ])("does not count %s as content", (_name, body) => {
+    // html is scaffolding at every depth, not just at the top of the section.
+    expect(() => validateBragBookMarkdown(`## Achievements\n\n${body}\n\n## Stats\n\n- 0`)).toThrow(
+      /achievements section is empty/,
+    );
+  });
+
+  it.each([
+    ["a list item", "- Shipped auth"],
+    ["a blockquote", "> Shipped auth, see TEAM-1234"],
+    ["a list item beside a comment", "- <!-- note -->\n- Shipped auth"],
+  ])("counts %s as content", (_name, body) => {
+    expect(() => validateBragBookMarkdown(`## Achievements\n\n${body}`)).not.toThrow();
+  });
+
+  it("accepts the line the prompt asks for when the week was quiet", () => {
+    // A week with nothing to report is not an empty document, and must still be written.
+    const quiet = "## Achievements\n\nNo significant achievements this week - routine work captured in [[memory]].";
+    expect(() => validateBragBookMarkdown(quiet)).not.toThrow();
+  });
+
+  it("counts content that sits under a subsection", () => {
+    expect(() => validateBragBookMarkdown("## Achievements\n\n### Auth\n\n- Shipped auth")).not.toThrow();
+  });
+
+  it("counts a table as content, which is how one provider writes the section", () => {
+    expect(() => validateBragBookMarkdown("## Achievements\n\n| What | Evidence |\n|---|---|\n| Auth | TEAM-1234 |")).not.toThrow();
+  });
+
+  it("rejects a heading that merely mentions achievements", () => {
+    // A substring test would accept this and let a document with no achievements through.
+    expect(() => validateBragBookMarkdown("# Brag Book\n\n## Achievement statistics\n\n- 0")).toThrow(
+      /no achievements section/,
+    );
+  });
+
+  it("says nothing was written, because that is the whole point of failing here", () => {
+    expect(() => validateBragBookMarkdown("")).toThrow(/Nothing was written to the vault/);
+  });
+});
+
+describe("toBragBookResult refuses to overwrite a real brag book", () => {
+  let tmpDir: string;
+
+  beforeEach(async () => {
+    tmpDir = await mkdtemp(join(tmpdir(), "brag-book-test-"));
+  });
+
+  afterEach(async () => {
+    await rm(tmpDir, { recursive: true, force: true });
+  });
+
+  const EXISTING = "---\ntags:\n  - areas/work\n---\n\n# Brag Book - Week 09, 2026\n\n## Achievements\n\n- Real work";
+
+  it.each([
+    ["a blank document", "\n \n", /empty brag book/],
+    ["a bare heading", "# Brag Book - Week 09, 2026\n\n## Achievements", /achievements section is empty/],
+    [
+      "a section holding only a comment",
+      "# Brag Book - Week 09, 2026\n\n## Achievements\n\n- <!-- nothing -->",
+      /achievements section is empty/,
+    ],
+  ])("leaves an existing entry untouched when the model returns %s", async (_name, markdown, problem) => {
+    const path = join(tmpDir, "2026-W09 Brag Book.md");
+    await writeFile(path, EXISTING, "utf-8");
+
+    // The order runWorklog uses on a --force regeneration: adapt, then write.
+    expect(() => {
+      const parsed = toBragBookResult(output({ bragBookMarkdown: markdown }));
+      throw new Error(`should not reach the write, got ${parsed.bragBookContent.length} chars`);
+    }).toThrow(problem);
+
+    expect(await readFile(path, "utf-8")).toBe(EXISTING);
+  });
+});
+
+describe("toBragBookResult", () => {
+  it("renders memory items as table rows in memory.md column order", () => {
+    const result = toBragBookResult(
+      output({
+        memoryItemsToAdd: [
+          { date: "2026-03-05", item: "Fixed a flaky test", category: "bugfix", notes: "Part of a reliability push" },
+        ],
+      }),
+    );
+
+    expect(result.itemsToAdd).toEqual(["| 2026-03-05 | Fixed a flaky test | bugfix | Part of a reliability push |"]);
+  });
+
+  it("escapes pipes in memory items rather than dropping them, since renderRow handles it", () => {
+    const result = toBragBookResult(
+      output({ memoryItemsToAdd: [{ date: "2026-03-05", item: "Renamed a | b", category: "docs", notes: "" }] }),
+    );
+
+    expect(result.itemsToAdd).toEqual(["| 2026-03-05 | Renamed a \\| b | docs |  |"]);
+  });
+
+  it("drops a memory item whose date would corrupt the memory window", () => {
+    const result = toBragBookResult(
+      output({
+        memoryItemsToAdd: [
+          { date: "last Tuesday", item: "Fixed a flake", category: "bugfix", notes: "" },
+          { date: "2026-02-31", item: "Impossible date", category: "bugfix", notes: "" },
+          { date: "2026-03-05", item: "Kept", category: "bugfix", notes: "" },
+        ],
+      }),
+    );
+
     expect(result.itemsToAdd).toHaveLength(1);
-    expect(result.itemsToAdd[0]).toContain("Shipped auth");
-    expect(result.itemsToRemove).toEqual(["Old item no longer relevant"]);
+    expect(result.itemsToAdd[0]).toContain("Kept");
   });
 
-  it("strips machine-parseable sections from brag book content", () => {
-    const raw = `# Brag Book
-Content here
+  it("passes the item alone, since updateMemory matches on it and drops the achievement", () => {
+    const result = toBragBookResult(
+      output({ memoryGraduations: [{ item: "Three small perf PRs", nowPartOf: "Search latency initiative" }] }),
+    );
 
----
-
-<!-- MEMORY_UPDATE -->
-## Items to Add to Memory
-None
-<!-- /MEMORY_UPDATE -->`;
-
-    const result = parseBragBookResult(raw);
-    expect(result.bragBookContent).not.toContain("MEMORY_UPDATE");
-    expect(result.bragBookContent).toContain("# Brag Book");
+    expect(result.itemsToRemove).toEqual(["Three small perf PRs"]);
   });
 
-  it("parses impact log entry", () => {
-    const raw = `Content
+  it("keeps an item that contains the phrase the graduation marker used to be", () => {
+    // The suffix this used to append put "(now part of" into every target, and the writer
+    // cut each target there, so an item already containing the phrase lost its tail.
+    const result = toBragBookResult(
+      output({
+        memoryGraduations: [
+          { item: "Documented fallback (now part of SDK) behavior", nowPartOf: "SDK docs push" },
+        ],
+      }),
+    );
 
----
+    expect(result.itemsToRemove).toEqual(["Documented fallback (now part of SDK) behavior"]);
+  });
 
-<!-- CONTEXT_UPDATES -->
+  it("decodes a graduation target the model copied out of the rendered table", () => {
+    // memory.md shows the model `Perf \\| work`; updateMemory matches the parsed cell.
+    const result = toBragBookResult(
+      output({ memoryGraduations: [{ item: "Perf \\| work", nowPartOf: "Latency push" }] }),
+    );
 
-## Impact Log Update
+    expect(result.itemsToRemove).toEqual(["Perf | work"]);
+  });
 
-| Date | Achievement | Scope | Core Value | Evidence |
-|------|-------------|-------|------------|----------|
-| 2026-03-05 | Shipped auth | team | quality | CORE-42 merged |
+  it("undoes exactly what escapeCell does, for any cell text", () => {
+    // Pins the decode to the encoder it inverts. If escapeCell grows a rule, this fails.
+    for (const original of ["Perf | work", "back\\slash", "both \\ and |", "plain text", "|", "\\"]) {
+      const roundTripped = toBragBookResult(
+        output({ memoryGraduations: [{ item: `x ${escapeCell(original)} x`, nowPartOf: "A" }] }),
+      ).itemsToRemove[0];
 
-<!-- /CONTEXT_UPDATES -->`;
+      expect(roundTripped).toBe(`x ${original} x`);
+    }
+  });
 
-    const result = parseBragBookResult(raw);
-    expect(result.impactLogEntry).toEqual({
+  it("drops a graduation too short to name an item, but keeps one containing a pipe", () => {
+    const result = toBragBookResult(
+      output({
+        memoryGraduations: [
+          { item: "|", nowPartOf: "Search latency initiative" },
+          { item: "a", nowPartOf: "Search latency initiative" },
+          { item: "  ", nowPartOf: "Search latency initiative" },
+          // A pipe is ordinary text to updateMemory, which matches rows on their parsed
+          // cells. Dropping this would lose a real graduation.
+          { item: "Perf | work", nowPartOf: "Search latency initiative" },
+          { item: "Three small perf PRs", nowPartOf: "Search latency initiative" },
+        ],
+      }),
+    );
+
+    expect(result.itemsToRemove).toEqual(["Perf | work", "Three small perf PRs"]);
+  });
+
+  it("drops a graduation with no achievement to attribute it to", () => {
+    const result = toBragBookResult(output({ memoryGraduations: [{ item: "Three small perf PRs", nowPartOf: " " }] }));
+    expect(result.itemsToRemove).toEqual([]);
+  });
+
+  it("passes a well-formed impact entry through unchanged", () => {
+    const impactLogEntry = {
       date: "2026-03-05",
       achievement: "Shipped auth",
-      scope: "team",
+      scope: "Team" as const,
       coreValue: "quality",
-      evidence: "CORE-42 merged",
+      evidence: "TEAM-1234 merged",
+    };
+
+    expect(toBragBookResult(output({ impactLogEntry })).impactLogEntry).toEqual(impactLogEntry);
+  });
+
+  it("drops an impact entry the writer could not record, and keeps one it can", () => {
+    const base = { date: "2026-03-05", scope: "Team" as const, coreValue: "quality", evidence: "TEAM-1234" };
+
+    expect(toBragBookResult(output({ impactLogEntry: { ...base, achievement: "Shipped\nauth" } })).impactLogEntry).toBeNull();
+    expect(toBragBookResult(output({ impactLogEntry: { ...base, achievement: "  " } })).impactLogEntry).toBeNull();
+    expect(toBragBookResult(output({ impactLogEntry: { ...base, date: "March 5th", achievement: "Shipped auth" } })).impactLogEntry).toBeNull();
+    // updateImpactLog renders through renderRow, which escapes the pipe.
+    expect(toBragBookResult(output({ impactLogEntry: { ...base, achievement: "Shipped a | b" } })).impactLogEntry).toEqual({
+      ...base,
+      achievement: "Shipped a | b",
     });
   });
 
-  it("parses work context updates", () => {
-    const raw = `Content
+  it("keeps work context updates on one line and drops the rest", () => {
+    const result = toBragBookResult(
+      output({
+        workContextUpdates: [
+          { category: "process", info: "Sprints moved to two weeks", source: "team meeting" },
+          { category: "process", info: "", source: "team meeting" },
+          // A newline would break the bullet updateWorkContext writes; a pipe would not.
+          { category: "process", info: "Two\nlines", source: "" },
+          { category: "tooling", info: "Uses a | b", source: "" },
+        ],
+      }),
+    );
 
----
-
-<!-- CONTEXT_UPDATES -->
-
-## Work Context Updates
-
-| Category | Info | Source |
-|----------|------|--------|
-| current_work | Auth migration | CORE-42 |
-| tech_stack | Added OAuth | PR #99 |
-
-<!-- /CONTEXT_UPDATES -->`;
-
-    const result = parseBragBookResult(raw);
-    expect(result.workContextUpdates).toHaveLength(2);
-    expect(result.workContextUpdates[0].category).toBe("current_work");
+    expect(result.workContextUpdates).toEqual([
+      { category: "process", info: "Sprints moved to two weeks", source: "team meeting" },
+      { category: "tooling", info: "Uses a | b", source: "" },
+    ]);
   });
 
-  it("parses profile update", () => {
-    const raw = `Content
+  it("keeps a profile update only when both halves are there", () => {
+    const achievement = "Led auth migration";
+    const bulletPoint = "Designed and shipped OAuth integration";
 
----
-
-<!-- CONTEXT_UPDATES -->
-
-**Achievement to add:** Led auth migration
-**Suggested bullet point:** Designed and shipped OAuth integration
-
-<!-- /CONTEXT_UPDATES -->`;
-
-    const result = parseBragBookResult(raw);
-    expect(result.profileUpdate).toEqual({
-      achievement: "Led auth migration",
-      bulletPoint: "Designed and shipped OAuth integration",
+    expect(toBragBookResult(output({ profileUpdate: { achievement, bulletPoint } })).profileUpdate).toEqual({
+      achievement,
+      bulletPoint,
     });
+    expect(toBragBookResult(output({ profileUpdate: { achievement, bulletPoint: "" } })).profileUpdate).toBeNull();
+    expect(toBragBookResult(output({ profileUpdate: { achievement, bulletPoint: "   " } })).profileUpdate).toBeNull();
+    expect(toBragBookResult(output({ profileUpdate: { achievement: "", bulletPoint } })).profileUpdate).toBeNull();
   });
 
-  it("skips placeholder profile update", () => {
-    const raw = `Content
-
----
-
-<!-- CONTEXT_UPDATES -->
-
-**Achievement to add:** (leave blank if none - bar is CV-worthy)
-**Suggested bullet point:** (leave blank if none)
-
-<!-- /CONTEXT_UPDATES -->`;
-
-    const result = parseBragBookResult(raw);
-    expect(result.profileUpdate).toBeNull();
+  it("caps new focus items at two and drops blank or multi-line ones", () => {
+    const result = toBragBookResult(output({ newFocusItems: ["", "one", "two\nlines", "  ", "two", "three"] }));
+    expect(result.focusItems).toEqual(["one", "two"]);
   });
 
-  it("ignores focus suggestions in the coaching prose", () => {
-    // The coaching section states the same suggestions for the reader. Parsing it too is
-    // what used to turn two suggestions into four rows a week.
-    const raw = `Content
+  it("keeps focus statuses keyed by a real id and drops pasted item text", () => {
+    const result = toBragBookResult(
+      output({
+        focusStatuses: [
+          { id: "2026-W09.1", status: "completed", notes: "Approved" },
+          { id: "Review the RFC", status: "completed", notes: "pasted the item text instead of the id" },
+          { id: " 2026-W09.2 ", status: "ongoing", notes: "" },
+        ],
+      }),
+    );
 
----
-
-<!-- COACHING_SESSION -->
-
-### Focus for Next Week
-
-- Ship the auth PR
-- Review team RFC
-
-<!-- /COACHING_SESSION -->`;
-
-    expect(parseBragBookResult(raw).focusItems).toEqual([]);
-  });
-
-  it("parses focus updates keyed by id, and new items only from FOCUS_UPDATE", () => {
-    const raw = `Content
-
----
-
-<!-- FOCUS_UPDATE -->
-
-## Focus Items Status
-
-| ID | New Status | Notes |
-|----|------------|-------|
-| 2026-W09.1 | completed | Approved |
-| 2026-W09.2 | ongoing | In review |
-
-## New Focus Items
-
-- Write migration docs
-
-<!-- /FOCUS_UPDATE -->`;
-
-    const result = parseBragBookResult(raw);
     expect(result.focusUpdates).toEqual([
       { id: "2026-W09.1", status: "completed", notes: "Approved" },
-      { id: "2026-W09.2", status: "ongoing", notes: "In review" },
+      { id: "2026-W09.2", status: "ongoing", notes: "" },
     ]);
-    expect(result.focusItems).toEqual(["Write migration docs"]);
   });
 
-  it("drops status rows that are not keyed by a valid id", () => {
-    const raw = `<!-- FOCUS_UPDATE -->
+  it("uses the markdown field as the brag book content", () => {
+    const result = toBragBookResult(output({ bragBookMarkdown: `\n${MARKDOWN}\n` }));
+    expect(result.bragBookContent).toBe(MARKDOWN);
+  });
+});
 
-## Focus Items Status
+describe("graduations reaching memory.md", () => {
+  let tmpDir: string;
 
-| ID | New Status | Notes |
-|----|------------|-------|
-| Review the RFC | completed | pasted the item text instead of the id |
-| 2026-W09.1 | completed | |
-
-<!-- /FOCUS_UPDATE -->`;
-
-    const result = parseBragBookResult(raw);
-    expect(result.focusUpdates).toEqual([{ id: "2026-W09.1", status: "completed", notes: "" }]);
+  beforeEach(async () => {
+    tmpDir = await mkdtemp(join(tmpdir(), "brag-book-grad-"));
   });
 
-  it("ignores the template placeholder lines in New Focus Items", () => {
-    const raw = `<!-- FOCUS_UPDATE -->
+  afterEach(async () => {
+    await rm(tmpDir, { recursive: true, force: true });
+  });
 
-## New Focus Items
+  const MEMORY = `# Memory
 
-- Real item
-- (This list is the ONLY place new focus items are recorded.)
+## Team Now (2026 - present)
 
-<!-- /FOCUS_UPDATE -->`;
+| Date | Item | Category | Notes |
+|------|------|----------|-------|
+| 2026-03-05 | Fixed a flaky pagination test | bugfix |  |
+| 2026-03-06 | Reviewed the search RFC | review |  |
+`;
 
-    expect(parseBragBookResult(raw).focusItems).toEqual(["Real item"]);
+  it("removes nothing when the graduation text matches no row exactly", async () => {
+    // "202" clears the adapter's minimum length, so nothing on this side stops it. What
+    // stops it is updateMemory needing an exact row match: a substring rule would see
+    // "202" inside both dates and delete the whole table.
+    const path = join(tmpDir, "memory.md");
+    await writeFile(path, MEMORY, "utf-8");
+
+    const { itemsToRemove } = toBragBookResult(
+      output({ memoryGraduations: [{ item: "202", nowPartOf: "Search reliability push" }] }),
+    );
+    expect(itemsToRemove).toEqual(["202"]);
+
+    const result = await updateMemory(path, [], itemsToRemove);
+
+    expect(result.removed).toBe(0);
+    expect(result.unmatchedGraduations.map((u) => u.requested)).toEqual(["202"]);
+    expect(await readFile(path, "utf-8")).toBe(MEMORY);
+  });
+
+  it("graduates a row whose stored cell is escaped, when the model echoes the escape", async () => {
+    const path = join(tmpDir, "memory.md");
+    const stored = `# Memory
+
+## Team Now (2026 - present)
+
+| Date | Item | Category | Notes |
+|------|------|----------|-------|
+${renderRow(["2026-03-05", "Perf | work on a | b", "perf", ""])}
+| 2026-03-06 | Reviewed the search RFC | review |  |
+`;
+    await writeFile(path, stored, "utf-8");
+    // The row really is stored escaped, which is what the model sees and copies.
+    expect(stored).toContain("Perf \\| work on a \\| b");
+
+    const { itemsToRemove } = toBragBookResult(
+      output({ memoryGraduations: [{ item: "Perf \\| work on a \\| b", nowPartOf: "Latency push" }] }),
+    );
+    const result = await updateMemory(path, [], itemsToRemove);
+
+    expect(result.removed).toBe(1);
+    expect(result.unmatchedGraduations).toEqual([]);
+    const after = await readFile(path, "utf-8");
+    expect(after).not.toContain("Perf");
+    expect(after).toContain("Reviewed the search RFC");
+  });
+
+  it("reports the full requested text when nothing matches, not a truncated head", async () => {
+    const path = join(tmpDir, "memory.md");
+    await writeFile(path, MEMORY, "utf-8");
+
+    const { itemsToRemove } = toBragBookResult(
+      output({ memoryGraduations: [{ item: "Shipped the thing (now part of X) twice", nowPartOf: "A" }] }),
+    );
+    const result = await updateMemory(path, [], itemsToRemove);
+
+    expect(result.removed).toBe(0);
+    expect(result.unmatchedGraduations.map((u) => u.requested)).toEqual([
+      "Shipped the thing (now part of X) twice",
+    ]);
+  });
+
+  it("graduates an item whose own text contains the phrase the marker used to be", async () => {
+    const path = join(tmpDir, "memory.md");
+    const stored = `# Memory
+
+## Team Now (2026 - present)
+
+| Date | Item | Category | Notes |
+|------|------|----------|-------|
+| 2026-03-05 | Documented fallback (now part of SDK) behavior | docs |  |
+| 2026-03-06 | Reviewed the search RFC | review |  |
+`;
+    await writeFile(path, stored, "utf-8");
+
+    const { itemsToRemove } = toBragBookResult(
+      output({
+        memoryGraduations: [
+          { item: "Documented fallback (now part of SDK) behavior", nowPartOf: "SDK docs push" },
+        ],
+      }),
+    );
+    // The adapter sends the whole item, and the writer no longer cuts it short.
+    expect(itemsToRemove).toEqual(["Documented fallback (now part of SDK) behavior"]);
+
+    const result = await updateMemory(path, [], itemsToRemove);
+
+    expect(result.removed).toBe(1);
+    expect(result.unmatchedGraduations).toEqual([]);
+    const after = await readFile(path, "utf-8");
+    expect(after).not.toContain("Documented fallback");
+    expect(after).toContain("Reviewed the search RFC");
+  });
+
+  it("removes the one row a graduation names exactly", async () => {
+    const path = join(tmpDir, "memory.md");
+    await writeFile(path, MEMORY, "utf-8");
+
+    const { itemsToRemove } = toBragBookResult(
+      output({
+        memoryGraduations: [{ item: "Fixed a flaky pagination test", nowPartOf: "Search reliability push" }],
+      }),
+    );
+    const result = await updateMemory(path, [], itemsToRemove);
+
+    expect(result.removed).toBe(1);
+    expect(result.unmatchedGraduations).toEqual([]);
+    const after = await readFile(path, "utf-8");
+    expect(after).not.toContain("Fixed a flaky pagination test");
+    expect(after).toContain("Reviewed the search RFC");
   });
 });
 
