@@ -36,6 +36,7 @@ import {
   escapeCell, findTable, renderRow, renderScannedRow, scanRow, splitRow,
   type TableBounds,
 } from "./markdown-table";
+import { isArchivedHeadingText, maskFenced } from "./markdown-scan";
 import { weekIdForDate } from "./week-utils";
 import {
   LOOKUP_MARGIN, SIMILARITY_THRESHOLD, canonicalText, exactText, normalizeText, textSimilarity,
@@ -491,61 +492,6 @@ function rowCell(row: string, index: number): string {
   return splitRow(row)[index] ?? "";
 }
 
-interface Fence {
-  marker: string;
-  length: number;
-  info: string;
-}
-
-/** Read a fence line: up to three leading spaces, then three or more backticks or tildes. */
-function readFence(line: string): Fence | null {
-  let i = 0;
-  while (i < 3 && line[i] === " ") i++;
-
-  const marker = line[i];
-  if (marker !== "`" && marker !== "~") return null;
-
-  let length = 0;
-  while (line[i + length] === marker) length++;
-  if (length < 3) return null;
-
-  const info = line.slice(i + length).trim();
-  // A backtick fence's info string may not itself contain a backtick.
-  if (marker === "`" && info.includes("`")) return null;
-  return { marker, length, info };
-}
-
-/**
- * The file's lines with everything inside a fenced code block blanked out.
- *
- * A vault file can hold an example of the very shape this code maintains: a fenced
- * block showing "## Key Strengths" and a "- (none)" under it. Read as structure, the
- * writers aimed at the example and the cleanup deleted a line out of it. Blanking the
- * fenced lines keeps every index aligned with the real file, so locating structure and
- * editing it stay in step.
- */
-function maskFenced(lines: readonly string[]): string[] {
-  const masked = [...lines];
-  let open: { start: number; fence: Fence } | null = null;
-
-  for (const [i, line] of lines.entries()) {
-    const fence = readFence(line);
-    if (!open) {
-      if (fence) open = { start: i, fence };
-      continue;
-    }
-    // A closing fence matches the character, is at least as long, and carries no info.
-    if (fence && fence.marker === open.fence.marker && fence.length >= open.fence.length && fence.info.length === 0) {
-      for (let j = open.start; j <= i; j++) masked[j] = "";
-      open = null;
-    }
-  }
-  // An unclosed fence runs to the end of the file.
-  if (open) for (let j = open.start; j < masked.length; j++) masked[j] = "";
-
-  return masked;
-}
-
 /**
  * True for a GFM thematic break: up to three leading spaces, then three or more of the
  * same marker with nothing but spacing between them. A fourth leading space makes it a
@@ -630,9 +576,7 @@ function h2Text(line: string): string | null {
 /** True for the heading that opens an archived or historical era. */
 function isArchivedHeading(line: string): boolean {
   const heading = parseHeading(line);
-  if (!heading) return false;
-  const words = heading.text.split(" ");
-  return words.includes("archived") || words.includes("historical");
+  return heading !== null && isArchivedHeadingText(heading.text);
 }
 
 /**

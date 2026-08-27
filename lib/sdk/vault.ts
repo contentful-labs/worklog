@@ -8,6 +8,7 @@ import type { WorklogConfig } from "./types";
 import { weekIdForDate } from "./week-utils";
 import { canonicalText } from "./text-similarity";
 import { isTableSeparator, renderScannedRow, scanRow } from "./markdown-table";
+import { closesFence, isArchivedHeadingText, readFence, type Fence } from "./markdown-scan";
 import { contractHome } from "../config";
 
 export interface VaultPaths {
@@ -148,35 +149,6 @@ export const DEFAULT_MEMORY_FULL_WEEKS = 12;
 /** Which cell of `| Date | Item | Category | Notes |` holds the notes. */
 const MEMORY_NOTES_COLUMN = 3;
 
-interface Fence {
-  marker: string;
-  length: number;
-  info: string;
-}
-
-/**
- * Read a fence line: up to three leading spaces, then three or more backticks or tildes.
- *
- * The same shape as `maskFenced`'s reader in `vault-updates.ts`, which is private to that file.
- * Duplicated rather than shared because that file is not this change's to touch.
- */
-function readFence(line: string): Fence | null {
-  let i = 0;
-  while (i < 3 && line[i] === " ") i++;
-
-  const marker = line[i];
-  if (marker !== "`" && marker !== "~") return null;
-
-  let length = 0;
-  while (line[i + length] === marker) length++;
-  if (length < 3) return null;
-
-  const info = line.slice(i + length).trim();
-  // A backtick fence's info string may not itself contain a backtick.
-  if (marker === "`" && info.includes("`")) return null;
-  return { marker, length, info };
-}
-
 function isIsoDate(value: string): boolean {
   if (value.length !== 10) return false;
   for (let i = 0; i < 10; i++) {
@@ -231,8 +203,7 @@ export function condenseMemoryNotes(content: string, fullSinceDate: string): Con
         counts.other += line.length;
         return line;
       }
-      // A closing fence matches the character, is at least as long, and carries no info.
-      if (fence.marker === open.marker && fence.length >= open.length && fence.info.length === 0) {
+      if (closesFence(open, fence)) {
         open = null;
         counts.other += line.length;
         return line;
@@ -307,10 +278,6 @@ function nodeText(node: RootContent): string {
   return "";
 }
 
-function normalizeHeading(text: string): string {
-  return text.trim().toLowerCase().split(/\s+/).join(" ");
-}
-
 /**
  * The document's top-level sections at `maxDepth` or shallower. Only headings that are direct
  * children of the root count: one inside a fence is a code block, and one inside a blockquote
@@ -322,7 +289,7 @@ function topSections(tree: Root, lineCount: number, maxDepth: number): TopSectio
   for (const node of tree.children) {
     if (node.type !== "heading" || node.depth > maxDepth || !node.position) continue;
     headings.push({
-      heading: normalizeHeading(nodeText(node)),
+      heading: canonicalText(nodeText(node)),
       depth: node.depth,
       startLine: node.position.start.line - 1,
     });
@@ -332,12 +299,6 @@ function topSections(tree: Root, lineCount: number, maxDepth: number): TopSectio
     ...heading,
     endLine: headings[i + 1]?.startLine ?? lineCount,
   }));
-}
-
-/** True for the headings that open an archived era, matching what the vault writers treat as live. */
-function isArchivedHeading(heading: string): boolean {
-  const words = heading.split(" ");
-  return words.includes("archived") || words.includes("historical");
 }
 
 /** Trailing blank lines make the joins below look ragged. */
@@ -583,7 +544,7 @@ export function capOrganizationalNotes(content: string, cap: number = DEFAULT_OR
   const tree = parseMarkdown(content);
   const sections = topSections(tree, lines.length, 2);
 
-  const archivedAt = sections.find((section) => isArchivedHeading(section.heading));
+  const archivedAt = sections.find((section) => isArchivedHeadingText(section.heading));
   const liveEnd = archivedAt?.startLine ?? lines.length;
 
   const notes = sections.find((section) => section.heading === ORG_NOTES_HEADING);
