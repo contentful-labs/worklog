@@ -36,7 +36,7 @@ import {
   escapeCell, findTable, renderRow, renderScannedRow, scanRow, splitRow,
   type TableBounds,
 } from "./markdown-table";
-import { isArchivedHeadingText, maskFenced } from "./markdown-scan";
+import { frontmatterEnd, isArchivedHeadingText, maskFenced } from "./markdown-scan";
 import { weekIdForDate } from "./week-utils";
 import {
   LOOKUP_MARGIN, SIMILARITY_THRESHOLD, canonicalText, exactText, normalizeText, textSimilarity,
@@ -510,21 +510,6 @@ function isThematicBreak(line: string): boolean {
     else if (char !== " " && char !== "\t") return false;
   }
   return count >= 3;
-}
-
-/**
- * Index of the line closing a leading YAML frontmatter block, or -1 when there is none.
- * Delimiters sit at column 0; an indented `---` is content inside the block, not its end.
- *
- * The same four lines as `frontmatterEnd` in `focus.ts`, which is private to that
- * module. Duplicated rather than exported so focus tracking keeps its own copy of a
- * rule it already relies on.
- */
-function frontmatterEnd(lines: readonly string[]): number {
-  const isDelimiter = (line: string) => line === "---" || line === "---\r";
-  if (!isDelimiter(lines[0] ?? "")) return -1;
-  for (let i = 1; i < lines.length; i++) if (isDelimiter(lines[i])) return i;
-  return -1;
 }
 
 /** First line of the document body. Everything above it is frontmatter, whatever it looks like. */
