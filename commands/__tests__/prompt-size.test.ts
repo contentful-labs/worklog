@@ -7,6 +7,7 @@ import {
   DEFAULT_VAULT_NOTE_CAP,
   type VaultNote,
 } from "../../lib/sdk/vault";
+import type { TeamTimeline } from "../../lib/sdk/vault";
 import {
   config, timeline, weekInfo, previousBragBooks, workContextContent, focusDocContent,
   focusHistoryContent, memoryContent, profileContent, impactLogContent, coachPersona,
@@ -117,6 +118,33 @@ describe("brag book prompt size", () => {
     expect(prompt).not.toContain("Organisational note 199");
     // Closed items are kept as their author wrote them.
     expect(prompt).toContain("Closed P0 item 0");
+  });
+
+  it("ranks a historical week's notes by the prefixes that week's team used", async () => {
+    // The team timeline says this week belonged to a team using OLD; the current profile only
+    // knows TEAM. Scoring against the profile finds nothing, and the one relevant note is as
+    // likely to be cut by the ten-note cap as any of the noise around it.
+    const oldTeam: TeamTimeline = {
+      entries: [{ team: "Old Team", domain: null, start: "2024-01-01", end: null, ticketPrefixes: ["OLD"], notes: null }],
+      transitionNotes: [],
+    };
+    const oldWorkLog = "# Work Log\n\n## Jira Tasks (1)\n\n### [OLD-42] A ticket from the old team\n";
+    const notes: VaultNote[] = [
+      ...Array.from({ length: 20 }, (_, i) => ({ title: `Noise ${i}`, excerpt: "unrelated" })),
+      { title: "The one that matters", excerpt: "notes on OLD-42" },
+    ];
+
+    vi.stubGlobal("Bun", { file: (path: string) => ({ text: async () => readFileSync(path, "utf8") }) });
+    vi.resetModules();
+    const { buildBragBookPrompt } = await import("../worklog");
+
+    const { prompt } = await buildBragBookPrompt(
+      oldWorkLog, previousBragBooks, workContextContent, memoryContent, profileContent,
+      impactLogContent, coachPersona, focusDocContent, focusHistoryContent, careerContext,
+      notes, [], "", null, oldTeam, weekInfo, config,
+    );
+
+    expect(prompt).toContain("The one that matters");
   });
 
   it("keeps the vault notes that mention this week's work and drops the rest", async () => {
