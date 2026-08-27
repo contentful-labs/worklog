@@ -13,7 +13,7 @@
 
 import { isTableSeparator, splitRow, renderRow, appendToFirstTable } from "./markdown-table";
 import { weekIdForDate } from "./week-utils";
-import { SIMILARITY_THRESHOLD, canonicalText, textSimilarity } from "./text-similarity";
+import { SIMILARITY_THRESHOLD, canonicalText, exactText, textSimilarity } from "./text-similarity";
 
 // Kept under the focus names so existing callers and the SDK barrel do not move.
 export { normalizeText as normalizeFocusText, textSimilarity as focusSimilarity } from "./text-similarity";
@@ -385,11 +385,13 @@ export function migrateFocusTracking(content: string, keepSinceWeek: string = de
   for (const item of parsed) {
     // Collapse into a row that says the same thing and would lose nothing the user
     // typed. Same words only: a row that merely reads alike is another commitment.
-    const canonical = canonicalText(item.item);
+    // Case is part of the words here, since this deletes a row and runs unattended:
+    // "Set API_KEY" is not "Set api_key".
+    const canonical = exactText(item.item);
     const duplicate = kept.find(
       (candidate) =>
         candidate.week === item.week &&
-        canonicalText(candidate.item) === canonical &&
+        exactText(candidate.item) === canonical &&
         carriesNothingBeyond(item, candidate),
     );
     if (duplicate) {

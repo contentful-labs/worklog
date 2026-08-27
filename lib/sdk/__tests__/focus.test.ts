@@ -260,7 +260,7 @@ describe("migrateFocusTracking", () => {
 | 2026-W01 | Ancient open item | pending | |
 | 2026-W01 | Ancient closed item | completed | done |
 | 2026-W09 | Ship the Search Revamp release correctness loop via TEAM-1234 | pending | |
-| 2026-W09 | ship the SEARCH REVAMP  release correctness loop via TEAM-1234 | pending | |
+| 2026-W09 | Ship  the Search Revamp   release correctness loop via TEAM-1234 | pending | |
 | 2026-W10 | Recent open item | pending | |
 `;
 
@@ -281,6 +281,21 @@ describe("migrateFocusTracking", () => {
     // older open items become history, resolved statuses are left alone
     expect(content).toContain("| 2026-W01.1 | 2026-W01 | Ancient open item | lapsed |");
     expect(content).toContain("| 2026-W01.2 | 2026-W01 | Ancient closed item | completed |");
+  });
+
+  it("keeps two legacy rows that differ only in case", () => {
+    const legacyCasing = `| Week | Focus Item | Status | Notes |
+|---|---|---|---|
+| 2026-W09 | Set API_KEY in the deploy job | pending | |
+| 2026-W09 | Set api_key in the deploy job | pending | |
+`;
+
+    const { content, assigned, collapsed } = migrateFocusTracking(legacyCasing, "2026-W09");
+
+    // This runs unattended on every worklog run, and one of these is not the other.
+    expect({ assigned, collapsed }).toEqual({ assigned: 2, collapsed: 0 });
+    expect(content).toContain("Set API_KEY in the deploy job");
+    expect(content).toContain("Set api_key in the deploy job");
   });
 
   it("keeps two legacy rows that read alike but are different tasks", () => {
@@ -467,7 +482,7 @@ describe("user-added columns", () => {
 |---|---|---|---|---|
 | 2026-W09 | Ship the Search Revamp release via TEAM-1234 | pending | first note | Owner A |
 | 2026-W09 | Ship the Search Revamp release through TEAM-1234 | pending | second note | Owner B |
-| 2026-W09 | ship the search revamp release  THROUGH TEAM-1234 | pending |  |  |
+| 2026-W09 | Ship the Search Revamp release  through TEAM-1234 | pending |  |  |
 `;
     const { content, collapsed, assigned } = migrateFocusTracking(legacy, "2026-W09");
     // the empty third row collapses; the second carries its own note and owner, so it stays
@@ -482,7 +497,7 @@ describe("user-added columns", () => {
 |---|---|---|---|
 | 2026-W09 | Ship the auth PR | completed | |
 | 2026-W09 | Ship the auth PR | pending | |
-| 2026-W09 | ship the AUTH pr | pending | |
+| 2026-W09 | Ship  the auth PR | pending | |
 `;
     const { assigned, collapsed } = migrateFocusTracking(legacy, "2026-W09");
     expect(collapsed).toBe(1);
@@ -493,7 +508,7 @@ describe("user-added columns", () => {
     const legacy = `| Week | Focus Item | Status | Notes |
 |---|---|---|---|
 | 2026-W01 | Ship the auth PR | pending | |
-| 2026-W01 | ship the auth  PR | pending | |
+| 2026-W01 | Ship  the auth PR | pending | |
 `;
     const { assigned, collapsed, lapsed } = migrateFocusTracking(legacy, "2026-W09");
     expect({ assigned, collapsed, lapsed }).toEqual({ assigned: 1, collapsed: 1, lapsed: 1 });
@@ -503,12 +518,12 @@ describe("user-added columns", () => {
     const legacy = `| Week | Focus Item | Status | Notes |
 |---|---|---|---|
 | 2026-W09 | Ship the auth PR | pending | |
-| 2026-W09 | ship the auth PR | completed | |
+| 2026-W09 | Ship  the auth PR | completed | |
 `;
     const { content, collapsed } = migrateFocusTracking(legacy, "2026-W09");
     expect(collapsed).toBe(0);
     expect(content).toContain("| Ship the auth PR | pending |");
-    expect(content).toContain("| ship the auth PR | completed |");
+    expect(content).toContain("| Ship  the auth PR | completed |");
   });
 
   it("survive the legacy migration, header included", () => {
