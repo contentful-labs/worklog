@@ -55,7 +55,7 @@ function seedVault(vault: string) {
   writeFileSync(join(vault, `${WEEK} Brag Book.md`), EXISTING_BRAG_BOOK);
 }
 
-function writeConfig(configHome: string, vault: string) {
+function writeConfig(configHome: string, vault: string, options: { withTimeline?: boolean } = {}) {
   mkdirSync(join(configHome, "worklog"), { recursive: true });
   writeFileSync(
     join(configHome, "worklog", "config.json"),
@@ -76,7 +76,8 @@ function writeConfig(configHome: string, vault: string) {
       },
     }),
   );
-  // readTeamTimeline reads this file directly and throws if it is missing.
+  // Seeded so the run uses a real timeline; readTeamTimeline defaults without one.
+  if (options.withTimeline === false) return;
   writeFileSync(
     join(configHome, "worklog", "team-timeline.json"),
     JSON.stringify({
@@ -241,6 +242,56 @@ describe("runWorklog write ordering", () => {
       // The regenerated work log replaced the seeded one, which is the whole point of --force
       // once the week is known to be good.
       expect(readFileSync(join(vault, `${WEEK} Work Log.md`), "utf8")).not.toBe(EXISTING_WORK_LOG);
+    } finally {
+      if (previousConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
+      else process.env.XDG_CONFIG_HOME = previousConfigHome;
+      if (previousAtlassian === undefined) delete process.env.ATLASSIAN_API_TOKEN;
+      else process.env.ATLASSIAN_API_TOKEN = previousAtlassian;
+      if (previousGitHub === undefined) delete process.env.GITHUB_TOKEN;
+      else process.env.GITHUB_TOKEN = previousGitHub;
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("team attribution without a timeline file", () => {
+  it("names the profile's team in the prompt rather than Unknown", async () => {
+    // readTeamTimeline warns that every week will be attributed to the current team.
+    // This is what makes that true: the prompt used to say "Unknown Team" instead.
+    const tmp = mkdtempSync(join(tmpdir(), "worklog-noteam-"));
+    const configHome = join(tmp, "config");
+    const vault = join(tmp, "vault");
+    const previousConfigHome = process.env.XDG_CONFIG_HOME;
+    const previousAtlassian = process.env.ATLASSIAN_API_TOKEN;
+    const previousGitHub = process.env.GITHUB_TOKEN;
+
+    seedVault(vault);
+    writeConfig(configHome, vault, { withTimeline: false });
+    process.env.XDG_CONFIG_HOME = configHome;
+    process.env.ATLASSIAN_API_TOKEN = "test-atlassian-token";
+    process.env.GITHUB_TOKEN = "test-github-token";
+
+    vi.stubGlobal("Bun", {
+      write: async (path: string, content: string) => writeFileSync(path, content),
+      file: (path: string) => ({ text: async () => readFileSync(path, "utf8") }),
+    });
+
+    try {
+      vi.resetModules();
+      const { aiQueryStructured } = await import("../../lib/sdk/ai");
+      vi.mocked(aiQueryStructured).mockResolvedValue({
+        ...BAD_OUTPUT,
+        bragBookMarkdown: "# Brag Book - Week 09, 2026\n\n## Achievements\n\n- Shipped the thing",
+      });
+
+      const { runWorklog } = await import("../worklog");
+      await runWorklog({ week: WEEK, noPrompt: true, force: true, verbose: false });
+
+      const [call] = vi.mocked(aiQueryStructured).mock.calls;
+      const prompt = call[0].prompt;
+
+      expect(prompt).toContain("Search");
+      expect(prompt).not.toContain("Unknown");
     } finally {
       if (previousConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
       else process.env.XDG_CONFIG_HOME = previousConfigHome;

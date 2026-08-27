@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtemp, writeFile, rm, mkdir } from "node:fs/promises";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import {
   buildVaultPaths,
   readFileOrDefault,
@@ -19,6 +19,8 @@ import {
   getMissingBragBookWeeks,
   discoverWeeklyNotes,
   readTeamTimeline,
+  resolveTeamTimeline,
+  getCurrentTeam,
   getTeamForDate,
   formatTeamTimelineForPrompt,
   type VaultPaths,
@@ -71,6 +73,100 @@ beforeEach(async () => {
 
 afterEach(async () => {
   await rm(tmpDir, { recursive: true, force: true });
+});
+
+describe("readTeamTimeline", () => {
+  it("reads a timeline that is there", async () => {
+    const timeline = {
+      entries: [{ team: "Search", domain: null, start: "2024-01-01", end: null, ticketPrefixes: ["TEAM"], notes: null }],
+      transitionNotes: ["moved teams"],
+    };
+    await writeFile(paths.teamTimeline, JSON.stringify(timeline));
+
+    expect(readTeamTimeline(paths)).toEqual(timeline);
+  });
+
+  it("defaults to an empty timeline when the file has not been set up", () => {
+    // It used to throw a bare ENOENT and end the run before anything useful happened.
+    const warnings: string[] = [];
+
+    const timeline = readTeamTimeline(paths, { onWarning: (message) => warnings.push(message) });
+
+    expect(timeline).toEqual({ entries: [], transitionNotes: [] });
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("team-timeline.json");
+  });
+
+  it("names the expected path in the warning, shortened to ~ where it is under home", () => {
+    const underHome = buildVaultPaths(mockConfig, join(homedir(), "some-config", "team-timeline.json"));
+    const warnings: string[] = [];
+
+    readTeamTimeline(underHome, { onWarning: (message) => warnings.push(message) });
+
+    expect(warnings[0]).toContain("~/some-config/team-timeline.json");
+    expect(warnings[0]).not.toContain(homedir());
+  });
+
+  it("does not require anyone to be listening", () => {
+    expect(() => readTeamTimeline(paths)).not.toThrow();
+  });
+
+  it("returns a fresh empty timeline each time, not a shared one", () => {
+    const first = readTeamTimeline(paths);
+    first.entries.push({ team: "Mutated", domain: null, start: "2024-01-01", end: null, ticketPrefixes: [], notes: null });
+
+    expect(readTeamTimeline(paths).entries).toEqual([]);
+  });
+
+  it("fails hard on a malformed timeline, naming the file and the parse error", async () => {
+    // Someone wrote this file and got it wrong. Defaulting would quietly attribute a
+    // whole work history to the wrong team.
+    await writeFile(paths.teamTimeline, '{ "entries": [ }');
+    const warnings: string[] = [];
+
+    expect(() => readTeamTimeline(paths, { onWarning: (m) => warnings.push(m) })).toThrow(/team-timeline\.json is not valid JSON/);
+    expect(warnings).toEqual([]);
+  });
+});
+
+describe("resolveTeamTimeline", () => {
+  const populated = {
+    entries: [{ team: "Platform", domain: "Infra", start: "2025-01-01", end: null, ticketPrefixes: ["PLAT"], notes: "n" }],
+    transitionNotes: ["moved"],
+  };
+
+  it("leaves a timeline that has entries exactly as it is", () => {
+    expect(resolveTeamTimeline(populated, mockConfig)).toBe(populated);
+  });
+
+  it("stands in the profile's team when the file had none", () => {
+    const resolved = resolveTeamTimeline({ entries: [], transitionNotes: [] }, mockConfig);
+
+    expect(resolved.entries).toEqual([{
+      team: mockConfig.profile.team,
+      domain: mockConfig.profile.teamDomain,
+      start: mockConfig.profile.startDate,
+      end: null,
+      ticketPrefixes: mockConfig.profile.ticketPrefixes,
+      notes: null,
+    }]);
+  });
+
+  it("answers for any week the engineer could have worked", () => {
+    const resolved = resolveTeamTimeline({ entries: [], transitionNotes: [] }, mockConfig);
+
+    // The entry is open-ended, so every week from the start date on has a team.
+    expect(getTeamForDate(resolved, new Date("2030-06-01"))?.team).toBe(mockConfig.profile.team);
+    expect(getCurrentTeam(resolved)?.team).toBe(mockConfig.profile.team);
+  });
+
+  it("names that team in the formatted timeline instead of leaving it blank", () => {
+    const formatted = formatTeamTimelineForPrompt(resolveTeamTimeline({ entries: [], transitionNotes: [] }, mockConfig));
+
+    expect(formatted).toContain(mockConfig.profile.team);
+    // No transitions to report, so no header over nothing.
+    expect(formatted).not.toContain("IMPORTANT FACTS");
+  });
 });
 
 describe("buildVaultPaths", () => {

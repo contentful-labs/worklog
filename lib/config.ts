@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -69,31 +69,58 @@ export const TEAM_TIMELINE_PATH = join(CONFIG_DIR, "team-timeline.json");
 
 let _config: WorklogConfig | undefined;
 
-export function loadConfig(): WorklogConfig | null {
-  if (_config) return _config;
+/**
+ * Why there is no usable config, when there is not one.
+ *
+ * The two cases need different advice, and telling them apart is the whole point: a user
+ * whose config.json has a stray comma was being sent to `worklog init`, which would have
+ * overwritten the file they were one character away from fixing.
+ */
+export type ConfigLoad =
+  | { status: "ok"; config: WorklogConfig }
+  | { status: "missing" }
+  | { status: "unreadable"; error: string };
 
-  if (existsSync(CONFIG_FILE)) {
-    try {
-      _config = expandConfigPaths(JSON.parse(require("fs").readFileSync(CONFIG_FILE, "utf-8")));
-      return _config!;
-    } catch {
-      return null;
-    }
+export function readConfig(): ConfigLoad {
+  if (_config) return { status: "ok", config: _config };
+  if (!existsSync(CONFIG_FILE)) return { status: "missing" };
+
+  try {
+    _config = expandConfigPaths(JSON.parse(readFileSync(CONFIG_FILE, "utf-8")));
+    return { status: "ok", config: _config };
+  } catch (err) {
+    return { status: "unreadable", error: err instanceof Error ? err.message : String(err) };
   }
-
-  return null;
 }
 
 /**
- * Load config or exit with an error message directing the user to run init.
+ * The config, or null when there is not a usable one.
+ *
+ * Deliberately flattens both failures: `worklog init` calls this to offer a prefill, and
+ * a broken config is exactly when init is most needed, so it must not throw here.
+ * Anything that needs to tell the user what went wrong calls readConfig.
  */
+export function loadConfig(): WorklogConfig | null {
+  const result = readConfig();
+  return result.status === "ok" ? result.config : null;
+}
+
+/** Load config, or explain what is wrong with it and exit. */
 export function requireConfig(): WorklogConfig {
-  const config = loadConfig();
-  if (!config) {
+  const result = readConfig();
+  if (result.status === "ok") return result.config;
+
+  if (result.status === "missing") {
     console.error("No worklog configuration found. Run `worklog init` to set up.");
-    process.exit(1);
+  } else {
+    // No suggestion to re-init: the settings are still in that file, and running init
+    // over it is how they would be lost.
+    console.error(
+      `config.json at ${contractHome(CONFIG_FILE)} could not be parsed: ${result.error}\n` +
+      `Fix the file to continue. Your settings are still in it.`,
+    );
   }
-  return config;
+  process.exit(1);
 }
 
 export function saveConfig(config: WorklogConfig): void {

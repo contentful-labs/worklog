@@ -20,6 +20,7 @@ import {
   dropDatedRowsBefore,
   getBragBooks,
   readTeamTimeline,
+  resolveTeamTimeline,
   getTeamForDate,
   formatTeamTimelineForPrompt,
   getCurrentTeam,
@@ -564,7 +565,9 @@ export async function runWorklog(opts: {
 
   const config = requireConfig();
   const paths = buildVaultPaths(config, TEAM_TIMELINE_PATH);
-  const timeline = readTeamTimeline(paths);
+  // Stands in a profile-derived entry when there is no timeline file, so the prompt names
+  // the engineer's team rather than "Unknown Team".
+  const timeline = resolveTeamTimeline(readTeamTimeline(paths, { onWarning: (message) => p.log.warn(message) }), config);
 
   // Focus items are keyed by id now; upgrade a pre-id file before anything reads it.
   const migration = await migrateFocusTrackingFile(paths.focusTracking);

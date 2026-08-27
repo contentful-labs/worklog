@@ -42,6 +42,7 @@ export {
   getMissingBragBookWeeks,
   discoverWeeklyNotes,
   readTeamTimeline,
+  resolveTeamTimeline,
   getTeamForDate,
   getCurrentTeam,
   formatTeamTimelineForPrompt,

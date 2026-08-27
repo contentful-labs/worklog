@@ -13,6 +13,7 @@ import {
   getRecentBragBooks,
   getMissingBragBookWeeks,
   readTeamTimeline,
+  resolveTeamTimeline,
   formatTeamTimelineForPrompt,
 } from "../lib/sdk/vault";
 import { getExpectedBragBookWeeks } from "../lib/sdk/week-utils";
@@ -125,7 +126,7 @@ export async function runPrep(opts: {
     { type, weeks, sinceDate, untilDate, extended },
     {
       bragBooks, profile, workContext, careerContext, focusDoc, impactLog, focusTracking, memory,
-      teamTimeline: formatTeamTimelineForPrompt(readTeamTimeline(paths)),
+      teamTimeline: formatTeamTimelineForPrompt(resolveTeamTimeline(readTeamTimeline(paths, { onWarning: (message) => p.log.warn(message) }), config)),
       writingStyle,
     },
     rawTemplate,
