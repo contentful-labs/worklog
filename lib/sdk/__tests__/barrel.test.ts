@@ -99,6 +99,13 @@ describe("SDK barrel exports", () => {
     expect(sdk.fetchDataForWeek).toBeTypeOf("function");
   });
 
+  it("exports sources", () => {
+    expect(sdk.SLACK_SOURCE_NAME).toBe("slack");
+    expect(sdk.createSlackSource).toBeTypeOf("function");
+    expect(sdk.slackMessagesFrom).toBeTypeOf("function");
+    expect(sdk.slackSource.name).toBe("slack");
+  });
+
   it("exports doc generators", () => {
     expect(sdk.generateProfileDoc).toBeTypeOf("function");
     expect(sdk.generateWorkContextDoc).toBeTypeOf("function");

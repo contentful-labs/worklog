@@ -125,5 +125,12 @@ export {
   fetchDataForWeek,
 } from "./data-fetch";
 
+// Sources
+export type {
+  Source, SourceAvailability, SourceBatch, SourceContext, SourceEvent, SourceSnapshot,
+} from "./sources";
+export type { ProcessRunner, RunResult, SlackMessage } from "./sources/slack";
+export { SLACK_SOURCE_NAME, createSlackSource, slackMessagesFrom, slackSource } from "./sources/slack";
+
 // Doc generators
 export { generateProfileDoc, generateWorkContextDoc, generateCoachPersonaDoc } from "./doc-generators";
