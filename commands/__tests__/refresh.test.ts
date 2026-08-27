@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { credentialsFor, refreshWeeks, weeksInRange, type WeekToWrite } from "../refresh";
 import { allSources } from "../../lib/sdk/source-adapters";
 import { getEnvTokens } from "../worklog";
-import { parseSince, parseWeek } from "../../lib/sdk/week-utils";
+import { parseSince, parseWeek, weekIdForDate } from "../../lib/sdk/week-utils";
 import { openLedger } from "../../lib/sdk/ledger";
 import type { Source, SourceBatch, SourceContext } from "../../lib/sdk/sources";
 import type { WorklogConfig } from "../../lib/config";
@@ -628,5 +628,38 @@ describe("a week another source left half-read", () => {
 
     expect(second.unfinished).toEqual([]);
     expect(second.written.map((week) => week.weekId)).toEqual(["2026-W36"]);
+  });
+});
+
+describe("walking a range of weeks", () => {
+  it("includes the week the range ends in, whatever weekday it started on", () => {
+    // The trigger: stepping seven days at a time keeps the weekday of the start. From a
+    // Tuesday, the third step lands on the Tuesday after the range ends, so the last week
+    // is never visited — and for the default range that is the current week.
+    const tuesday = new Date("2026-08-11T00:00:00.000Z");
+    const mondayAfterNext = new Date("2026-08-24T00:00:00.000Z");
+
+    expect(weeksInRange(tuesday, mondayAfterNext).map((week) => week.weekId))
+      .toEqual(["2026-W33", "2026-W34", "2026-W35"]);
+  });
+
+  it.each([
+    ["Monday to Monday", "2026-08-10", "2026-08-24"],
+    ["Tuesday to Monday", "2026-08-11", "2026-08-24"],
+    ["Sunday to Monday", "2026-08-16", "2026-08-24"],
+    ["Monday to Sunday", "2026-08-10", "2026-08-30"],
+    ["Friday to Sunday", "2026-08-14", "2026-08-30"],
+  ])("covers every week between the two ends: %s", (_name, from, to) => {
+    const weeks = weeksInRange(new Date(`${from}T00:00:00.000Z`), new Date(`${to}T00:00:00.000Z`));
+
+    // Both ends are included, and there are no gaps between them.
+    expect(weeks[0].weekId).toBe(weekIdForDate(new Date(`${from}T00:00:00.000Z`)));
+    expect(weeks[weeks.length - 1].weekId).toBe(weekIdForDate(new Date(`${to}T00:00:00.000Z`)));
+    expect(new Set(weeks.map((week) => week.weekId)).size).toBe(weeks.length);
+  });
+
+  it("gives one week when both ends are inside it, on any weekday", () => {
+    expect(weeksInRange(new Date("2026-08-13T00:00:00.000Z"), new Date("2026-08-14T00:00:00.000Z"))
+      .map((week) => week.weekId)).toEqual(["2026-W33"]);
   });
 });

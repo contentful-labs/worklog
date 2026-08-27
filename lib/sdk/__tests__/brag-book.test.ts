@@ -793,3 +793,65 @@ describe("an achievements heading the validator accepts", () => {
       .toBe("### What went well");
   });
 });
+
+describe("layouts the validator accepts that the gate used to look past", () => {
+  it("protects achievements written inside the coaching block", () => {
+    // The trigger: the validator does not care where the achievements section sits, so a
+    // document that opens the coaching block before it passes — and a gate that stopped
+    // reading headings once it saw the marker never found the section at all, leaving
+    // every achievement in it free to be dropped.
+    const existing = [
+      "# Brag Book - Week 36, 2026",
+      "",
+      "<!-- COACHING_SESSION -->",
+      "",
+      "## Achievements",
+      "",
+      "- Cut search indexing from 40 minutes to 6.",
+      "",
+      "<!-- /COACHING_SESSION -->",
+    ].join("\n");
+    const stripped = existing.replace("- Cut search indexing from 40 minutes to 6.", "- Only the new thing.");
+
+    expect(bragBookMarkdownProblem(existing)).toBeNull();
+    expect(firstDroppedLine(existing, stripped)).toBe("- Cut search indexing from 40 minutes to 6.");
+    expect(firstDroppedLine(existing, existing)).toBeUndefined();
+  });
+
+  it("protects a coaching heading written at a depth other than three", () => {
+    const existing = [
+      "# Brag Book - Week 36, 2026",
+      "",
+      "## Achievements",
+      "",
+      "- Cut search indexing from 40 minutes to 6.",
+      "",
+      "<!-- COACHING_SESSION -->",
+      "#### What went well",
+      "",
+      "You said no to the extra scope.",
+      "<!-- /COACHING_SESSION -->",
+    ].join("\n");
+
+    expect(bragBookMarkdownProblem(existing)).toBeNull();
+    expect(firstDroppedLine(existing, existing.replace("#### What went well", "#### Something else")))
+      .toBe("#### What went well");
+  });
+
+  it("protects what a document says before its first heading", () => {
+    // Nothing puts a line there on purpose, but the run accepts a document that opens
+    // with one, and a line someone wrote about the week is a line someone wrote about it.
+    const existing = [
+      "A quiet week, mostly spent on the indexer.",
+      "",
+      "## Achievements",
+      "",
+      "- Cut search indexing from 40 minutes to 6.",
+    ].join("\n");
+    const withoutIt = existing.replace("A quiet week, mostly spent on the indexer.\n\n", "");
+
+    expect(bragBookMarkdownProblem(existing)).toBeNull();
+    expect(firstDroppedLine(existing, withoutIt)).toBe("A quiet week, mostly spent on the indexer.");
+    expect(firstDroppedLine(existing, existing)).toBeUndefined();
+  });
+});

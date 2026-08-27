@@ -1062,3 +1062,42 @@ describe("a source that remembers what it has already seen", () => {
     expect(asked).toEqual(["200", "304"]);
   });
 });
+
+describe("a week's event file that exists and says nothing", () => {
+  it.each([
+    ["a file of no bytes at all", ""],
+    ["a file of whitespace", "\n  \n"],
+  ])("is damage rather than an empty week: %s", async (_name, contents) => {
+    // The trigger: reading it as "no events yet" lets the week be written again from
+    // nothing while its watermark moves on, which loses everything it held with none of
+    // the noise a corrupt row makes.
+    const seed = await openLedger(root);
+    seed.record("jira", batch({
+      events: [{ source: "jira", kind: "comment", itemId: "TEAM-1234", at: "2026-08-31T11:00:00.000Z", payload: {}, id: "c-1" }],
+    }), seenAt);
+    await seed.save();
+
+    const path = join(root, "events", "2026-W36.json");
+    await writeFile(path, contents, "utf-8");
+    const before = await readFile(path, "utf-8");
+
+    const ledger = await openLedger(root);
+
+    expect(ledger.unreadableWeeks()).toEqual(["2026-W36"]);
+    expect(ledger.problems()[0]).toContain("2026-W36.json");
+    expect(ledger.problems()[0]).toContain("empty");
+
+    // And the file is left exactly as it is, rather than rewritten from nothing.
+    ledger.record("jira", batch({
+      events: [{ source: "jira", kind: "status", itemId: "TEAM-1234", at: "2026-09-02T09:00:00.000Z", payload: {} }],
+    }), seenAt);
+    await ledger.save();
+    expect(await readFile(path, "utf-8")).toBe(before);
+  });
+
+  it("is still an empty week when the file is simply not there", async () => {
+    const ledger = await openLedger(root);
+    expect(ledger.unreadableWeeks()).toEqual([]);
+    expect(ledger.eventsForWeek("2026-W36")).toEqual([]);
+  });
+});

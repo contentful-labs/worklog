@@ -1559,3 +1559,87 @@ describe("a Jira history whose embedded page starts partway through", () => {
     expect(batch.warnings.some((w) => w.includes("reports 150 changes and only 1 could be read"))).toBe(true);
   });
 });
+
+describe("commits pushed to a pull request that is already open", () => {
+  const commits = [
+    {
+      sha: "aaa111",
+      commit: { message: "Split the migration out\n\nLonger body.", author: { name: "Example User", email: "user@example.com", date: "2026-03-04T09:00:00Z" } },
+      author: { login: USERNAME },
+    },
+    {
+      sha: "bbb222",
+      commit: { message: "Tidy the fixtures", author: { name: "Example User", email: "user@example.com", date: "2026-03-05T09:00:00Z" } },
+      author: { login: USERNAME },
+    },
+    {
+      sha: "ccc333",
+      commit: { message: "Not mine", author: { name: "Other", email: "other@example.com", date: "2026-03-05T10:00:00Z" } },
+      author: { login: "other-user" },
+    },
+  ];
+
+  it("are the week's news, even though the pull request was opened before it", async () => {
+    // The trigger: a PR opened last week and worked on all of this one. Opening it is the
+    // only event a PR produces on its own, so without commits this week's log had nothing
+    // about the branch at all.
+    const opened = {
+      ...authoredPR, created_at: "2026-02-24T09:00:00Z", closed_at: null,
+      pull_request: { url: authoredPR.pull_request.url },
+    };
+    server.use(
+      searchHandler([opened], []),
+      http.get("https://api.github.com/repos/example-org/repo/pulls/42/commits", () => HttpResponse.json(commits)),
+    );
+
+    const batch = await githubSource(() => NOW).fetchWindow(window, makeContext());
+
+    const mine = batch.events.filter((event) => event.kind === "commit");
+    expect(mine.map((event) => event.id)).toEqual(["aaa111", "bbb222"]);
+    expect(mine[0].at).toBe("2026-03-04T09:00:00.000Z");
+    expect(renderable(mine[0].payload).text).toBe("Split the migration out");
+    // Somebody else's commit on the same branch is not this user's week.
+    expect(mine.some((event) => event.id === "ccc333")).toBe(false);
+  });
+
+  it("are picked up by a delta on a pull request the ledger already knows", async () => {
+    const since = new Date("2026-03-04T12:00:00Z");
+    server.use(
+      http.get("https://api.github.com/search/issues", () => HttpResponse.json({ total_count: 0, items: [] })),
+      http.get("https://api.github.com/repos/example-org/repo/pulls/42/reviews", () => HttpResponse.json([])),
+      http.get("https://api.github.com/repos/example-org/repo/pulls/42", () => HttpResponse.json(authoredPRDetail)),
+      http.get("https://api.github.com/repos/example-org/repo/pulls/42/commits", () => HttpResponse.json(commits)),
+    );
+
+    const batch = await githubSource(() => NOW).fetchSince(since, [PR_URL], makeContext());
+
+    // Only the one pushed after the watermark.
+    expect(batch.events.filter((event) => event.kind === "commit").map((event) => event.id)).toEqual(["bbb222"]);
+  });
+
+  it("count a commit whose author GitHub could not match, by the email git recorded", async () => {
+    const unmatched = [{
+      sha: "ddd444",
+      commit: { message: "From a machine with no linked account", author: { name: "Example User", email: "User@Example.com", date: "2026-03-04T09:00:00Z" } },
+    }];
+    server.use(
+      searchHandler([{ ...authoredPR, closed_at: null, pull_request: { url: authoredPR.pull_request.url } }], []),
+      http.get("https://api.github.com/repos/example-org/repo/pulls/42/commits", () => HttpResponse.json(unmatched)),
+    );
+
+    const batch = await githubSource(() => NOW).fetchWindow(window, makeContext());
+    expect(batch.events.filter((event) => event.kind === "commit").map((event) => event.id)).toEqual(["ddd444"]);
+  });
+
+  it("says it did not finish when the commits will not load", async () => {
+    server.use(
+      searchHandler([{ ...authoredPR, closed_at: null, pull_request: { url: authoredPR.pull_request.url } }], []),
+      http.get("https://api.github.com/repos/example-org/repo/pulls/42/commits", () =>
+        HttpResponse.json({ message: "Server error" }, { status: 500 }),
+      ),
+    );
+
+    const batch = await githubSource(() => NOW).fetchWindow(window, makeContext());
+    expect(batch.incomplete).toBe(true);
+  });
+});
