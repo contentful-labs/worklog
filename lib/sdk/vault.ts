@@ -227,6 +227,36 @@ export function readTeamTimeline(paths: VaultPaths, options: ReadTeamTimelineOpt
   }
 }
 
+/**
+ * The timeline as a prompt should see it.
+ *
+ * A vault with no team-timeline.json now reads as an empty timeline rather than crashing,
+ * and every consumer then answered "Unknown Team" for every week. That contradicts the
+ * warning readTeamTimeline prints, and it puts a wrong answer in the prompt where the
+ * profile has the right one. Standing in a single entry built from the profile fixes the
+ * team label, the generation context and the formatted timeline at once, because all
+ * three read entries rather than asking about the file.
+ *
+ * A timeline that has entries is returned untouched.
+ */
+export function resolveTeamTimeline(timeline: TeamTimeline, config: WorklogConfig): TeamTimeline {
+  if (timeline.entries.length > 0) return timeline;
+
+  return {
+    // Open-ended from the day the engineer started, which covers every week that can have
+    // a work log. Earlier than that there is genuinely no team to name.
+    entries: [{
+      team: config.profile.team,
+      domain: config.profile.teamDomain || null,
+      start: config.profile.startDate,
+      end: null,
+      ticketPrefixes: config.profile.ticketPrefixes,
+      notes: null,
+    }],
+    transitionNotes: timeline.transitionNotes,
+  };
+}
+
 export function getTeamForDate(timeline: TeamTimeline, date: Date): TeamTimelineEntry | undefined {
   const iso = date.toISOString().split("T")[0];
   return timeline.entries.find(e => {
@@ -253,9 +283,9 @@ export function formatTeamTimelineForPrompt(timeline: TeamTimeline): string {
   return [
     "CRITICAL CONTEXT FOR INTERPRETING WORK HISTORY:",
     ...lines,
-    "",
-    "IMPORTANT FACTS about team transitions:",
-    ...notes,
+    // A vault standing in a single entry from the profile has no transitions to report,
+    // and a header over nothing is prompt noise.
+    ...(notes.length > 0 ? ["", "IMPORTANT FACTS about team transitions:", ...notes] : []),
   ].join("\n");
 }
 

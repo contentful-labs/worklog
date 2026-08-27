@@ -19,6 +19,8 @@ import {
   getMissingBragBookWeeks,
   discoverWeeklyNotes,
   readTeamTimeline,
+  resolveTeamTimeline,
+  getCurrentTeam,
   getTeamForDate,
   formatTeamTimelineForPrompt,
   type VaultPaths,
@@ -124,6 +126,46 @@ describe("readTeamTimeline", () => {
 
     expect(() => readTeamTimeline(paths, { onWarning: (m) => warnings.push(m) })).toThrow(/team-timeline\.json is not valid JSON/);
     expect(warnings).toEqual([]);
+  });
+});
+
+describe("resolveTeamTimeline", () => {
+  const populated = {
+    entries: [{ team: "Platform", domain: "Infra", start: "2025-01-01", end: null, ticketPrefixes: ["PLAT"], notes: "n" }],
+    transitionNotes: ["moved"],
+  };
+
+  it("leaves a timeline that has entries exactly as it is", () => {
+    expect(resolveTeamTimeline(populated, mockConfig)).toBe(populated);
+  });
+
+  it("stands in the profile's team when the file had none", () => {
+    const resolved = resolveTeamTimeline({ entries: [], transitionNotes: [] }, mockConfig);
+
+    expect(resolved.entries).toEqual([{
+      team: mockConfig.profile.team,
+      domain: mockConfig.profile.teamDomain,
+      start: mockConfig.profile.startDate,
+      end: null,
+      ticketPrefixes: mockConfig.profile.ticketPrefixes,
+      notes: null,
+    }]);
+  });
+
+  it("answers for any week the engineer could have worked", () => {
+    const resolved = resolveTeamTimeline({ entries: [], transitionNotes: [] }, mockConfig);
+
+    // The entry is open-ended, so every week from the start date on has a team.
+    expect(getTeamForDate(resolved, new Date("2030-06-01"))?.team).toBe(mockConfig.profile.team);
+    expect(getCurrentTeam(resolved)?.team).toBe(mockConfig.profile.team);
+  });
+
+  it("names that team in the formatted timeline instead of leaving it blank", () => {
+    const formatted = formatTeamTimelineForPrompt(resolveTeamTimeline({ entries: [], transitionNotes: [] }, mockConfig));
+
+    expect(formatted).toContain(mockConfig.profile.team);
+    // No transitions to report, so no header over nothing.
+    expect(formatted).not.toContain("IMPORTANT FACTS");
   });
 });
 
