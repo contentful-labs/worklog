@@ -373,3 +373,49 @@ describe("a week whose cached events cannot all be read", () => {
     expect(await readFile(weekFile, "utf-8")).toBe(cacheBefore);
   });
 });
+
+describe("a run that fails partway through", () => {
+  const augustWeek = week("2026-W33", "2026-08-10", "2026-08-16");
+  const bothWeeks: SourceBatch = {
+    snapshots: [{
+      id: "TEAM-1234", firstSeenAt: "2026-08-11T09:00:00.000Z",
+      payload: { title: "Search Revamp indexer", url: "https://example.atlassian.net/browse/TEAM-1234" },
+    }],
+    events: [
+      { source: "jira", kind: "comment", itemId: "TEAM-1234", at: "2026-08-11T09:00:00.000Z", payload: { text: "August" }, id: "c-aug" },
+      { source: "jira", kind: "comment", itemId: "TEAM-1234", at: "2026-09-01T09:00:00.000Z", payload: { text: "September" }, id: "c-sep" },
+    ],
+    warnings: [],
+  };
+
+  beforeEach(async () => {
+    await mkdir(vault, { recursive: true });
+  });
+
+  it("keeps the marker of the week it did write", async () => {
+    // The trigger: August is written, then September throws. Saving markers only at the
+    // end loses August's, and the next run offers its events again as new — so the
+    // entry says everything twice.
+    const written: string[] = [];
+    const ledger = await openLedger(cache);
+
+    await expect(refreshWeeks({
+      ledger,
+      sources: [stubSource("jira", bothWeeks)],
+      weeks: [augustWeek, septemberWeek],
+      contextFor: ctxFor,
+      now,
+      writeWeek: async ({ weekId }) => {
+        if (weekId === "2026-W36") throw new Error("the model refused September");
+        written.push(weekId);
+      },
+    })).rejects.toThrow("the model refused September");
+
+    expect(written).toEqual(["2026-W33"]);
+
+    // Reopened from disk: August is settled, September is still owed a write.
+    const reopened = await openLedger(cache);
+    expect(reopened.unwrittenEvents("2026-W33")).toEqual([]);
+    expect(reopened.pendingWeeks()).toEqual(["2026-W36"]);
+  });
+});

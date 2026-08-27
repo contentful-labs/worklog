@@ -1,12 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdir, mkdtemp, readFile, rm, writeFile, readdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { join, posix, win32 } from "node:path";
 import { tmpdir } from "node:os";
 
 import {
-  openLedger, ledgerRoot, eventsByItem, isSafeSourceName, newEvents, renderable, collectIntoLedger,
-  weekWindow,
+  openLedger, ledgerRoot, eventsByItem, insidePath, isSafeSourceName, newEvents, renderable,
+  collectIntoLedger, weekWindow,
 } from "../ledger";
 import type { Source, SourceBatch, SourceContext } from "../sources";
 
@@ -724,5 +724,33 @@ describe("what a week's work log has already been told", () => {
     const second = await openLedger(root);
     second.record("jira", batch({ events: [status] }), seenAt);
     expect(second.unwrittenEvents("2026-W36").map((event) => event.kind)).toEqual(["status"]);
+  });
+});
+
+describe("the guard on where a file may be written", () => {
+  it("accepts an ordinary name on either platform's path rules", () => {
+    expect(insidePath(posix, "/home/me/.cache/worklog/ledger/events", "2026-W36"))
+      .toBe("/home/me/.cache/worklog/ledger/events/2026-W36.json");
+    // The trigger: `join` on Windows gives backslashes, so a guard that looked for
+    // "dir/" refused every legitimate write — silently, while the run went on believing
+    // it had saved them and the watermark moved.
+    expect(insidePath(win32, "C:\\cache\\worklog\\ledger\\events", "2026-W36"))
+      .toBe("C:\\cache\\worklog\\ledger\\events\\2026-W36.json");
+  });
+
+  it("refuses a name that climbs out, on either platform's path rules", () => {
+    expect(insidePath(posix, "/home/me/.cache/worklog/ledger/snapshots", "../../victim")).toBeUndefined();
+    expect(insidePath(win32, "C:\\cache\\worklog\\ledger\\snapshots", "..\\..\\victim")).toBeUndefined();
+    expect(insidePath(win32, "C:\\cache\\worklog\\ledger\\snapshots", "../../victim")).toBeUndefined();
+  });
+
+  it("keeps an absolute-looking name underneath the directory rather than obeying it", () => {
+    // `join` treats a leading separator on the second argument as relative, so this
+    // stays inside. Containment holds; it is `isSafeSourceName` that refuses the name
+    // for being a path at all.
+    expect(insidePath(posix, "/home/me/ledger/snapshots", "/etc/passwd"))
+      .toBe("/home/me/ledger/snapshots/etc/passwd.json");
+    expect(isSafeSourceName("/etc/passwd")).toBe(false);
+    expect(isSafeSourceName("../../victim")).toBe(false);
   });
 });

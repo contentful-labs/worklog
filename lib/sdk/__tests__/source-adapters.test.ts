@@ -1141,3 +1141,167 @@ describe("an ETag earned while scanning a recent week", () => {
     expect(older.events.filter((e) => e.kind === "review").map((e) => e.id)).toEqual(["601", "602"]);
   });
 });
+
+describe("a merged pull request, as the search endpoint describes it", () => {
+  it("is a merge and not a closure", async () => {
+    // The trigger: search answers with issues, and an issue has no top-level `merged_at`.
+    // Reading only the top level makes every merge look like a closure, and the window
+    // watermark then moves past the merge for good.
+    server.use(searchHandler([authoredPR], []));
+
+    const batch = await githubSource(() => NOW).fetchWindow(window, makeContext());
+
+    expect(kinds(batch.events).sort()).toEqual(["created", "merged"]);
+    expect(findEvent(batch.events, "merged")?.at).toBe("2026-03-05T09:00:00.000Z");
+    expect(batch.events.some((e) => e.kind === "closed")).toBe(false);
+  });
+
+  it("is still a merge when the delta reads it from the pull request endpoint", async () => {
+    server.use(
+      http.get("https://api.github.com/search/issues", () => HttpResponse.json({ total_count: 0, items: [] })),
+      http.get("https://api.github.com/repos/example-org/repo/pulls/42/reviews", () => HttpResponse.json([])),
+      http.get("https://api.github.com/repos/example-org/repo/pulls/42", () =>
+        HttpResponse.json({ ...authoredPRDetail, merged_at: "2026-03-09T10:00:00Z", closed_at: "2026-03-09T10:00:00Z" }),
+      ),
+    );
+
+    const batch = await githubSource(() => NOW).fetchSince(new Date("2026-03-08T00:00:00Z"), [PR_URL], makeContext());
+    expect(kinds(batch.events)).toEqual(["merged"]);
+  });
+});
+
+describe("a review left in a week the pull request outlived", () => {
+  it("is still found when that week is backfilled afterwards", async () => {
+    // The trigger: review submitted in W, the PR moves on in W+2, and W is backfilled
+    // after that. Bounding the reviewed-by search by the PR's current `updated` excludes
+    // it, and the window is marked fetched either way.
+    const seenQueries: string[] = [];
+    const movedOn = { ...reviewedPR, created_at: "2026-03-02T09:00:00Z", updated_at: "2026-03-19T09:00:00Z" };
+    server.use(
+      http.get("https://api.github.com/search/issues", ({ request }) => {
+        const q = new URL(request.url).searchParams.get("q") || "";
+        seenQueries.push(q);
+        const items = q.includes(`author:${USERNAME}`) ? [] : [movedOn];
+        return HttpResponse.json({ total_count: items.length, items });
+      }),
+      http.get("https://api.github.com/repos/example-org/repo/pulls/7/reviews", () =>
+        HttpResponse.json([
+          { id: 701, user: { login: USERNAME }, state: "APPROVED", body: "Ship it.", submitted_at: "2026-03-04T15:00:00Z" },
+        ]),
+      ),
+    );
+
+    const batch = await githubSource(() => NOW).fetchWindow(window, makeContext());
+
+    expect(seenQueries[1]).toContain("created:<=2026-03-08 updated:>=2026-03-02");
+    expect(findEvent(batch.events, "review")?.at).toBe("2026-03-04T15:00:00.000Z");
+  });
+});
+
+describe("a conversation on a pull request", () => {
+  it("is recorded, not just the formal reviews", async () => {
+    // The trigger: a PR found only because the user commented on it. Fetching reviews
+    // and merge state alone produces a snapshot and no event, so the week never hears
+    // about the conversation and is never even marked as needing a rewrite.
+    server.use(
+      http.get("https://api.github.com/search/issues", ({ request }) => {
+        const q = new URL(request.url).searchParams.get("q") || "";
+        const items = q.includes(`commenter:${USERNAME}`) ? [reviewedPR] : [];
+        return HttpResponse.json({ total_count: items.length, items });
+      }),
+      http.get("https://api.github.com/repos/example-org/repo/pulls/7/reviews", () => HttpResponse.json([])),
+      http.get("https://api.github.com/repos/example-org/repo/pulls/7", () => HttpResponse.json(reviewedPR)),
+      http.get("https://api.github.com/repos/example-org/repo/issues/7/comments", () =>
+        HttpResponse.json([
+          { id: 9001, user: { login: USERNAME }, body: "Worth splitting the migration out.", created_at: "2026-03-09T11:00:00Z" },
+          { id: 9002, user: { login: "other-user" }, body: "Good point.", created_at: "2026-03-09T12:00:00Z" },
+          { id: 9003, user: { login: USERNAME }, body: "Too old to be news.", created_at: "2026-03-01T09:00:00Z" },
+        ]),
+      ),
+    );
+
+    const batch = await githubSource(() => NOW).fetchSince(new Date("2026-03-08T00:00:00Z"), [], makeContext());
+
+    const comments = batch.events.filter((e) => e.kind === "comment");
+    expect(comments.map((e) => e.id)).toEqual(["9001"]);
+    expect(comments[0]).toMatchObject({ itemId: REVIEWED_PR_URL, at: "2026-03-09T11:00:00.000Z" });
+    expect(renderable(comments[0].payload).text).toBe("Worth splitting the migration out.");
+  });
+});
+
+describe("a Confluence page edited more than once in a week", () => {
+  it("reports every edit on its first fetch, not just the state it ended in", async () => {
+    // The trigger: versions 3, 4 and 5 all made during the week. The search only ever
+    // reports version 5, and the window watermark then moves past the other two.
+    server.use(
+      confluenceHandler([{ ...confluencePage, version: { number: 5, authorId: ACCOUNT_ID } }], []),
+      http.get(`${BASE_URL}/wiki/api/v2/pages/page-1/versions`, () =>
+        HttpResponse.json({
+          results: [
+            { number: 5, createdAt: "2026-03-06T10:00:00.000Z", authorId: ACCOUNT_ID },
+            { number: 4, createdAt: "2026-03-05T10:00:00.000Z", authorId: ACCOUNT_ID },
+            { number: 3, createdAt: "2026-03-04T10:00:00.000Z", authorId: ACCOUNT_ID },
+            { number: 2, createdAt: "2026-02-20T10:00:00.000Z", authorId: ACCOUNT_ID }, // before the week
+          ],
+        }),
+      ),
+    );
+
+    const batch = await confluenceSource(() => NOW).fetchWindow(window, makeContext());
+
+    const versions = batch.events.filter((e) => e.kind === "version");
+    expect(versions.map((e) => e.id)).toEqual(["page-1:v5", "page-1:v4", "page-1:v3"]);
+    expect(versions.map((e) => e.at)).toEqual([
+      "2026-03-06T10:00:00.000Z", "2026-03-05T10:00:00.000Z", "2026-03-04T10:00:00.000Z",
+    ]);
+  });
+
+  it("leaves out the edits somebody else made", async () => {
+    // The trigger: the user contributed once, so the page matches the contributor search
+    // for ever, and every later edit by anybody comes back with it.
+    server.use(
+      confluenceHandler([confluencePage], []),
+      http.get(`${BASE_URL}/wiki/api/v2/pages/page-1/versions`, () =>
+        HttpResponse.json({
+          results: [
+            { number: 5, createdAt: "2026-03-06T10:00:00.000Z", authorId: "someone-else" },
+            { number: 4, createdAt: "2026-03-05T10:00:00.000Z", authorId: ACCOUNT_ID },
+          ],
+        }),
+      ),
+    );
+
+    const batch = await confluenceSource(() => NOW).fetchWindow(window, makeContext());
+    expect(batch.events.filter((e) => e.kind === "version").map((e) => e.id)).toEqual(["page-1:v4"]);
+  });
+
+  it("leaves them out of a delta too, and says nothing at all about a page only they touched", async () => {
+    server.use(
+      confluenceHandler([confluencePage], []),
+      http.get(`${BASE_URL}/wiki/api/v2/pages/page-1/versions`, () =>
+        HttpResponse.json({
+          results: [
+            { number: 6, createdAt: "2026-03-09T10:00:00.000Z", authorId: "someone-else" },
+            { number: 5, createdAt: "2026-03-05T10:00:00.000Z", authorId: ACCOUNT_ID },
+          ],
+        }),
+      ),
+    );
+
+    const batch = await confluenceSource(() => NOW).fetchSince(new Date("2026-03-08T00:00:00Z"), ["page-1"], makeContext());
+    expect(batch.events.filter((e) => e.kind === "version")).toEqual([]);
+  });
+
+  it("says nothing about a week whose only edits were somebody else's", async () => {
+    server.use(
+      confluenceHandler([{ ...confluencePage, history: { ...confluencePage.history, createdBy: { accountId: "someone-else" } } }], []),
+      http.get(`${BASE_URL}/wiki/api/v2/pages/page-1/versions`, () =>
+        HttpResponse.json({ results: [{ number: 4, createdAt: "2026-03-05T16:00:00.000Z", authorId: "someone-else" }] }),
+      ),
+    );
+
+    const batch = await confluenceSource(() => NOW).fetchWindow(window, makeContext());
+    expect(batch.events).toEqual([]);
+    expect(batch.snapshots).toEqual([]);
+  });
+});
