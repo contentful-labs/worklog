@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import {
-  openLedger, ledgerRoot, eventsByItem, renderable, collectIntoLedger, weekWindow,
+  openLedger, ledgerRoot, eventsByItem, newEvents, renderable, collectIntoLedger, weekWindow,
 } from "../ledger";
 import type { Source, SourceBatch, SourceContext } from "../sources";
 
@@ -91,7 +91,7 @@ describe("filing events by their own timestamp", () => {
     }), seenAt);
 
     expect(result.addedEvents).toBe(2);
-    expect(result.weeksChanged).toEqual(["2026-W36"]);
+    expect([...result.perWeek.keys()]).toEqual(["2026-W36"]);
     expect(result.perWeek.get("2026-W36")).toBe(2);
   });
 });
@@ -108,7 +108,8 @@ describe("recording the same thing twice", () => {
     const second = ledger.record("jira", twice, seenAt);
 
     expect(first).toMatchObject({ addedEvents: 1, addedSnapshots: 1 });
-    expect(second).toMatchObject({ addedEvents: 0, addedSnapshots: 0, weeksChanged: [] });
+    expect(second).toMatchObject({ addedEvents: 0, addedSnapshots: 0 });
+    expect(second.perWeek.size).toBe(0);
   });
 
   it("matches on the system's own id even when the payload was reworded", async () => {
@@ -386,5 +387,33 @@ describe("the window a source is asked about", () => {
   it("leaves the start of the week alone", () => {
     const week = weekWindow("2026-W36", new Date("2026-08-31T00:00:00.000Z"), new Date("2026-09-06T00:00:00.000Z"));
     expect(week.window.start.toISOString()).toBe("2026-08-31T00:00:00.000Z");
+  });
+});
+
+describe("what a run added", () => {
+  const comment = {
+    source: "jira", kind: "comment", itemId: "TEAM-1234",
+    at: "2026-09-01T09:00:00.000Z", payload: { text: "one" }, id: "c-1",
+  };
+  const status = {
+    source: "jira", kind: "status", itemId: "TEAM-1234",
+    at: "2026-09-03T09:00:00.000Z", payload: { from: "In Progress", to: "Done" },
+  };
+
+  it("is only what was not there before", () => {
+    expect(newEvents([comment], [comment, status])).toEqual([status]);
+  });
+
+  it("is nothing when the same events came back", () => {
+    expect(newEvents([comment, status], [comment, status])).toEqual([]);
+  });
+
+  it("matches on the system's own id, so a reworded comment is not new", () => {
+    const reworded = { ...comment, payload: { text: "one, edited" } };
+    expect(newEvents([comment], [reworded])).toEqual([]);
+  });
+
+  it("is everything when the week was empty", () => {
+    expect(newEvents([], [comment, status])).toEqual([comment, status]);
   });
 });

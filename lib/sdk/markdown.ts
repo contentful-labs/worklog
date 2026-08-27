@@ -173,7 +173,6 @@ export function generateEventMarkdown(options: {
   events: readonly SourceEvent[];
   snapshotFor: (source: string, itemId: string) => LedgerSnapshot | undefined;
   additionalContext: string;
-  config: WorklogConfig;
   /** Today, for the "generated" stamp. Injectable so a test can pin it. */
   now?: Date;
 }): string {
@@ -197,27 +196,19 @@ export function generateEventMarkdown(options: {
   lines.push("Work on these items outside this week belongs to the week it happened in.");
   lines.push("");
 
-  const bySource = new Map<string, SourceEvent[]>();
-  for (const event of events) {
-    const forSource = bySource.get(event.source) ?? [];
-    forSource.push(event);
-    bySource.set(event.source, forSource);
-  }
-  const sources = [...bySource.keys()].sort();
+  const bySource = [...Map.groupBy(events, (event) => event.source)].sort(([a], [b]) => (a < b ? -1 : 1));
 
   lines.push("## Summary");
   lines.push("");
   lines.push("| Source | Items | Events |");
   lines.push("|--------|-------|--------|");
-  for (const source of sources) {
-    const forSource = bySource.get(source) ?? [];
+  for (const [source, forSource] of bySource) {
     lines.push(`| ${source} | ${eventsByItem(forSource).size} | ${forSource.length} |`);
   }
-  if (sources.length === 0) lines.push("| (nothing recorded) | 0 | 0 |");
+  if (bySource.length === 0) lines.push("| (nothing recorded) | 0 | 0 |");
   lines.push("");
 
-  for (const source of sources) {
-    const forSource = bySource.get(source) ?? [];
+  for (const [source, forSource] of bySource) {
     const byItem = eventsByItem(forSource);
     lines.push(`## ${source} (${byItem.size})`);
     lines.push("");

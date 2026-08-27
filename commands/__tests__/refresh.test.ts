@@ -83,7 +83,6 @@ async function runOnce(source: Source, weeks = [septemberWeek]) {
     weeks,
     contextFor: ctxFor,
     now,
-    config,
     writeWeek: async (weekToWrite) => {
       written.push(weekToWrite);
       await writeFile(join(vault, weekToWrite.weekInfo.filename), weekToWrite.workLog, "utf-8");
@@ -153,7 +152,10 @@ describe("running refresh twice", () => {
     const second = await runOnce(stubSource("jira", later, calls));
 
     expect(second.rows).toEqual([{ weekId: "2026-W36", regenerated: true }]);
-    expect(second.written[0].newMaterial).toContain("TEAM-1234");
+    // Only what this run found. The comment the first run filed is already in the entry
+    // the model is being asked to add to, and repeating it invites a duplicate.
+    expect(second.written[0].newMaterial).toContain("status on TEAM-1234");
+    expect(second.written[0].newMaterial).not.toContain("comment on TEAM-1234");
     expect(second.written[0].workLog).toContain("In Progress to Done");
     // The comment from the first run is still there: the week was added to, not replaced.
     expect(second.written[0].workLog).toContain("Reviewed the rollout plan");

@@ -284,6 +284,17 @@ function transitionValue(value: string | null | undefined): string {
   return value ?? "";
 }
 
+/**
+ * Every source the tool knows how to read.
+ *
+ * One list, so the weekly run and `refresh` can never disagree about what a source is.
+ * A source that cannot run says why and is skipped, so listing one here costs nothing
+ * until it is configured.
+ */
+export function allSources(): Source[] {
+  return [jiraSource(), confluenceSource(), githubSource()];
+}
+
 export function jiraSource(now: Clock = () => new Date()): Source {
   return {
     name: "jira",

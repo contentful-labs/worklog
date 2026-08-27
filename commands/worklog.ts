@@ -52,8 +52,7 @@ import {
 } from "../lib/sdk/data-fetch";
 import { generateEventMarkdown } from "../lib/sdk/markdown";
 import { collectIntoLedger, openLedger, weekWindow } from "../lib/sdk/ledger";
-import { confluenceSource, githubSource, jiraSource } from "../lib/sdk/source-adapters";
-import type { Source } from "../lib/sdk/sources";
+import { allSources } from "../lib/sdk/source-adapters";
 import {
   toBragBookResult,
   parseReviewCycle,
@@ -416,11 +415,6 @@ async function promptForContext(weekNumber: number, year: number, contextFilePat
 }
 
 // --- Credential resolution ---
-
-/** Every source the weekly run reads. One that cannot run says why and is skipped. */
-function allSources(): Source[] {
-  return [jiraSource(), confluenceSource(), githubSource()];
-}
 
 export function getEnvTokens(): { apiToken: string; githubToken: string } {
   const apiToken = process.env.ATLASSIAN_API_TOKEN;
@@ -1007,7 +1001,6 @@ export async function runWorklog(opts: {
       events: weekEvents,
       snapshotFor: (source, itemId) => ledger.snapshot(source, itemId),
       additionalContext,
-      config,
     });
     const workLogPath = `${paths.vault}/${weekInfo.filename}`;
     // Held in memory until the whole week validates. Writing it here would mean a --force

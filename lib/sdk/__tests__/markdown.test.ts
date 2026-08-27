@@ -145,8 +145,6 @@ describe("generateMarkdown", () => {
   });
 });
 
-const makeMarkdownConfig = (): WorklogConfig => config;
-
 describe("generateEventMarkdown", () => {
   const weekInfo = (weekNumber: number, start: string, end: string): WeekInfo => ({
     weekNumber,
@@ -180,7 +178,6 @@ describe("generateEventMarkdown", () => {
       events: [opened],
       snapshotFor,
       additionalContext: "",
-      config: makeMarkdownConfig(),
       now,
     });
 
@@ -196,7 +193,6 @@ describe("generateEventMarkdown", () => {
       events: [laterComment],
       snapshotFor,
       additionalContext: "",
-      config: makeMarkdownConfig(),
       now,
     });
 
@@ -213,7 +209,6 @@ describe("generateEventMarkdown", () => {
       events: [laterComment],
       snapshotFor: () => ({ ...ticket, payload: { title: "Search Revamp indexer", url: "https://example.atlassian.net/browse/TEAM-1234" } }),
       additionalContext: "",
-      config: makeMarkdownConfig(),
       now,
     });
 
@@ -230,7 +225,6 @@ describe("generateEventMarkdown", () => {
       }],
       snapshotFor,
       additionalContext: "",
-      config: makeMarkdownConfig(),
       now,
     });
 
@@ -248,7 +242,6 @@ describe("generateEventMarkdown", () => {
       ],
       snapshotFor,
       additionalContext: "",
-      config: makeMarkdownConfig(),
       now,
     });
 
@@ -263,7 +256,6 @@ describe("generateEventMarkdown", () => {
       events: [],
       snapshotFor,
       additionalContext: "",
-      config: makeMarkdownConfig(),
       now,
     });
 
@@ -276,7 +268,6 @@ describe("generateEventMarkdown", () => {
       events: [laterComment],
       snapshotFor,
       additionalContext: "Was on call this week.",
-      config: makeMarkdownConfig(),
       now,
     });
 

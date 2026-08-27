@@ -36,6 +36,11 @@ import { weekIdForDate } from "./week-utils";
 /** The ledger format on disk. Bumped only when an older layout can no longer be read. */
 const LEDGER_VERSION = 1;
 
+/** The one environment variable the ledger's location depends on. */
+export interface CacheEnv {
+  XDG_CACHE_HOME?: string;
+}
+
 /**
  * Where the ledger lives.
  *
@@ -43,11 +48,6 @@ const LEDGER_VERSION = 1;
  * syncs to iCloud and is indexed by Obsidian, and not a dotfile directory, which is for
  * things that cannot be fetched again.
  */
-/** The one environment variable the ledger's location depends on. */
-export interface CacheEnv {
-  XDG_CACHE_HOME?: string;
-}
-
 export function ledgerRoot(env: CacheEnv = { XDG_CACHE_HOME: process.env.XDG_CACHE_HOME }): string {
   const base = env.XDG_CACHE_HOME?.trim();
   return join(base && base.length > 0 ? base : join(homedir(), ".cache"), "worklog", "ledger");
@@ -71,9 +71,10 @@ interface LedgerMeta {
 export interface RecordResult {
   addedEvents: number;
   addedSnapshots: number;
-  /** Weeks whose event set is not what it was. These, and only these, need regenerating. */
-  weeksChanged: string[];
-  /** Events added per week, for the summary the user reads. */
+  /**
+   * Events added, by week. Its keys are the weeks whose event set is not what it was,
+   * which are the weeks, and the only weeks, that need writing again.
+   */
   perWeek: Map<string, number>;
 }
 
@@ -169,8 +170,7 @@ async function readParsed<T>(path: string, schema: z.ZodType<T>, fallback: T): P
 }
 
 /** Rows that parse, in file order. One bad row costs itself and nothing else. */
-function keepParsable<T>(rows: unknown, schema: z.ZodType<T>): T[] {
-  if (!Array.isArray(rows)) return [];
+function keepParsable<T>(rows: readonly unknown[], schema: z.ZodType<T>): T[] {
   const kept: T[] = [];
   for (const row of rows) {
     const parsed = schema.safeParse(row);
@@ -227,7 +227,7 @@ export async function openLedger(root: string = ledgerRoot()): Promise<Ledger> {
   const events = new Map<string, SourceEvent[]>();
   for (const file of weekFiles) {
     if (!file.endsWith(".json")) continue;
-    const rows = await readParsed<unknown>(join(eventsDir, file), z.unknown(), []);
+    const rows = await readParsed(join(eventsDir, file), z.array(z.unknown()), []);
     events.set(file.slice(0, -".json".length), keepParsable(rows, eventSchema));
   }
 
@@ -334,7 +334,7 @@ export async function openLedger(root: string = ledgerRoot()): Promise<Ledger> {
         perWeek.set(weekId, (perWeek.get(weekId) ?? 0) + 1);
       }
 
-      return { addedEvents, addedSnapshots, weeksChanged: [...perWeek.keys()].sort(), perWeek };
+      return { addedEvents, addedSnapshots, perWeek };
     },
 
     markWindow(source, weekId) {
@@ -367,9 +367,8 @@ export async function openLedger(root: string = ledgerRoot()): Promise<Ledger> {
       for (const source of dirtySources) {
         await writeJsonAtomic(join(snapshotsDir, `${source}.json`), snapshots.get(source) ?? {});
       }
-      if (dirtyMeta || dirtyWeeks.size > 0 || dirtySources.size > 0) {
-        await writeJsonAtomic(join(root, "meta.json"), meta);
-      }
+      // Whatever changed, the meta changed with it: a fetch moves the watermark.
+      await writeJsonAtomic(join(root, "meta.json"), meta);
 
       dirtyWeeks.clear();
       dirtySources.clear();
@@ -413,6 +412,18 @@ export type RenderablePayload = z.infer<typeof renderableSchema>;
 export function renderable(payload: unknown): RenderablePayload {
   const parsed = renderableSchema.safeParse(payload);
   return parsed.success ? parsed.data : {};
+}
+
+/**
+ * The events in `after` that were not already in `before`.
+ *
+ * Identity is the same thing `record` dedupes on, so an event re-fetched unchanged is
+ * not new. This is how a week that is being added to can hand the model only what it
+ * has not already been told about.
+ */
+export function newEvents(before: readonly SourceEvent[], after: readonly SourceEvent[]): SourceEvent[] {
+  const already = new Set(before.map(eventKey));
+  return after.filter((event) => !already.has(eventKey(event)));
 }
 
 /** One week to collect, with the window a source is asked about. */
@@ -506,8 +517,8 @@ export async function collectIntoLedger(
       const result = ledger.record(source.name, batch, now);
       outcome.addedEvents += result.addedEvents;
       outcome.addedSnapshots += result.addedSnapshots;
-      for (const week of result.weeksChanged) weeksChanged.add(week);
       for (const [week, added] of result.perWeek) {
+        weeksChanged.add(week);
         const bySource = perWeek.get(week) ?? new Map<string, number>();
         bySource.set(source.name, (bySource.get(source.name) ?? 0) + added);
         perWeek.set(week, bySource);

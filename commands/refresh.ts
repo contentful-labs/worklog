@@ -23,21 +23,20 @@ import {
   buildHeaders, getAccountId, getGitHubUsername, type FetchHeaders, type WeekInfo,
 } from "../lib/sdk/data-fetch";
 import {
-  collectIntoLedger, openLedger, weekWindow, type CollectionOutcome, type CollectionWeek, type Ledger,
+  collectIntoLedger, newEvents, openLedger, weekWindow,
+  type CollectionOutcome, type CollectionWeek, type Ledger,
 } from "../lib/sdk/ledger";
 import { generateEventMarkdown } from "../lib/sdk/markdown";
-import { githubSource, confluenceSource, jiraSource } from "../lib/sdk/source-adapters";
-import type { Source, SourceContext } from "../lib/sdk/sources";
+import { allSources } from "../lib/sdk/source-adapters";
+import type { Source, SourceContext, SourceEvent } from "../lib/sdk/sources";
 import { buildVaultPaths, getCurrentTeam, readTeamTimeline } from "../lib/sdk/vault";
 import { formatDuration, getWeekEnd, getWeekNumber, getWeekStart, weekId } from "../lib/sdk/week-utils";
-import { loadConfig, type WorklogConfig } from "../lib/config";
+import { loadConfig } from "../lib/config";
 import { createLogger } from "../lib/sdk/logger";
 import { generateWeek, getEnvTokens } from "./worklog";
 
-/** Every source the tool knows how to read. A source that cannot run says so and is skipped. */
-function allSources(): Source[] {
-  return [jiraSource(), confluenceSource(), githubSource()];
-}
+/** Where the team timeline lives, relative to the vault. Matches the weekly command. */
+const TEAM_TIMELINE_FILE = "team-timeline.json";
 
 export interface RefreshOptions {
   source?: string;
@@ -122,18 +121,24 @@ export async function refreshWeeks(deps: {
   weeks: readonly CollectionWeek[];
   contextFor: (source: Source) => SourceContext;
   now: Date;
-  config: WorklogConfig;
   writeWeek: (week: WeekToWrite) => Promise<void>;
 }): Promise<RefreshRun> {
-  const { ledger, sources, weeks, contextFor, now, config, writeWeek } = deps;
+  const { ledger, sources, weeks, contextFor, now, writeWeek } = deps;
+
+  // What each week held before this run, so the model can be told what is new rather
+  // than handed the whole week again.
+  const before = new Map(weeks.map((week) => [week.weekId, ledger.eventsForWeek(week.weekId)]));
 
   const outcome = await collectIntoLedger(ledger, sources, weeks, contextFor, now);
-  const rows: WeekRow[] = weeks.map((week) => ({ weekId: week.weekId, regenerated: false }));
 
   // A delta can turn up an event belonging to a week nobody asked about. It is filed,
   // because it belongs there, but this run does not go and rewrite that week.
-  const asked = new Set(weeks.map((week) => week.weekId));
-  const changed = [...outcome.weeksChanged].filter((week) => asked.has(week)).sort();
+  const changed = [...outcome.weeksChanged].filter((week) => before.has(week)).sort();
+  const rewritten = new Set(changed);
+  const rows: WeekRow[] = weeks.map((week) => ({
+    weekId: week.weekId,
+    regenerated: rewritten.has(week.weekId),
+  }));
 
   for (const weekId of changed) {
     const weekInfo = weekInfoFor(weekId);
@@ -143,13 +148,10 @@ export async function refreshWeeks(deps: {
       events,
       snapshotFor: (source, itemId) => ledger.snapshot(source, itemId),
       additionalContext: "",
-      config,
     });
 
-    await writeWeek({ weekId, weekInfo, workLog, newMaterial: newMaterialFor(ledger, weekId) });
-
-    const row = rows.find((candidate) => candidate.weekId === weekId);
-    if (row) row.regenerated = true;
+    const added = newEvents(before.get(weekId) ?? [], events);
+    await writeWeek({ weekId, weekInfo, workLog, newMaterial: describeForPrompt(added) });
   }
 
   await ledger.save();
@@ -174,8 +176,9 @@ export async function runRefresh(opts: RefreshOptions): Promise<void> {
     process.exit(1);
   }
 
-  const weeks = opts.week
-    ? [weekWindow(opts.week, weekInfoFor(opts.week).startDate, weekInfoFor(opts.week).endDate)]
+  const single = opts.week ? weekInfoFor(opts.week) : undefined;
+  const weeks = single && opts.week
+    ? [weekWindow(opts.week, single.startDate, single.endDate)]
     : weeksInRange(from, startedAt);
   log(`Refreshing ${weeks.length} week(s) from ${weeks[0]?.weekId} to ${weeks[weeks.length - 1]?.weekId}`);
 
@@ -203,7 +206,6 @@ export async function runRefresh(opts: RefreshOptions): Promise<void> {
     weeks,
     contextFor: (source) => sourceContext(source, { config, headers, atlassianAccountId, githubUsername, ledger, log }),
     now: startedAt,
-    config,
     writeWeek: async ({ weekId: week, weekInfo, workLog, newMaterial }) => {
       if (!collected) {
         spinner.stop(`Collected from ${sources.length} source(s)`);
@@ -247,17 +249,15 @@ export async function runRefresh(opts: RefreshOptions): Promise<void> {
 }
 
 /**
- * What is new in this week, as prose for the prompt.
+ * Events as prose for the prompt.
  *
- * Only the events this run added: the rest of the work log is already accounted for in
- * the entry the model is being asked to add to.
+ * Given only what a run added, this is the material the model has not already been told
+ * about: the rest of the week is accounted for in the entry it is being asked to add to.
  */
-function newMaterialFor(ledger: Ledger, week: string): string {
-  const lines: string[] = [];
-  for (const event of ledger.eventsForWeek(week)) {
-    lines.push(`- ${event.at.slice(0, 16).replace("T", " ")} ${event.source} ${event.kind} on ${event.itemId}`);
-  }
-  return lines.join("\n");
+function describeForPrompt(events: readonly SourceEvent[]): string {
+  return events
+    .map((event) => `- ${event.at.slice(0, 16).replace("T", " ")} ${event.source} ${event.kind} on ${event.itemId}`)
+    .join("\n");
 }
 
 function sourceContext(
@@ -337,5 +337,3 @@ export function makeRefreshCommand(): Command {
     });
 }
 
-/** Where the team timeline lives, relative to the vault. Matches the weekly command. */
-const TEAM_TIMELINE_FILE = "team-timeline.json";
