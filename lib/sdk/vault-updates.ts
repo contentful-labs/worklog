@@ -26,9 +26,10 @@
  * case is not finding it.
  */
 
-import { chmod, lstat, readFile, realpath, rename, stat, writeFile } from "node:fs/promises";
+import { chmod, lstat, readdir, readFile, realpath, rename, stat, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
+import { join } from "node:path";
 import type { BragBookResult } from "./brag-book";
 
 import {
@@ -1713,15 +1714,15 @@ function cleanVaultRecords(content: string, kind: VaultRecordKind, now: Date): C
  * overwritten: a later run cleaning up a newly arrived placeholder would otherwise
  * replace the only copy of what the file looked like before any of this ran.
  */
-function nextBackupPath(path: string): string {
-  const first = `${path}.pre-dedupe.bak`;
+function nextBackupPath(path: string, label = "pre-dedupe"): string {
+  const first = `${path}.${label}.bak`;
   if (!existsSync(first)) return first;
 
   for (let n = 2; n < 100; n++) {
-    const candidate = `${path}.pre-dedupe.${n}.bak`;
+    const candidate = `${path}.${label}.${n}.bak`;
     if (!existsSync(candidate)) return candidate;
   }
-  return `${path}.pre-dedupe.${Date.now()}.bak`;
+  return `${path}.${label}.${Date.now()}.bak`;
 }
 
 /**
@@ -1882,4 +1883,65 @@ export async function migrateVaultRecordsFile(
     unjoinSkipped: repaired.unjoinSkipped,
     backup,
   };
+}
+
+/**
+ * The tag each weekly document's writer puts in its frontmatter.
+ *
+ * Mirrored from the writers rather than restated: the brag book block is
+ * BRAG_BOOK_FRONTMATTER in brag-book.ts, the work log block is built by generateMarkdown.
+ * The two differ only in the second tag, and getting that wrong would file a year of
+ * work logs under the wrong note type.
+ */
+const WEEKLY_DOCUMENTS = [
+  { suffix: " Brag Book.md", tag: "areas/work/brag-book" },
+  { suffix: " Work Log.md", tag: "areas/work/work-log" },
+] as const;
+
+function weeklyFrontmatter(tag: string, eol: string): string {
+  return ["---", "tags:", "  - areas/work", `  - ${tag}`, "---", "", ""].join(eol);
+}
+
+export interface WeeklyFrontmatterMigration {
+  /** Filenames that gained frontmatter, sorted. */
+  updated: string[];
+  /** Weekly documents left exactly as they were. */
+  skipped: number;
+}
+
+/**
+ * Give the weekly documents written before frontmatter existed the block their writers
+ * emit today, so the vault can find them by tag.
+ *
+ * A file that already opens with `---` is left alone whatever its frontmatter says: it
+ * may have been edited by hand, and a second block would break the one that is there.
+ * A blank file is left alone too, because all it would gain is a header over nothing.
+ *
+ * Idempotent by construction: after one pass every file opens with `---`, so a second
+ * pass writes nothing and takes no backup.
+ */
+export async function migrateWeeklyFrontmatter(vaultDir: string): Promise<WeeklyFrontmatterMigration> {
+  if (!existsSync(vaultDir)) return { updated: [], skipped: 0 };
+
+  const files = (await readdir(vaultDir)).sort();
+  const updated: string[] = [];
+  let skipped = 0;
+
+  for (const file of files) {
+    const document = WEEKLY_DOCUMENTS.find((candidate) => file.endsWith(candidate.suffix));
+    if (!document) continue;
+
+    const path = join(vaultDir, file);
+    const content = await readFile(path, "utf-8");
+    if (content.trim() === "" || content.startsWith("---")) {
+      skipped++;
+      continue;
+    }
+
+    await writeFile(nextBackupPath(path, "pre-frontmatter"), content, "utf-8");
+    await writeFileAtomic(path, weeklyFrontmatter(document.tag, detectEol(content)) + content);
+    updated.push(file);
+  }
+
+  return { updated, skipped };
 }

@@ -108,11 +108,12 @@ export {
 // Vault updates
 export type {
   FocusFileMigration, VaultWriteResult, VaultWriteStatus, MemoryWriteResult, UnmatchedGraduation,
-  VaultRecordKind, VaultRecordsMigration,
+  VaultRecordKind, VaultRecordsMigration, WeeklyFrontmatterMigration,
 } from "./vault-updates";
 export {
   updateMemory, updateImpactLog, updateWorkContext, updateProfile,
-  updateFocusTracking, migrateFocusTrackingFile, migrateVaultRecordsFile, isPlaceholder, isIsoDate,
+  updateFocusTracking, migrateFocusTrackingFile, migrateVaultRecordsFile, migrateWeeklyFrontmatter,
+  isPlaceholder, isIsoDate,
   writeFileAtomic,
 } from "./vault-updates";
 

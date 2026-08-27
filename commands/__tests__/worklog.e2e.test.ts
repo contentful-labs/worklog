@@ -79,7 +79,7 @@ const CONFIG: WorklogConfig = {
 
 /** Existing week documents, so a forced run has real content it could overwrite. */
 const SENTINEL_BRAG_BOOK = "---\ntags:\n  - areas/work\n---\n\n# Brag Book - Week 10, 2026\n\n## Achievements\n\n- The previous run's work\n";
-const SENTINEL_WORK_LOG = "# Work Log 2026-W10\n\nThe previous run's fetched activity.\n";
+const SENTINEL_WORK_LOG = "---\ntags:\n  - areas/work\n  - areas/work/work-log\n---\n\n# Work Log 2026-W10\n\nThe previous run's fetched activity.\n";
 
 /** A memory row the fake graduates, so the wording has to match its Item cell exactly. */
 const GRADUATED_ITEM = "Fixed a flaky pagination test";
