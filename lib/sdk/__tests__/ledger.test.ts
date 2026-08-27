@@ -4,8 +4,8 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-import { openLedger, ledgerRoot, eventsByItem, payloadString } from "../ledger";
-import type { SourceBatch } from "../sources";
+import { openLedger, ledgerRoot, eventsByItem, payloadString, collectIntoLedger } from "../ledger";
+import type { Source, SourceBatch, SourceContext } from "../sources";
 
 let root: string;
 
@@ -234,5 +234,136 @@ describe("reading a week back", () => {
     const byItem = eventsByItem(ledger.eventsForWeek("2026-W36"));
     expect([...byItem.keys()]).toEqual(["TEAM-1234", "TEAM-1235"]);
     expect(byItem.get("TEAM-1234")?.map((event) => event.id)).toEqual(["c-1", "c-2"]);
+  });
+});
+
+describe("collecting into the ledger", () => {
+  const week = (weekId: string, start: string, end: string) => ({
+    weekId,
+    window: { start: new Date(`${start}T00:00:00.000Z`), end: new Date(`${end}T23:59:59.999Z`) },
+  });
+
+  function fakeSource(name: string, calls: string[], batches: Partial<Record<"window" | "since", SourceBatch>> = {}): Source {
+    return {
+      name,
+      isAvailable: async () => ({ ok: true }),
+      fetchWindow: async (window) => {
+        calls.push(`${name}:window:${window.start.toISOString().split("T")[0]}`);
+        return batches.window ?? { snapshots: [], events: [], warnings: [] };
+      },
+      fetchSince: async (since, itemIds) => {
+        calls.push(`${name}:since:${since.toISOString()}:${itemIds.join(",")}`);
+        return batches.since ?? { snapshots: [], events: [], warnings: [] };
+      },
+    };
+  }
+
+  const ctxFor = (): SourceContext => ({
+    config: {} as SourceContext["config"],
+    headers: { atlassian: {}, github: {} },
+    identity: { atlassianAccountId: "acc-1", githubUsername: "example-user" },
+    onWarning: () => {},
+    state: { get: () => undefined, set: () => {} },
+    log: () => {},
+  });
+
+  const now = new Date("2026-09-07T10:00:00.000Z");
+
+  it("windows a week it has never read, and only asks for deltas after that", async () => {
+    const calls: string[] = [];
+    const ledger = await openLedger(root);
+    const weeks = [week("2026-W36", "2026-08-31", "2026-09-06")];
+
+    await collectIntoLedger(ledger, [fakeSource("jira", calls)], weeks, ctxFor, now);
+    expect(calls).toEqual(["jira:window:2026-08-31"]);
+
+    // Second pass: the window is on record, so only the delta question is asked.
+    calls.length = 0;
+    await collectIntoLedger(ledger, [fakeSource("jira", calls)], weeks, ctxFor, new Date("2026-09-08T10:00:00.000Z"));
+    expect(calls).toEqual([`jira:since:${now.toISOString()}:`]);
+  });
+
+  it("asks the delta about the items that week actually touched", async () => {
+    const calls: string[] = [];
+    const ledger = await openLedger(root);
+    const weeks = [week("2026-W36", "2026-08-31", "2026-09-06")];
+
+    const withItems = fakeSource("jira", calls, {
+      window: {
+        snapshots: [{ id: "TEAM-1234", firstSeenAt: now.toISOString(), payload: { title: "t", url: "u" } }],
+        events: [{ source: "jira", kind: "created", itemId: "TEAM-1234", at: "2026-09-01T09:00:00.000Z", payload: {} }],
+        warnings: [],
+      },
+    });
+    await collectIntoLedger(ledger, [withItems], weeks, ctxFor, now);
+
+    calls.length = 0;
+    await collectIntoLedger(ledger, [fakeSource("jira", calls)], weeks, ctxFor, now);
+    expect(calls).toEqual([`jira:since:${now.toISOString()}:TEAM-1234`]);
+  });
+
+  it("reports the weeks whose events changed and nothing else", async () => {
+    const ledger = await openLedger(root);
+    const weeks = [week("2026-W36", "2026-08-31", "2026-09-06")];
+
+    const source = fakeSource("jira", [], {
+      window: {
+        snapshots: [],
+        events: [
+          { source: "jira", kind: "created", itemId: "TEAM-1234", at: "2026-09-01T09:00:00.000Z", payload: {} },
+          // Dated three weeks earlier: it amends that week, not this one.
+          { source: "jira", kind: "comment", itemId: "TEAM-1234", at: "2026-08-11T09:00:00.000Z", payload: {}, id: "c-1" },
+        ],
+        warnings: [],
+      },
+    });
+
+    const outcome = await collectIntoLedger(ledger, [source], weeks, ctxFor, now);
+
+    expect([...outcome.weeksChanged].sort()).toEqual(["2026-W33", "2026-W36"]);
+    expect(outcome.perSource.get("jira")).toMatchObject({ addedEvents: 2 });
+  });
+
+  it("finds nothing on a second run over the same answers", async () => {
+    const ledger = await openLedger(root);
+    const weeks = [week("2026-W36", "2026-08-31", "2026-09-06")];
+    const events = [{ source: "jira", kind: "comment", itemId: "TEAM-1234", at: "2026-09-01T09:00:00.000Z", payload: {}, id: "c-1" }];
+
+    await collectIntoLedger(ledger, [fakeSource("jira", [], { window: { snapshots: [], events, warnings: [] } })], weeks, ctxFor, now);
+    const second = await collectIntoLedger(
+      ledger,
+      [fakeSource("jira", [], { since: { snapshots: [], events, warnings: [] } })],
+      weeks,
+      ctxFor,
+      now,
+    );
+
+    expect(second.weeksChanged.size).toBe(0);
+    expect(second.perSource.get("jira")).toMatchObject({ addedEvents: 0 });
+  });
+
+  it("says why a source could not run, and asks it nothing", async () => {
+    const calls: string[] = [];
+    const ledger = await openLedger(root);
+    const unavailable: Source = {
+      ...fakeSource("slack", calls),
+      isAvailable: async () => ({ ok: false, reason: "no Slack token configured" }),
+    };
+
+    const outcome = await collectIntoLedger(ledger, [unavailable], [week("2026-W36", "2026-08-31", "2026-09-06")], ctxFor, now);
+
+    expect(outcome.perSource.get("slack")?.unavailable).toBe("no Slack token configured");
+    expect(calls).toEqual([]);
+  });
+
+  it("carries a source's soft failures out to the caller", async () => {
+    const ledger = await openLedger(root);
+    const noisy = fakeSource("github", [], {
+      window: { snapshots: [], events: [], warnings: ["Could not read reviews for example-org/repo#1"] },
+    });
+
+    const outcome = await collectIntoLedger(ledger, [noisy], [week("2026-W36", "2026-08-31", "2026-09-06")], ctxFor, now);
+
+    expect(outcome.warnings).toEqual(["Could not read reviews for example-org/repo#1"]);
   });
 });

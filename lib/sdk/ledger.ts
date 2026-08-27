@@ -27,7 +27,9 @@ import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 
-import type { JsonObject, SourceBatch, SourceEvent, SourceSnapshot, SourceState } from "./sources";
+import type {
+  JsonObject, Source, SourceBatch, SourceContext, SourceEvent, SourceSnapshot, SourceState, SourceWindow,
+} from "./sources";
 import { weekIdForDate } from "./week-utils";
 
 /** The ledger format on disk. Bumped only when an older layout can no longer be read. */
@@ -330,4 +332,103 @@ export function payloadNumber(payload: JsonObject, key: string): number | undefi
 export function payloadObject(payload: JsonObject, key: string): JsonObject | undefined {
   const value = payload[key];
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value : undefined;
+}
+
+/** One week to collect, with the window a source is asked about. */
+export interface CollectionWeek {
+  weekId: string;
+  window: SourceWindow;
+}
+
+/** What one source contributed, or why it contributed nothing. */
+export interface SourceOutcome {
+  addedEvents: number;
+  addedSnapshots: number;
+  /** Present when the source could not run at all. */
+  unavailable?: string;
+}
+
+export interface CollectionOutcome {
+  perSource: Map<string, SourceOutcome>;
+  /** Weeks whose event set is not what it was, and so need writing again. */
+  weeksChanged: Set<string>;
+  warnings: string[];
+}
+
+/**
+ * Fill the ledger from every source, for the weeks asked about.
+ *
+ * Two different questions get asked. A week the source has never been read for gets
+ * `fetchWindow`, which is the expensive first look. After that the source is only asked
+ * what has happened since the watermark, and whatever comes back is filed by its own
+ * timestamp: that is how a change lands in the week it happened rather than the week we
+ * noticed. A week already collected is never re-windowed, so the second run of a
+ * refresh asks only the delta question.
+ *
+ * The watermark moves to `now` only after a source has answered, and it is the time the
+ * run started rather than the time it finished, so an event created while we were
+ * fetching is picked up next time instead of being skipped.
+ */
+export async function collectIntoLedger(
+  ledger: Ledger,
+  sources: readonly Source[],
+  weeks: readonly CollectionWeek[],
+  contextFor: (source: Source) => SourceContext,
+  now: Date,
+): Promise<CollectionOutcome> {
+  const perSource = new Map<string, SourceOutcome>();
+  const weeksChanged = new Set<string>();
+  const warnings: string[] = [];
+
+  for (const source of sources) {
+    const ctx = contextFor(source);
+    const availability = await source.isAvailable(ctx);
+    if (!availability.ok) {
+      perSource.set(source.name, { addedEvents: 0, addedSnapshots: 0, unavailable: availability.reason });
+      continue;
+    }
+
+    const outcome: SourceOutcome = { addedEvents: 0, addedSnapshots: 0 };
+    const file = (batch: SourceBatch) => {
+      const result = ledger.record(source.name, batch, now);
+      outcome.addedEvents += result.addedEvents;
+      outcome.addedSnapshots += result.addedSnapshots;
+      for (const week of result.weeksChanged) weeksChanged.add(week);
+      warnings.push(...batch.warnings);
+    };
+
+    for (const week of weeks) {
+      if (ledger.hasWindow(source.name, week.weekId)) continue;
+      file(await source.fetchWindow(week.window, ctx));
+      ledger.markWindow(source.name, week.weekId);
+    }
+
+    const since = ledger.watermark(source.name);
+    if (since) {
+      const itemIds = itemsInWeeks(ledger, source.name, weeks);
+      file(await source.fetchSince(since, itemIds, ctx));
+    }
+
+    ledger.setWatermark(source.name, now);
+    perSource.set(source.name, outcome);
+  }
+
+  return { perSource, weeksChanged, warnings };
+}
+
+/**
+ * The items worth asking a source about again.
+ *
+ * Everything it touched in the weeks being collected, rather than everything it has
+ * ever seen: a delta query names its items, and a list that grows forever would
+ * eventually be too long to send and mostly about work nobody is looking at.
+ */
+function itemsInWeeks(ledger: Ledger, source: string, weeks: readonly CollectionWeek[]): string[] {
+  const ids = new Set<string>();
+  for (const week of weeks) {
+    for (const event of ledger.eventsForWeek(week.weekId)) {
+      if (event.source === source) ids.add(event.itemId);
+    }
+  }
+  return [...ids].sort();
 }
