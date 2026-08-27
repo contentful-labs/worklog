@@ -4375,6 +4375,53 @@ describe("migrateWeeklyFrontmatter", () => {
     expect(await read("2026-W05 Brag Book.md")).toBe(hand);
   });
 
+  it("leaves frontmatter hidden behind a byte order mark alone", async () => {
+    // A BOM hides the fence from a startsWith test, and a second block would turn the
+    // metadata that was there into body text.
+    const withBom = `\uFEFF${BRAG}# Brag Book - Week 05, 2026\n`;
+    await seed("2026-W05 Brag Book.md", withBom);
+
+    const result = await migrateWeeklyFrontmatter(tmpDir);
+
+    expect(result.updated).toEqual([]);
+    expect(result.skipped).toBe(1);
+    expect(await read("2026-W05 Brag Book.md")).toBe(withBom);
+  });
+
+  it("leaves frontmatter behind a leading blank line alone", async () => {
+    const withBlank = `\n\n${BRAG}# Brag Book - Week 05, 2026\n`;
+    await seed("2026-W05 Brag Book.md", withBlank);
+
+    const result = await migrateWeeklyFrontmatter(tmpDir);
+
+    expect(result.updated).toEqual([]);
+    expect(result.skipped).toBe(1);
+    expect(await read("2026-W05 Brag Book.md")).toBe(withBlank);
+  });
+
+  it("still adds frontmatter to a BOM file that has none", async () => {
+    // The mark is not itself frontmatter, so this one is genuinely missing a block.
+    await seed("2026-W05 Brag Book.md", "\uFEFF# Brag Book - Week 05, 2026\n");
+
+    const result = await migrateWeeklyFrontmatter(tmpDir);
+
+    expect(result.updated).toEqual(["2026-W05 Brag Book.md"]);
+  });
+
+  it("migrates only the filenames the generator produces", async () => {
+    // A suffix test caught hand-written notes that merely end the same way.
+    await seed("Personal Work Log.md", "# My own notes\n");
+    await seed("Brag Book Index.md", "# Index\n");
+    await seed("2026-W09 Work Log.md", "# Work Log - Week 9, 2026\n");
+
+    const result = await migrateWeeklyFrontmatter(tmpDir);
+
+    expect(result.updated).toEqual(["2026-W09 Work Log.md"]);
+    expect(await read("Personal Work Log.md")).toBe("# My own notes\n");
+    expect(await read("Brag Book Index.md")).toBe("# Index\n");
+    expect(existsSync(join(tmpDir, "Personal Work Log.md.pre-frontmatter.bak"))).toBe(false);
+  });
+
   it("keeps CRLF files on CRLF", async () => {
     const crlf = "# Brag Book - Week 05, 2026\r\n\r\n## Achievements\r\n";
     await seed("2026-W05 Brag Book.md", crlf);
@@ -4401,6 +4448,7 @@ describe("migrateWeeklyFrontmatter", () => {
     await seed("memory.md", "# Memory\n");
     await seed("My Focus.md", "# Focus\n");
     await seed("2026-W05 Brag Book.md", "# Brag Book\n");
+
 
     const result = await migrateWeeklyFrontmatter(tmpDir);
 
