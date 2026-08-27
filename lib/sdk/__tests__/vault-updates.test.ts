@@ -724,7 +724,7 @@ _(Added automatically as significant achievements are recorded)_
 `);
 
     expect(await migrateVaultRecordsFile(path, "my-profile"))
-      .toEqual({ placeholders: 3, duplicates: 1, backup: `${path}.pre-dedupe.bak` });
+      .toEqual({ placeholders: 3, duplicates: 1, unjoined: 0, unjoinSkipped: [], backup: `${path}.pre-dedupe.bak` });
 
     const content = await readFile(path, "utf-8");
     expect(content).not.toContain("(none)");
@@ -751,7 +751,7 @@ _(Added automatically as significant achievements are recorded)_
 `);
 
     expect(await migrateVaultRecordsFile(path, "work-context"))
-      .toEqual({ placeholders: 1, duplicates: 2, backup: `${path}.pre-dedupe.bak` });
+      .toEqual({ placeholders: 1, duplicates: 2, unjoined: 0, unjoinSkipped: [], backup: `${path}.pre-dedupe.bak` });
 
     const content = await readFile(path, "utf-8");
     expect(content.match(/ship on Tuesdays/g)).toHaveLength(1);
@@ -782,7 +782,7 @@ _(Added automatically as significant achievements are recorded)_
 `);
 
     expect(await migrateVaultRecordsFile(path, "memory"))
-      .toEqual({ placeholders: 1, duplicates: 1, backup: `${path}.pre-dedupe.bak` });
+      .toEqual({ placeholders: 1, duplicates: 1, unjoined: 0, unjoinSkipped: [], backup: `${path}.pre-dedupe.bak` });
 
     const content = await readFile(path, "utf-8");
     expect(content.match(/fallback path/g)).toHaveLength(1);
@@ -806,7 +806,7 @@ _(Added automatically as significant achievements are recorded)_
 `);
 
     expect(await migrateVaultRecordsFile(path, "impact-log"))
-      .toEqual({ placeholders: 0, duplicates: 1, backup: `${path}.pre-dedupe.bak` });
+      .toEqual({ placeholders: 0, duplicates: 1, unjoined: 0, unjoinSkipped: [], backup: `${path}.pre-dedupe.bak` });
     const content = await readFile(path, "utf-8");
     expect(content.match(/Search Revamp rollout/g)).toHaveLength(2);
   });
@@ -823,7 +823,7 @@ _(Added automatically as significant achievements are recorded)_
 `);
 
     expect(await migrateVaultRecordsFile(path, "my-profile"))
-      .toEqual({ placeholders: 1, duplicates: 0, backup: backupPath });
+      .toEqual({ placeholders: 1, duplicates: 0, unjoined: 0, unjoinSkipped: [], backup: backupPath });
     const cleaned = await readFile(path, "utf-8");
     await writeFile(backupPath, "sentinel", "utf-8");
 
@@ -3862,5 +3862,450 @@ describe("case survives the paths that delete", () => {
     // a second reference.
     expect(again).toMatchObject({ status: "unchanged" });
     expect(await readFile(path, "utf-8")).not.toContain("DOC-A, doc-a");
+  });
+});
+
+describe("impact rows several entries were written into", () => {
+  // Exactly what the 1.x writer leaves behind after three inserts into a table that
+  // already had one row: a bare pipe per insert, and one row holding every entry.
+  const JOINED = `# Impact Log
+
+## Impact Timeline
+
+| Date | Achievement | Scope | Core Value | Evidence |
+|------|-------------|-------|------------|----------|
+|
+|
+| 2026-01-15 | third | Team | Own It | X | 2026-01-08 | second | Team | Own It | X | 2026-01-01 | first | Team | Own It | X-1 |
+
+**Last significant impact:** 2026-01-15
+**Current gap:** None - recent entry added
+`;
+
+  it("splits the joined row into one row per entry and drops the bare pipes", async () => {
+    const path = join(tmpDir, "impact-log.md");
+    await writeFile(path, JOINED);
+
+    const result = await migrateVaultRecordsFile(path, "impact-log", new Date(2026, 0, 16));
+
+    expect(result).toMatchObject({ unjoined: 2, placeholders: 2, duplicates: 0, unjoinSkipped: [] });
+    expect(result?.backup).toBe(`${path}.pre-dedupe.bak`);
+
+    const content = await readFile(path, "utf-8");
+    expect(content).toContain("| 2026-01-15 | third | Team | Own It | X |");
+    expect(content).toContain("| 2026-01-08 | second | Team | Own It | X |");
+    expect(content).toContain("| 2026-01-01 | first | Team | Own It | X-1 |");
+    expect(content.split("\n").filter((line) => line.trim() === "|")).toHaveLength(0);
+    // Three entries, each on its own line.
+    expect(content.split("\n").filter((line) => line.startsWith("| 2026-"))).toHaveLength(3);
+  });
+
+  it("derives the status lines from the entries it recovered", async () => {
+    const path = join(tmpDir, "impact-log.md");
+    await writeFile(path, JOINED.replace("**Last significant impact:** 2026-01-15", "**Last significant impact:** none recorded"));
+
+    await migrateVaultRecordsFile(path, "impact-log", new Date(2026, 0, 29));
+
+    const content = await readFile(path, "utf-8");
+    expect(content).toContain("**Last significant impact:** 2026-01-15");
+    expect(content).toContain("**Current gap:** 2 weeks");
+  });
+
+  it("is byte-identical on a rerun", async () => {
+    const path = join(tmpDir, "impact-log.md");
+    await writeFile(path, JOINED);
+    const now = new Date(2026, 0, 16);
+
+    await migrateVaultRecordsFile(path, "impact-log", now);
+    const repaired = await readFile(path, "utf-8");
+
+    expect(await migrateVaultRecordsFile(path, "impact-log", now)).toBeNull();
+    expect(await readFile(path, "utf-8")).toBe(repaired);
+  });
+
+  it("leaves a row alone when its cells do not divide into whole entries", async () => {
+    const path = join(tmpDir, "impact-log.md");
+    const file = `# Impact Log
+
+## Impact Timeline
+
+| Date | Achievement | Scope | Core Value | Evidence |
+|------|-------------|-------|------------|----------|
+| 2026-01-15 | third | Team | Own It | X | 2026-01-08 | second | Team |
+
+**Last significant impact:** 2026-01-15
+**Current gap:** None - recent entry added
+`;
+    await writeFile(path, file);
+
+    const result = await migrateVaultRecordsFile(path, "impact-log", new Date(2026, 0, 16));
+
+    expect(result?.unjoined ?? 0).toBe(0);
+    expect(result?.unjoinSkipped ?? []).toEqual([8]);
+    expect(await readFile(path, "utf-8")).toBe(file);
+  });
+
+  it("leaves a row alone when a cell that would start an entry is not a date", async () => {
+    const path = join(tmpDir, "impact-log.md");
+    const file = `# Impact Log
+
+## Impact Timeline
+
+| Date | Achievement | Scope | Core Value | Evidence |
+|------|-------------|-------|------------|----------|
+| 2026-01-15 | third | Team | Own It | X | see below | second | Team | Own It | X |
+
+**Last significant impact:** 2026-01-15
+**Current gap:** None - recent entry added
+`;
+    await writeFile(path, file);
+
+    const result = await migrateVaultRecordsFile(path, "impact-log", new Date(2026, 0, 16));
+
+    expect(result?.unjoined ?? 0).toBe(0);
+    expect(result?.unjoinSkipped ?? []).toEqual([10]);
+    expect(await readFile(path, "utf-8")).toBe(file);
+  });
+
+  it("leaves a table that was never damaged exactly as it is", async () => {
+    const path = join(tmpDir, "impact-log.md");
+    const file = `# Impact Log
+
+## Impact Timeline
+
+| Date | Achievement | Scope | Core Value | Evidence |
+|------|-------------|-------|------------|----------|
+| 2026-01-01 | first | Team | Own It | X-1 |
+| 2026-01-08 | second | Team | Own It | X |
+
+**Last significant impact:** 2026-01-08
+**Current gap:** 2 weeks
+`;
+    await writeFile(path, file);
+
+    expect(await migrateVaultRecordsFile(path, "impact-log", new Date(2026, 0, 22))).toBeNull();
+    expect(await readFile(path, "utf-8")).toBe(file);
+  });
+
+  it("keeps an escaped cell exactly as written while splitting", async () => {
+    const path = join(tmpDir, "impact-log.md");
+    await writeFile(path, `# Impact Log
+
+## Impact Timeline
+
+| Date | Achievement | Scope | Core Value | Evidence |
+|------|-------------|-------|------------|----------|
+|
+| 2026-01-08 | second | Team | Own It | \\*literal\\* | 2026-01-01 | first | Team | Own It | a \\| b |
+
+**Last significant impact:** 2026-01-08
+**Current gap:** None - recent entry added
+`);
+
+    await migrateVaultRecordsFile(path, "impact-log", new Date(2026, 0, 9));
+
+    const content = await readFile(path, "utf-8");
+    expect(content).toContain("| 2026-01-08 | second | Team | Own It | \\*literal\\* |");
+    expect(content).toContain("| 2026-01-01 | first | Team | Own It | a \\| b |");
+    expect(content).not.toContain("\\\\*literal");
+  });
+});
+
+describe("the writer never lands inside an existing row", () => {
+  it("adds its row on its own line when the first row follows the separator", async () => {
+    const path = join(tmpDir, "impact-log.md");
+    // No blank line between the separator and the first data row: the shape the 1.x
+    // regex mis-read, since its separator pattern ran on through the newline and the
+    // next row's leading pipe.
+    await writeFile(path, `# Impact Log
+
+## Impact Timeline
+
+| Date | Achievement | Scope | Core Value | Evidence |
+|------|-------------|-------|------------|----------|
+| 2026-01-01 | first | Team | Own It | X-1 |
+
+**Last significant impact:** 2026-01-01
+**Current gap:** None - recent entry added
+`);
+
+    await updateImpactLog(path, {
+      date: "2026-01-08",
+      achievement: "second",
+      scope: "Team",
+      coreValue: "Own It",
+      evidence: "X",
+    }, new Date(2026, 0, 9));
+
+    const lines = (await readFile(path, "utf-8")).split("\n");
+    expect(lines).toContain("| 2026-01-01 | first | Team | Own It | X-1 |");
+    expect(lines).toContain("| 2026-01-08 | second | Team | Own It | X |");
+    expect(lines.filter((line) => line.trim() === "|")).toHaveLength(0);
+    expect(lines.every((line) => splitRow(line).length <= 5)).toBe(true);
+  });
+});
+
+describe("escapes inside a joined row that is then deduplicated", () => {
+  const joinedWith = (first: string, second: string) => `# Impact Log
+
+## Impact Timeline
+
+| Date | Achievement | Scope | Core Value | Evidence |
+|------|-------------|-------|------------|----------|
+|
+| 2026-01-08 | second | Team | Own It | ${first} | 2026-01-08 | second | Team | Own It | ${second} |
+
+**Last significant impact:** 2026-01-08
+**Current gap:** None - recent entry added
+`;
+
+  const cases: Array<[string, string, string]> = [
+    ["an escaped asterisk", "\\*a\\*", "\\*b\\*"],
+    ["a doubled backslash", "C:\\\\one", "C:\\\\two"],
+    ["an escaped pipe", "a \\| b", "c \\| d"],
+  ];
+
+  for (const [label, first, second] of cases) {
+    it(`carries ${label} across a fold exactly as written`, async () => {
+      const path = join(tmpDir, "impact-log.md");
+      await writeFile(path, joinedWith(first, second));
+
+      // The two entries are the same record, so the split is followed by a collapse
+      // that folds the second one's evidence into the first.
+      const result = await migrateVaultRecordsFile(path, "impact-log", new Date(2026, 0, 9));
+      expect(result).toMatchObject({ unjoined: 1, duplicates: 1, placeholders: 1 });
+
+      const content = await readFile(path, "utf-8");
+      expect(content).toContain(`| ${first}, ${second} |`);
+
+      const row = content.split("\n").find((line) => line.includes("second")) ?? "";
+      expect(splitRow(row)).toHaveLength(5);
+    });
+  }
+
+  it("is byte-identical on a rerun", async () => {
+    const path = join(tmpDir, "impact-log.md");
+    await writeFile(path, joinedWith("\\*a\\*", "\\*b\\*"));
+    const now = new Date(2026, 0, 9);
+
+    await migrateVaultRecordsFile(path, "impact-log", now);
+    const repaired = await readFile(path, "utf-8");
+
+    expect(await migrateVaultRecordsFile(path, "impact-log", now)).toBeNull();
+    expect(await readFile(path, "utf-8")).toBe(repaired);
+  });
+});
+
+describe("entries a hand-written row dated by month", () => {
+  it("splits a row whose entries start with a year and month", async () => {
+    const path = join(tmpDir, "impact-log.md");
+    await writeFile(path, `# Impact Log
+
+## Impact Timeline
+
+| Date | Achievement | Scope | Core Value | Evidence |
+|------|-------------|-------|------------|----------|
+|
+|
+| 2026-01-15 | third | Team | Own It | X | 2025-04 | hand written | Team | Own It | Y | 2026-01-01 | first | Team | Own It | Z |
+
+**Last significant impact:** 2026-01-15
+**Current gap:** None - recent entry added
+`);
+
+    const result = await migrateVaultRecordsFile(path, "impact-log", new Date(2026, 0, 16));
+
+    expect(result).toMatchObject({ unjoined: 2, placeholders: 2, unjoinSkipped: [] });
+    const content = await readFile(path, "utf-8");
+    expect(content).toContain("| 2025-04 | hand written | Team | Own It | Y |");
+    expect(content).toContain("| 2026-01-15 | third | Team | Own It | X |");
+    expect(content).toContain("| 2026-01-01 | first | Team | Own It | Z |");
+    // A month cannot date the timeline, so the newest full date still does.
+    expect(content).toContain("**Last significant impact:** 2026-01-15");
+  });
+
+  it("still refuses a month that does not exist", async () => {
+    const path = join(tmpDir, "impact-log.md");
+    const file = `# Impact Log
+
+## Impact Timeline
+
+| Date | Achievement | Scope | Core Value | Evidence |
+|------|-------------|-------|------------|----------|
+| 2026-01-15 | third | Team | Own It | X | 2026-13 | mis-dated | Team | Own It | Y |
+
+**Last significant impact:** 2026-01-15
+**Current gap:** None - recent entry added
+`;
+    await writeFile(path, file);
+
+    const result = await migrateVaultRecordsFile(path, "impact-log", new Date(2026, 0, 16));
+
+    expect(result?.unjoined ?? 0).toBe(0);
+    expect(result?.unjoinSkipped ?? []).toEqual([10]);
+    expect(await readFile(path, "utf-8")).toBe(file);
+  });
+});
+
+describe("rows whose cells merely contain pipes", () => {
+  const withRow = (row: string, barePipes: number) => `# Impact Log
+
+## Impact Timeline
+
+| Date | Achievement | Scope | Core Value | Evidence |
+|------|-------------|-------|------------|----------|
+${"|\n".repeat(barePipes)}${row}
+
+**Last significant impact:** 2026-01-15
+**Current gap:** None - recent entry added
+`;
+
+  // What the 1.x writer produced from an evidence string the model wrote with pipes
+  // in it: ten cells, and a date-looking cell at both group boundaries.
+  // The evidence itself begins with a date-looking fragment, so the cell that would
+  // start a second entry passes the date guard and only the missing bare pipe says no.
+  const TEN_CELLS = "| 2026-01-15 | third | Team | Own It | X | 2025-04 | PR-2 | dashboard | 20% | rollout note |";
+
+  it("leaves a ten-cell row alone when no insert was ever lost", async () => {
+    const path = join(tmpDir, "impact-log.md");
+    const file = withRow(TEN_CELLS, 0);
+    await writeFile(path, file);
+
+    const result = await migrateVaultRecordsFile(path, "impact-log", new Date(2026, 0, 16));
+
+    expect(result?.unjoined ?? 0).toBe(0);
+    expect(result?.unjoinSkipped ?? []).toEqual([10]);
+    expect(await readFile(path, "utf-8")).toBe(file);
+  });
+
+  it("leaves a fifteen-cell row alone when only one insert was lost", async () => {
+    const path = join(tmpDir, "impact-log.md");
+    // Three entries would need two lost inserts; the file only shows one.
+    const fifteen =
+      "| 2026-01-15 | third | Team | Own It | X | 2026-01-08 | second | Team | Own It | Y | 2026-01-01 | first | Team | Own It | Z |";
+    await writeFile(path, withRow(fifteen, 1));
+
+    const result = await migrateVaultRecordsFile(path, "impact-log", new Date(2026, 0, 16));
+
+    expect(result?.unjoined ?? 0).toBe(0);
+    expect(result?.unjoinSkipped ?? []).toEqual([15]);
+    expect(await readFile(path, "utf-8")).toContain(fifteen);
+  });
+
+  it("splits the same fifteen-cell row once both lost inserts are accounted for", async () => {
+    const path = join(tmpDir, "impact-log.md");
+    const fifteen =
+      "| 2026-01-15 | third | Team | Own It | X | 2026-01-08 | second | Team | Own It | Y | 2026-01-01 | first | Team | Own It | Z |";
+    await writeFile(path, withRow(fifteen, 2));
+
+    const result = await migrateVaultRecordsFile(path, "impact-log", new Date(2026, 0, 16));
+
+    expect(result).toMatchObject({ unjoined: 2, unjoinSkipped: [] });
+    const content = await readFile(path, "utf-8");
+    expect(content).toContain("| 2026-01-08 | second | Team | Own It | Y |");
+  });
+
+  it("splits a row of thirty-eight entries against thirty-seven lost inserts", async () => {
+    const path = join(tmpDir, "impact-log.md");
+    const entries = Array.from({ length: 38 }, (_, k) => {
+      const day = String((k % 28) + 1).padStart(2, "0");
+      return ` 2026-01-${day} | entry ${k} | Team | Own It | X-${k} `;
+    });
+    await writeFile(path, withRow(`|${entries.join("|")}|`, 37));
+
+    const result = await migrateVaultRecordsFile(path, "impact-log", new Date(2026, 1, 1));
+
+    expect(result).toMatchObject({ unjoined: 37, unjoinSkipped: [] });
+    const rows = (await readFile(path, "utf-8")).split("\n").filter((line) => line.startsWith("| 2026-01-"));
+    expect(rows).toHaveLength(38);
+    expect(rows.every((row) => splitRow(row).length === 5)).toBe(true);
+  });
+});
+
+describe("only the row the lost inserts point at", () => {
+  const impactLog = (rows: string[]) => `# Impact Log
+
+## Impact Timeline
+
+| Date | Achievement | Scope | Core Value | Evidence |
+|------|-------------|-------|------------|----------|
+${rows.join("\n")}
+
+**Last significant impact:** 2026-01-15
+**Current gap:** None - recent entry added
+`;
+
+  // Ten cells, with a date-looking fragment where a second entry would start: what the
+  // 1.x writer produced from an evidence string the model wrote with pipes in it.
+  const WIDE_EVIDENCE = "| 2026-01-20 | fourth | Team | Own It | X | 2025-04 | PR-2 | dashboard | 20% | rollout note |";
+  const JOINED_PAIR = "| 2026-01-15 | third | Team | Own It | X | 2026-01-01 | first | Team | Own It | Z |";
+
+  it("splits the damaged row and reports the wide one beside it", async () => {
+    const path = join(tmpDir, "impact-log.md");
+    await writeFile(path, impactLog(["|", JOINED_PAIR, WIDE_EVIDENCE]));
+
+    const result = await migrateVaultRecordsFile(path, "impact-log", new Date(2026, 0, 21));
+
+    // One lost insert, so one entry recovered, and nothing invented from the other row.
+    expect(result).toMatchObject({ unjoined: 1, unjoinSkipped: [10] });
+
+    const content = await readFile(path, "utf-8");
+    expect(content).toContain("| 2026-01-15 | third | Team | Own It | X |");
+    expect(content).toContain("| 2026-01-01 | first | Team | Own It | Z |");
+    expect(content).toContain(WIDE_EVIDENCE);
+    // Its tail is a substring of the row itself, so the test is whether a row was
+    // fabricated from it, not whether the text appears.
+    expect(content.split("\n")).not.toContain("| 2025-04 | PR-2 | dashboard | 20% | rollout note |");
+  });
+
+  it("splits nothing when the lost inserts are not against the wide row", async () => {
+    const path = join(tmpDir, "impact-log.md");
+    // A row of its own sits between the run and the wide row, so this is not the shape
+    // the bug leaves and the run says nothing about that row.
+    const file = impactLog(["| 2026-01-10 | second | Team | Own It | Y |", "|", JOINED_PAIR]);
+    await writeFile(path, file);
+
+    const result = await migrateVaultRecordsFile(path, "impact-log", new Date(2026, 0, 21));
+
+    expect(result?.unjoined ?? 0).toBe(0);
+    expect(result?.unjoinSkipped ?? []).toEqual([10]);
+    expect(await readFile(path, "utf-8")).toContain(JOINED_PAIR);
+  });
+
+  it("splits nothing when the run is broken by another row", async () => {
+    const path = join(tmpDir, "impact-log.md");
+    await writeFile(path, impactLog(["|", "| 2026-01-10 | second | Team | Own It | Y |", "|", JOINED_PAIR]));
+
+    const result = await migrateVaultRecordsFile(path, "impact-log", new Date(2026, 0, 21));
+
+    // The run is one pipe long and the row after it is an ordinary row, so the wide
+    // row further down is nobody's business.
+    expect(result?.unjoined ?? 0).toBe(0);
+    expect(result?.unjoinSkipped ?? []).toEqual([10]);
+  });
+});
+
+describe("a duplicate that lists the same evidence twice", () => {
+  it("carries that value across once", async () => {
+    const path = join(tmpDir, "impact-log.md");
+    await writeFile(path, `# Impact Log
+
+## Impact Timeline
+
+| Date | Achievement | Scope | Core Value | Evidence |
+|------|-------------|-------|------------|----------|
+|
+| 2026-01-08 | second | Team | Own It | A | 2026-01-08 | second | Team | Own It | B, B |
+
+**Last significant impact:** 2026-01-08
+**Current gap:** None - recent entry added
+`);
+
+    const result = await migrateVaultRecordsFile(path, "impact-log", new Date(2026, 0, 9));
+
+    expect(result).toMatchObject({ unjoined: 1, duplicates: 1 });
+    const content = await readFile(path, "utf-8");
+    expect(content).toContain("| A, B |");
+    expect(content).not.toContain("B, B");
   });
 });

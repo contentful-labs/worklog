@@ -378,12 +378,41 @@ function mergeCell(
  * backslash again, so the cell would gain one every week it was merged into. Only what
  * is genuinely new gets escaped, and only once.
  */
+/**
+ * The duplicate's own text for the values being carried across.
+ *
+ * Reading a cell resolves the pipe and backslash escapes and nothing else, so putting
+ * the result back through `escapeCell` escapes what it left alone: an evidence cell
+ * holding an escaped asterisk came out of a fold with a second backslash. The
+ * fragments the duplicate wrote are appended exactly as it wrote them.
+ */
+function rawAdditions(
+  rawCell: string,
+  parsedCell: string,
+  additions: readonly string[],
+  style: MergeStyle,
+): string {
+  const raw = splitValues(rawCell, style);
+  const parsed = splitValues(parsedCell, style);
+  const wanted = new Set(additions);
+
+  const picked: string[] = [];
+  for (const [i, value] of parsed.entries()) {
+    // Consumed, not just matched: a duplicate row that lists the same value twice
+    // would otherwise append it twice, though the merge decided on it once.
+    // Falls back to escaping if the two ever disagree on where a value ends.
+    if (wanted.delete(value)) picked.push(raw[i] ?? escapeCell(value));
+  }
+  return picked.join(style.joiner);
+}
+
 function mergeRowCells(
   row: string,
   incoming: readonly string[],
   column: number,
   style: MergeStyle,
   canonical?: Canonicalizer,
+  incomingRaw?: readonly string[],
 ): string | null {
   const scanned = scanRow(row);
   while (scanned.values.length <= column) {
@@ -395,7 +424,9 @@ function mergeRowCells(
   const additions = mergeValues(scanned.values[column], value, style, canonical);
   if (additions.length === 0) return null;
 
-  const escaped = escapeCell(additions.join(style.joiner));
+  const escaped = incomingRaw
+    ? rawAdditions(incomingRaw[column] ?? "", value, additions, style)
+    : escapeCell(additions.join(style.joiner));
   const source = scanned.raw[column].trimEnd();
   scanned.raw[column] = source.trim().length === 0 ? ` ${escaped} ` : `${source}${style.joiner}${escaped} `;
   scanned.values[column] = mergeCell(scanned.values[column], value, style, canonical);
@@ -1413,6 +1444,15 @@ export type VaultRecordKind = "memory" | "impact-log" | "work-context" | "my-pro
 export interface VaultRecordsMigration {
   placeholders: number;
   duplicates: number;
+  /** Entries recovered from a row that several of them had been written into. */
+  unjoined: number;
+  /**
+   * Cell counts of rows that looked joined but could not be split safely.
+   *
+   * Reported rather than guessed at: a row of the wrong width is damage this code does
+   * not recognise, and rewriting it on a hunch is how the damage got there.
+   */
+  unjoinSkipped: number[];
   /**
    * Where the file as it was before this run was kept, or "" when nothing was removed.
    *
@@ -1561,9 +1601,13 @@ function cleanBullets(
 
 /** Fold the given columns of a duplicate row into the row that survives it. */
 function foldRowCells(column: number, style: MergeStyle): FoldRecord {
-  // The duplicate is about to be deleted, so its cell has to be read the way the
-  // cleanup reads a record: a note that differs only in case is another note.
-  return (survivor, duplicate) => mergeRowCells(survivor, splitRow(duplicate), column, style, DELETE_IDENTITY);
+  // The duplicate is about to be deleted, so its cell is read the way the cleanup
+  // reads a record (a value differing only in case is another value) and written the
+  // way the duplicate wrote it.
+  return (survivor, duplicate) => {
+    const row = scanRow(duplicate);
+    return mergeRowCells(survivor, row.values, column, style, DELETE_IDENTITY, row.raw);
+  };
 }
 
 /** Fold a duplicate note's source into the note that survives it. */
@@ -1702,6 +1746,106 @@ async function writeFileAtomic(path: string, content: string): Promise<void> {
 }
 
 /**
+ * True for a date cell that can begin an entry inside a joined row.
+ *
+ * Looser than `isIsoDate` on purpose, and only here: a hand-written row in a real
+ * vault is dated `2025-04`, and refusing the whole repair over a missing day left 38
+ * entries fused together. The month still has to be a real one, so `2026-13` is
+ * refused. The status lines keep using `isIsoDate`, since a gap cannot be measured
+ * from a month.
+ */
+function isEntryDate(value: string): boolean {
+  if (isIsoDate(value)) return true;
+  if (value.length !== 7 || value[4] !== "-") return false;
+  for (const i of [0, 1, 2, 3, 5, 6]) {
+    if (value[i] < "0" || value[i] > "9") return false;
+  }
+  const parsed = new Date(`${value}-01T00:00:00Z`);
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 7) === value;
+}
+
+interface UnjoinedRows {
+  content: string;
+  unjoined: number;
+  unjoinSkipped: number[];
+}
+
+/**
+ * Split the impact rows that several entries were written into.
+ *
+ * The 1.x writer found its insert point with a regex whose separator pattern ran on
+ * past the separator line: `[-\s|]+` matches a newline and a pipe, so the match ended
+ * on the leading pipe of the first data row and every insert landed inside that row.
+ * A file written by it holds one row carrying every entry, newest first, with the cells
+ * themselves intact, and a bare `|` line for each insert after the first.
+ *
+ * A row is only split when its cells divide exactly into whole entries and every cell
+ * that would start one is a date. The cell text is put back exactly as written, so an
+ * escape inside a cell survives the repair.
+ */
+function unjoinImpactRows(content: string, width: number): UnjoinedRows {
+  const eol = detectEol(content);
+  const lines = toLines(content);
+  const scan = maskFenced(lines);
+  const liveEnd = liveRegionEnd(scan);
+
+  const headingIdx = findExactHeading(scan, IMPACT_TIMELINE_HEADING, liveEnd);
+  if (headingIdx === -1) return { content, unjoined: 0, unjoinSkipped: [] };
+
+  const scope = sectionScope(scan, headingIdx, liveEnd);
+  const table = findTableByHeader(scan, headingIdx, scope, IMPACT_HEADER);
+  if (!table) return { content, unjoined: 0, unjoinSkipped: [] };
+
+  const rowEnd = Math.min(table.rowEnd, scope);
+
+  // The damage signs itself, and in one shape only: every 1.x insert went in directly
+  // under the separator, so the file shows a run of the leading pipes it left behind
+  // and then, immediately after them, the row that swallowed their entries. Nothing
+  // else in the table is a candidate, whatever its cells look like: a run counted
+  // table-wide would let one real loss license the splitting of an unrelated row.
+  let afterRun = table.rowStart;
+  while (afterRun < rowEnd && lines[afterRun].trim() === "|") afterRun++;
+  const lostInserts = afterRun - table.rowStart;
+  const joinedIdx = lostInserts > 0 && afterRun < rowEnd ? afterRun : -1;
+
+  const repaired: string[] = [];
+  const unjoinSkipped: number[] = [];
+  let unjoined = 0;
+
+  for (let i = table.rowStart; i < rowEnd; i++) {
+    const row = scanRow(lines[i]);
+    const cells = row.values.length;
+    if (cells <= width) {
+      repaired.push(lines[i]);
+      continue;
+    }
+
+    const startsAnEntry = (k: number) => isEntryDate(row.values[k * width] ?? "");
+    const entries = cells / width;
+    const looksJoined =
+      Number.isInteger(entries) && Array.from({ length: entries }, (_, k) => k).every(startsAnEntry);
+    // The row the run points at, holding exactly the entries the run accounts for.
+    if (i !== joinedIdx || !looksJoined || entries !== lostInserts + 1) {
+      unjoinSkipped.push(cells);
+      repaired.push(lines[i]);
+      continue;
+    }
+
+    for (let k = 0; k < entries; k++) {
+      repaired.push(`|${row.raw.slice(k * width, (k + 1) * width).join("|")}|`);
+    }
+    // The row that held them all counts as one of them, so the rest are the recovery.
+    unjoined += entries - 1;
+  }
+
+  if (unjoined === 0) return { content, unjoined: 0, unjoinSkipped };
+
+  const next = [...lines];
+  next.splice(table.rowStart, rowEnd - table.rowStart, ...repaired);
+  return { content: next.join(eol), unjoined, unjoinSkipped };
+}
+
+/**
  * One-off cleanup of the damage the ungated writers did: placeholder rows and repeated
  * records. Keeps a backup, and returns null when there is nothing to change so a second
  * run neither rewrites the file nor writes another backup.
@@ -1714,13 +1858,30 @@ export async function migrateVaultRecordsFile(
   if (!existsSync(path)) return null;
 
   const content = await readFile(path, "utf-8");
-  const cleaned = cleanVaultRecords(content, kind, now);
 
-  const removedRecords = cleaned.placeholders > 0 || cleaned.duplicates > 0;
-  if (!removedRecords && cleaned.content === content) return null;
+  // Entries first, so the cleanup and the status lines see the rows that were always
+  // meant to be there rather than the one row they were written into.
+  const repaired = kind === "impact-log"
+    ? unjoinImpactRows(content, IMPACT_HEADER.length)
+    : { content, unjoined: 0, unjoinSkipped: [] };
+  const cleaned = cleanVaultRecords(repaired.content, kind, now);
 
-  const backup = removedRecords ? nextBackupPath(path) : "";
-  if (removedRecords) await writeFile(backup, content, "utf-8");
+  const changedRecords = cleaned.placeholders > 0 || cleaned.duplicates > 0 || repaired.unjoined > 0;
+  if (!changedRecords && cleaned.content === content) {
+    // Nothing to write, but a row this could not read is still worth saying out loud,
+    // every run, until somebody fixes it.
+    if (repaired.unjoinSkipped.length === 0) return null;
+    return { placeholders: 0, duplicates: 0, unjoined: 0, unjoinSkipped: repaired.unjoinSkipped, backup: "" };
+  }
+
+  const backup = changedRecords ? nextBackupPath(path) : "";
+  if (changedRecords) await writeFile(backup, content, "utf-8");
   await writeFileAtomic(path, cleaned.content);
-  return { placeholders: cleaned.placeholders, duplicates: cleaned.duplicates, backup };
+  return {
+    placeholders: cleaned.placeholders,
+    duplicates: cleaned.duplicates,
+    unjoined: repaired.unjoined,
+    unjoinSkipped: repaired.unjoinSkipped,
+    backup,
+  };
 }
