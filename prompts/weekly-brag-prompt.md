@@ -255,10 +255,10 @@ The remaining fields of the object feed the vault files directly:
 
 - `memoryItemsToAdd` — this week's small contributions, one entry each. These are the items
   that did not clear the brag book bar.
-- `memoryGraduations` — memory items that an achievement above absorbed. `item` is matched
-  against [[memory]] by substring, so copy its wording as closely as you can rather than
-  paraphrasing, and never abbreviate it to a word or two: a short `item` matches half the
-  file and deletes it.
+- `memoryGraduations` — memory items that an achievement above absorbed. `item` must equal
+  the Item cell of the [[memory]] row exactly as it appears in the table. Copy it, do not
+  paraphrase, shorten or re-punctuate it: a target that is not identical to the cell
+  matches no row, and the item stays in memory.
 - `impactLogEntry` — at most one entry for the week, or null. `scope` is Team, Department or
   Organization. `coreValue` is one of: {{company_values}}.
 - `workContextUpdates` — facts about the company or org learned this week, or an empty list.

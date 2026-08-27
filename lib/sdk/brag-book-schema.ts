@@ -14,14 +14,15 @@
  *   document must not be blank. Enums are here too because a status or scope outside the
  *   set has no safe fallback, and both providers honour `enum`.
  * - The **element rules** further down are applied by `toBragBookResult` after parsing.
- *   They drop the one bad row and keep the rest of the week. They check what the writers
- *   cannot recover from, which is why pipes are not among them: every writer either
- *   renders through `renderRow`, which escapes them, or writes a bullet where they are
- *   ordinary text. Rejecting them here would only lose real work. Anything per-element lives
- *   here for that reason, not because the provider could not enforce it. Both providers
- *   do accept `minLength`, `pattern` and `maxItems` (measured against OpenAI strict mode
- *   and the Claude Code ajv path), which is exactly why they must not go in the wire
- *   schema: the model violating one cell would cost the entire generation.
+ *   They drop the one bad row and keep the rest of the week, so every per-element rule
+ *   lives here rather than in the wire schema. Both providers do accept `minLength`,
+ *   `pattern` and `maxItems` (measured against OpenAI strict mode and the Claude Code ajv
+ *   path), which is exactly why those rules must stay out of the wire schema: the model
+ *   violating one cell would cost the entire generation.
+ *
+ *   The rules check only what the writers cannot recover from. Pipes are not among them:
+ *   every writer either renders through `renderRow`, which escapes them, or writes a
+ *   bullet where they are ordinary text. Rejecting them here would only lose real work.
  */
 
 import { z } from "zod";
@@ -46,7 +47,7 @@ export const memoryItemSchema = z.object({
   date: z.string().describe("Date the work happened, as YYYY-MM-DD."),
   item: z
     .string()
-    .describe("One line describing the small contribution. No markdown tables, no pipe characters."),
+    .describe("One line describing the small contribution. Plain prose, not a markdown table row."),
   category: z
     .string()
     .describe("Short lowercase category such as bugfix, review, docs, perf, support."),
@@ -61,7 +62,7 @@ export const memoryGraduationSchema = z.object({
   item: z
     .string()
     .describe(
-      "The memory item that has now been absorbed into an achievement. Copy the wording from the current memory document as closely as you can, since it is matched against that document.",
+      "The memory item that has now been absorbed into an achievement. Must equal the Item cell of that memory row exactly as it appears in the table: copy it rather than paraphrasing or shortening it, because a target that is not identical matches no row.",
     ),
   nowPartOf: z
     .string()

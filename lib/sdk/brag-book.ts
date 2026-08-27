@@ -32,6 +32,31 @@ export interface ReviewInfo {
   urgency: "normal" | "attention" | "urgent";
 }
 
+/**
+ * Undo the escaping `escapeCell` applies, so a graduation target survives the round trip.
+ *
+ * The model reads memory.md as rendered markdown, where a stored item reads `Perf \| work`.
+ * Copying that faithfully is the behaviour the prompt asks for, but `updateMemory` matches
+ * against the cell `splitRow` parsed, which is `Perf | work`, so the escaped copy would
+ * match nothing and the item would never graduate.
+ *
+ * Same escape rule as `splitRow`, without the splitting: a target that contains a bare
+ * pipe because the model did not escape it has to come through unchanged rather than be
+ * torn into two cells.
+ */
+function unescapeCell(value: string): string {
+  let out = "";
+  for (let i = 0; i < value.length; i++) {
+    if (value[i] === "\\" && (value[i + 1] === "|" || value[i + 1] === "\\")) {
+      out += value[i + 1];
+      i++;
+    } else {
+      out += value[i];
+    }
+  }
+  return out;
+}
+
 /** Keep only the elements that satisfy `schema`, dropping the rest. */
 function keepValid<T>(rows: unknown[], schema: z.ZodType<T>): T[] {
   const kept: T[] = [];
@@ -86,7 +111,7 @@ export function toBragBookResult(output: BragBookOutput): BragBookResult {
     // updateMemory splits this string on "(now part of" to recover the text it matches
     // against memory.md, so the separator has to stay exactly as written.
     itemsToRemove: keepValid(output.memoryGraduations, validMemoryGraduationSchema)
-      .map((row) => `${row.item} (now part of: ${row.nowPartOf})`),
+      .map((row) => `${unescapeCell(row.item)} (now part of: ${unescapeCell(row.nowPartOf)})`),
     impactLogEntry: impact.success ? impact.data : null,
     workContextUpdates: keepValid(output.workContextUpdates, validWorkContextUpdateSchema),
     profileUpdate: profile.success ? profile.data : null,

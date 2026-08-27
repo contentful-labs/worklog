@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { toBragBookResult, validateBragBookMarkdown, parseReviewCycle, ensureBragBookFrontmatter } from "../brag-book";
 import { updateMemory } from "../vault-updates";
+import { escapeCell, renderRow } from "../markdown-table";
 import { bragBookOutputSchema, isFocusItemId, type BragBookOutput } from "../brag-book-schema";
 
 const MARKDOWN = "# Brag Book - Week 09, 2026\n\n## Achievements\n\n- Shipped auth";
@@ -205,6 +206,26 @@ describe("toBragBookResult", () => {
     expect(result.itemsToRemove[0].split("(now part of")[0].trim()).toBe("Three small perf PRs");
   });
 
+  it("decodes a graduation target the model copied out of the rendered table", () => {
+    // memory.md shows the model `Perf \\| work`; updateMemory matches the parsed cell.
+    const result = toBragBookResult(
+      output({ memoryGraduations: [{ item: "Perf \\| work", nowPartOf: "Latency push" }] }),
+    );
+
+    expect(result.itemsToRemove).toEqual(["Perf | work (now part of: Latency push)"]);
+  });
+
+  it("undoes exactly what escapeCell does, for any cell text", () => {
+    // Pins the decode to the encoder it inverts. If escapeCell grows a rule, this fails.
+    for (const original of ["Perf | work", "back\\slash", "both \\ and |", "plain text", "|", "\\"]) {
+      const roundTripped = toBragBookResult(
+        output({ memoryGraduations: [{ item: `x ${escapeCell(original)} x`, nowPartOf: "A" }] }),
+      ).itemsToRemove[0];
+
+      expect(roundTripped).toBe(`x ${original} x (now part of: A)`);
+    }
+  });
+
   it("drops a graduation too short to name an item, but keeps one containing a pipe", () => {
     const result = toBragBookResult(
       output({
@@ -354,6 +375,33 @@ describe("graduations reaching memory.md", () => {
     expect(result.removed).toBe(0);
     expect(result.unmatchedGraduations.map((u) => u.requested)).toEqual(["202"]);
     expect(await readFile(path, "utf-8")).toBe(MEMORY);
+  });
+
+  it("graduates a row whose stored cell is escaped, when the model echoes the escape", async () => {
+    const path = join(tmpDir, "memory.md");
+    const stored = `# Memory
+
+## Team Now (2026 - present)
+
+| Date | Item | Category | Notes |
+|------|------|----------|-------|
+${renderRow(["2026-03-05", "Perf | work on a | b", "perf", ""])}
+| 2026-03-06 | Reviewed the search RFC | review |  |
+`;
+    await writeFile(path, stored, "utf-8");
+    // The row really is stored escaped, which is what the model sees and copies.
+    expect(stored).toContain("Perf \\| work on a \\| b");
+
+    const { itemsToRemove } = toBragBookResult(
+      output({ memoryGraduations: [{ item: "Perf \\| work on a \\| b", nowPartOf: "Latency push" }] }),
+    );
+    const result = await updateMemory(path, [], itemsToRemove);
+
+    expect(result.removed).toBe(1);
+    expect(result.unmatchedGraduations).toEqual([]);
+    const after = await readFile(path, "utf-8");
+    expect(after).not.toContain("Perf");
+    expect(after).toContain("Reviewed the search RFC");
   });
 
   it("removes the one row a graduation names exactly", async () => {
