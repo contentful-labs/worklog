@@ -9,13 +9,26 @@
  * without it.
  *
  * The child process is treated as untrusted, because its input is Slack text that anyone can
- * write. It is started with every built-in tool removed and only the Glean MCP server loaded,
- * so a message telling it to read a file or send mail has nothing to do it with. Verified
- * against Claude Code 2.1.246: `--tools ""` leaves the child with no Bash/Read/Write/WebFetch,
- * and `--strict-mcp-config --mcp-config <glean only>` leaves it with the Glean tools alone.
+ * write. Four things hold it in: every built-in tool removed, only the Glean MCP server loaded,
+ * no settings files read, and a working directory with nothing in it. All four were checked
+ * against Claude Code 2.1.246:
+ *
+ * - `--tools ""` leaves the child with no Bash/Read/Write/WebFetch.
+ * - `--strict-mcp-config --mcp-config <glean only>` leaves it with the Glean tools alone;
+ *   without it the child inherits every MCP server the user has, mail and browser included.
+ * - `--setting-sources ""` stops user, project and local settings loading. A project
+ *   `UserPromptSubmit` hook fires in the child without it and does not fire with it, so
+ *   without this flag a hook would see every Glean tool response.
+ * - a fresh empty working directory means no project CLAUDE.md, settings or memory to discover.
+ *
+ * The environment is an allowlist for the same reason: a process started to read untrusted text
+ * should not inherit whatever tokens this one happens to hold.
  */
 
 import { execFile } from "node:child_process";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { promisify } from "node:util";
 import { z } from "zod";
 import type { WorklogConfig } from "../types";
@@ -61,16 +74,51 @@ const GLEAN_TOOLS = [
 /** Longest stderr excerpt carried into a warning. Enough to diagnose, short enough to read. */
 const REASON_MAX_CHARS = 200;
 
+/**
+ * The only environment variables the child gets. Each one is either needed to start node and
+ * find the user's Claude Code credentials, or needed to reach the network from behind a
+ * corporate proxy. Everything else this process holds stays here.
+ *
+ * Note what is absent: CLAUDECODE, CLAUDE_CODE_SSE_PORT and CLAUDE_CODE_ENTRYPOINT. Claude Code
+ * refuses to start when those say it is nested inside another session.
+ */
+const CHILD_ENV_KEYS = [
+  "HOME",
+  "PATH",
+  "USER",
+  "LOGNAME",
+  "SHELL",
+  "TMPDIR",
+  "TERM",
+  "LANG",
+  "LC_ALL",
+  "ANTHROPIC_API_KEY",
+  "ANTHROPIC_AUTH_TOKEN",
+  "ANTHROPIC_BASE_URL",
+  "HTTP_PROXY",
+  "HTTPS_PROXY",
+  "NO_PROXY",
+  "http_proxy",
+  "https_proxy",
+  "no_proxy",
+  "NODE_EXTRA_CA_CERTS",
+  "SSL_CERT_FILE",
+  "SSL_CERT_DIR",
+];
+
 // --- Process runner (injected in tests; no test spawns a process) ---
 
 export type RunResult =
   | { ok: true; stdout: string }
   | { ok: false; kind: "missing" | "timeout" | "failed"; message: string };
 
-export type ProcessRunner = (
-  args: readonly string[],
-  options: { timeoutMs: number },
-) => Promise<RunResult>;
+export interface RunOptions {
+  timeoutMs: number;
+  /** A directory with nothing in it, so the child discovers no project config of its own. */
+  cwd: string;
+}
+
+export type ProcessRunner = (args: readonly string[], options: RunOptions) => Promise<RunResult>;
 
 const execFileAsync = promisify(execFile);
 
@@ -94,13 +142,12 @@ function firstLine(value: string): string {
   return line.length > REASON_MAX_CHARS ? `${line.slice(0, REASON_MAX_CHARS)}...` : line;
 }
 
-/** Spawns `claude` directly, never through a shell, with stdin closed. */
-export const runClaudeCli: ProcessRunner = async (args, { timeoutMs }) => {
-  // Claude Code refuses to start when it thinks it is nested inside another session, so the
-  // markers that say so are dropped from the child's environment.
-  const env = { ...process.env };
-  for (const marker of ["CLAUDECODE", "CLAUDE_CODE_SSE_PORT", "CLAUDE_CODE_ENTRYPOINT"]) {
-    delete env[marker];
+/** Spawns `claude` directly, never through a shell, with stdin closed and a minimal environment. */
+export const runClaudeCli: ProcessRunner = async (args, { timeoutMs, cwd }) => {
+  const env: NodeJS.ProcessEnv = {};
+  for (const key of CHILD_ENV_KEYS) {
+    const value = process.env[key];
+    if (value !== undefined) env[key] = value;
   }
 
   try {
@@ -108,6 +155,7 @@ export const runClaudeCli: ProcessRunner = async (args, { timeoutMs }) => {
       timeout: timeoutMs,
       maxBuffer: 8 * 1024 * 1024,
       env,
+      cwd,
     });
     pending.child.stdin?.end();
     const { stdout } = await pending;
@@ -137,6 +185,14 @@ function singleLine(value: string): string {
     out += char.charCodeAt(0) < 0x20 ? " " : char;
   }
   return out.trim();
+}
+
+function isHttpsUrl(value: string): boolean {
+  try {
+    return new URL(value).protocol === "https:";
+  } catch {
+    return false;
+  }
 }
 
 /** A permalink has to be an https Slack URL: it is rendered as a clickable link destination. */
@@ -260,6 +316,22 @@ function keepOwnPublic(messages: SlackMessage[], config: WorklogConfig): OwnPubl
   return { kept, notMine, notPublic };
 }
 
+// --- Isolation ---
+
+/**
+ * Run something with a working directory that has nothing in it. Claude Code discovers project
+ * settings, CLAUDE.md and memory by walking up from its cwd, so the child is given a directory
+ * where there is nothing to find.
+ */
+async function withEmptyCwd<T>(body: (cwd: string) => Promise<T>): Promise<T> {
+  const cwd = await mkdtemp(join(tmpdir(), "worklog-slack-"));
+  try {
+    return await body(cwd);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+}
+
 // --- Glean server discovery ---
 
 type GleanServer = { ok: true; mcpConfig: string } | { ok: false; reason: string };
@@ -297,9 +369,10 @@ function lettersOnly(value: string): string {
  * would load every MCP server the user has, so a failure here means the source is unavailable
  * rather than a fallback to a wider child.
  */
-async function resolveGleanServer(runner: ProcessRunner): Promise<GleanServer> {
+async function resolveGleanServer(runner: ProcessRunner, cwd: string): Promise<GleanServer> {
   const result = await runner(["mcp", "get", GLEAN_MCP_SERVER], {
     timeoutMs: AVAILABILITY_TIMEOUT_MS,
+    cwd,
   });
 
   if (!result.ok) {
@@ -320,12 +393,33 @@ async function resolveGleanServer(runner: ProcessRunner): Promise<GleanServer> {
     };
   }
 
+  // A local or project-scoped entry can shadow the user's real Glean server, and a repo is a
+  // place someone else's checkout can put one. Only the user's own config is trusted here.
+  const scope = fieldFrom(result.stdout, "Scope");
+  const scopeKind = lettersOnly(scope?.split(" ")[0] ?? "");
+  if (scopeKind !== "user") {
+    return {
+      ok: false,
+      reason: `the ${GLEAN_MCP_SERVER} MCP server is configured in ${scope ?? "an unknown scope"}, not your user config, so it is not trusted here`,
+    };
+  }
+
   const type = fieldFrom(result.stdout, "Type");
   const url = fieldFrom(result.stdout, "URL");
   if ((type !== "http" && type !== "sse") || !url) {
     return {
       ok: false,
       reason: `the ${GLEAN_MCP_SERVER} MCP server is not an http or sse server, so it cannot be isolated from your other MCP servers`,
+    };
+  }
+
+  // The endpoint carries the query and returns the answer, so it has to be a real https URL.
+  // The host is deliberately not checked against a list: this is a public repo, and every
+  // company has its own Glean hostname.
+  if (!isHttpsUrl(url)) {
+    return {
+      ok: false,
+      reason: `the ${GLEAN_MCP_SERVER} MCP server endpoint is not an https URL, so it is not trusted here`,
     };
   }
 
@@ -389,6 +483,10 @@ function claudeArgs(prompt: string, mcpConfig: string): string[] {
     "--permission-mode",
     "dontAsk",
     "--tools",
+    "",
+    // Without this, user, project and local settings load in the child, and a PostToolUse hook
+    // would receive every Glean tool response.
+    "--setting-sources",
     "",
     "--strict-mcp-config",
     "--mcp-config",
@@ -574,60 +672,63 @@ function rejectionWarnings(counts: RejectionCounts): string[] {
 // --- Source ---
 
 export function createSlackSource(runner: ProcessRunner = runClaudeCli): Source {
-  async function ask(
+  function ask(
     instruction: string,
     ctx: SourceContext,
     inRange: (message: SlackMessage) => boolean,
     known: ReadonlySet<string> = new Set(),
   ): Promise<SourceBatch> {
-    const server = await resolveGleanServer(runner);
-    if (!server.ok) {
-      return emptyBatch(`Slack fetch skipped, this week has no Slack material: ${server.reason}`);
-    }
-
-    const started = Date.now();
-    const deadline = started + FETCH_BUDGET_MS;
-    const elapsed = () => `${Math.round((Date.now() - started) / 1000)}s`;
-
-    for (const retry of [false, true]) {
-      const remainingMs = deadline - Date.now();
-      if (retry && remainingMs < MIN_RETRY_MS) {
-        ctx.log?.(`slack: no time left to retry after ${elapsed()}`);
-        break;
+    return withEmptyCwd(async (cwd) => {
+      const server = await resolveGleanServer(runner, cwd);
+      if (!server.ok) {
+        return emptyBatch(`Slack fetch skipped, this week has no Slack material: ${server.reason}`);
       }
 
-      ctx.log?.(`slack: asking Glean via claude (retry=${retry}, budget=${Math.round(remainingMs / 1000)}s)`);
-      const result = await runner(claudeArgs(buildPrompt(instruction, ctx.config, retry), server.mcpConfig), {
-        timeoutMs: remainingMs,
-      });
-      if (!result.ok) {
-        return emptyBatch(`Slack fetch failed after ${elapsed()}, this week has no Slack material: ${result.message}`);
+      const started = Date.now();
+      const deadline = started + FETCH_BUDGET_MS;
+      const elapsed = () => `${Math.round((Date.now() - started) / 1000)}s`;
+
+      for (const retry of [false, true]) {
+        const remainingMs = deadline - Date.now();
+        if (retry && remainingMs < MIN_RETRY_MS) {
+          ctx.log?.(`slack: no time left to retry after ${elapsed()}`);
+          break;
+        }
+
+        ctx.log?.(`slack: asking Glean via claude (retry=${retry}, budget=${Math.round(remainingMs / 1000)}s)`);
+        const result = await runner(claudeArgs(buildPrompt(instruction, ctx.config, retry), server.mcpConfig), {
+          timeoutMs: remainingMs,
+          cwd,
+        });
+        if (!result.ok) {
+          return emptyBatch(`Slack fetch failed after ${elapsed()}, this week has no Slack material: ${result.message}`);
+        }
+
+        const parsed = extractMessages(result.stdout);
+        if (parsed === null) continue;
+
+        const { messages, malformed } = parsed;
+        const { kept: mine, notMine, notPublic } = keepOwnPublic(messages, ctx.config);
+        const { kept, outOfRange } = select(mine, inRange, known);
+
+        ctx.log?.(
+          `slack: finished in ${elapsed()} — ${kept.length} kept, ${notPublic} not public, ` +
+            `${notMine} not yours, ${malformed} malformed, ${outOfRange} outside the range`,
+        );
+        return toBatch(kept, rejectionWarnings({ malformed, notMine, notPublic, outOfRange }));
       }
 
-      const parsed = extractMessages(result.stdout);
-      if (parsed === null) continue;
-
-      const { messages, malformed } = parsed;
-      const { kept: mine, notMine, notPublic } = keepOwnPublic(messages, ctx.config);
-      const { kept, outOfRange } = select(mine, inRange, known);
-
-      ctx.log?.(
-        `slack: finished in ${elapsed()} — ${kept.length} kept, ${notPublic} not public, ` +
-          `${notMine} not yours, ${malformed} malformed, ${outOfRange} outside the range`,
+      return emptyBatch(
+        `Slack fetch returned no usable JSON after ${elapsed()}, this week has no Slack material.`,
       );
-      return toBatch(kept, rejectionWarnings({ malformed, notMine, notPublic, outOfRange }));
-    }
-
-    return emptyBatch(
-      `Slack fetch returned no usable JSON after ${elapsed()}, this week has no Slack material.`,
-    );
+    });
   }
 
   return {
     name: SLACK_SOURCE_NAME,
 
     async isAvailable(_ctx: SourceContext): Promise<SourceAvailability> {
-      const server = await resolveGleanServer(runner);
+      const server = await withEmptyCwd((cwd) => resolveGleanServer(runner, cwd));
       return server.ok ? { ok: true } : { ok: false, reason: server.reason };
     },
 

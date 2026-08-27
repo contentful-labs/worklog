@@ -93,13 +93,17 @@ does not rely on that alone. Every message the model returns is checked locally 
 your work log, and anything that fails is dropped with a count in a warning:
 
 - the channel type must be `public`;
-- the author must match your `profile.fullName` or `profile.displayName` (compared on letters and
-  digits only, so `@first.last` and `First Last` count as the same person);
+- the author must match your `profile.fullName` or `profile.displayName` in full (compared on
+  letters and digits only, so `@first.last` and `First Last` count as the same person, while a
+  longer name that merely starts with yours does not);
 - the permalink must be an `https` URL on `slack.com`.
 
 This is a second check on top of Glean's own permissions, not a guarantee. It is best-effort:
-it depends on the metadata Glean returns and on the model reporting it faithfully. If your own
-messages go missing, the likely cause is `profile.displayName` not matching your Slack name —
+it depends on the metadata Glean returns and on the model reporting it faithfully. It also
+compares names, not Slack member ids, so a colleague whose name normalises to the same string as
+yours — `@mary.jane` against a `Mary Jane` — would pass the author check; Glean does not reliably
+expose member ids, so there is nothing better to compare against today. If your own messages go
+missing, the likely cause is `profile.displayName` not matching your Slack name —
 `worklog configure profile` fixes that.
 
 ### What leaves your machine
@@ -109,10 +113,15 @@ When the Slack source runs, worklog starts a `claude` subprocess and sends it yo
 that to Anthropic, and the Glean MCP server sees the searches it makes on your behalf. Message
 text comes back the same way and is written into your local work log. Nothing else is sent.
 
-The subprocess is locked down because its input is Slack text anyone can write: it runs with
-every built-in tool removed (`--tools ""`) and with only the Glean MCP server loaded
-(`--strict-mcp-config`), so an instruction hidden in a message has no file, shell, browser or
-other MCP tool to reach for. Verified against Claude Code 2.1.246.
+The subprocess is locked down because its input is Slack text anyone can write. It runs with
+every built-in tool removed (`--tools ""`), with only the Glean MCP server loaded
+(`--strict-mcp-config`), with no settings files read (`--setting-sources ""`, so none of your
+hooks see the Glean traffic), in an empty temporary directory, and with an environment cut down
+to what it needs to authenticate and reach the network. An instruction hidden in a message has no
+file, shell, browser or other MCP tool to reach for. Verified against Claude Code 2.1.246.
+
+Your Glean MCP server also has to be configured in your own user config over `https`; a
+project-scoped or local entry, which a checked-out repository could supply, is refused.
 
 Use `--no-slack`, or disconnect `glean_default`, if you would rather none of that happen.
 

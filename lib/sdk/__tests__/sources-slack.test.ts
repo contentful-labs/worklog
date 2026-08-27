@@ -1,4 +1,6 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
+import { existsSync, readdirSync } from "node:fs";
+import { tmpdir } from "node:os";
 import {
   createSlackSource,
   slackMessagesFrom,
@@ -6,6 +8,7 @@ import {
   type RunResult,
   type SlackMessage,
 } from "../sources/slack";
+import type { RunOptions } from "../sources/slack";
 import type { SourceContext } from "../sources";
 import type { WorklogConfig } from "../types";
 
@@ -33,11 +36,15 @@ const WINDOW = {
 
 const MCP_URL = "https://example.glean.example/mcp/default";
 
-/** What `claude mcp get glean_default` prints for a healthy http server. */
-function mcpStatus(status: string, extra = `  Type: http\n  URL: ${MCP_URL}\n`): RunResult {
+/** What `claude mcp get glean_default` prints. Shaped like the real output, field by field. */
+function mcpStatus(
+  status: string,
+  extra = `  Type: http\n  URL: ${MCP_URL}\n`,
+  scope = "User config (available in all your projects)",
+): RunResult {
   return {
     ok: true,
-    stdout: `glean_default:\n  Scope: User config (available in all your projects)\n  Status: ${status}\n${extra}`,
+    stdout: `glean_default:\n  Scope: ${scope}\n  Status: ${status}\n${extra}`,
   };
 }
 
@@ -57,19 +64,21 @@ function message(overrides: Partial<SlackMessage> = {}): SlackMessage {
 }
 
 /** Records the calls it was given and replays a queued result per call. */
-function fakeRunner(results: RunResult[]): ProcessRunner & { calls: string[][] } {
+function fakeRunner(results: RunResult[]): ProcessRunner & { calls: string[][]; options: RunOptions[] } {
   const calls: string[][] = [];
-  const runner: ProcessRunner = async (args) => {
+  const options: RunOptions[] = [];
+  const runner: ProcessRunner = async (args, opts) => {
     calls.push([...args]);
+    options.push({ ...opts });
     const next = results.shift();
     if (!next) throw new Error("fake runner ran out of queued results");
     return next;
   };
-  return Object.assign(runner, { calls });
+  return Object.assign(runner, { calls, options });
 }
 
 /** A fetch runner: the MCP status probe first, then the queued `claude --print` replies. */
-function fetchRunner(...replies: RunResult[]): ProcessRunner & { calls: string[][] } {
+function fetchRunner(...replies: RunResult[]): ProcessRunner & { calls: string[][]; options: RunOptions[] } {
   return fakeRunner([MCP_CONNECTED, ...replies]);
 }
 
@@ -139,6 +148,29 @@ describe("slack source availability", () => {
     if (!result.ok) expect(result.reason).toContain("No MCP server found");
   });
 
+  it("rejects a server configured outside the user's own config", async () => {
+    const local = mcpStatus("✔ Connected", `  Type: http\n  URL: ${MCP_URL}\n`, "Local config (private to you in this project)");
+    const result = await createSlackSource(fakeRunner([local])).isAvailable(ctx);
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toContain("not your user config");
+  });
+
+  it("rejects a plain http endpoint", async () => {
+    const insecure = mcpStatus("✔ Connected", "  Type: http\n  URL: http://example.glean.example/mcp/default\n");
+    const result = await createSlackSource(fakeRunner([insecure])).isAvailable(ctx);
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toContain("not an https URL");
+  });
+
+  it("rejects an endpoint that is not a URL at all", async () => {
+    const nonsense = mcpStatus("✔ Connected", "  Type: http\n  URL: not-a-url\n");
+    const result = await createSlackSource(fakeRunner([nonsense])).isAvailable(ctx);
+
+    expect(result.ok).toBe(false);
+  });
+
   it("is unavailable when the server cannot be isolated from other MCP servers", async () => {
     const stdio = mcpStatus("✔ Connected", "  Type: stdio\n  Command: glean-mcp\n");
     const result = await createSlackSource(fakeRunner([stdio])).isAvailable(ctx);
@@ -170,6 +202,30 @@ describe("slack source child process isolation", () => {
     expect(args[args.indexOf("--allowedTools") + 1]).toBe(
       "mcp__glean_default__search,mcp__glean_default__chat,mcp__glean_default__read_document",
     );
+
+    // No settings file loads, so a PostToolUse hook cannot see the Glean tool responses.
+    expect(args[args.indexOf("--setting-sources") + 1]).toBe("");
+  });
+
+  it("runs the child in a fresh empty directory and removes it afterwards", async () => {
+    const runner = fetchRunner(json([]));
+
+    let observed: string | undefined;
+    const watching: ProcessRunner = async (args, opts) => {
+      observed ??= opts.cwd;
+      // Nothing to discover: no CLAUDE.md, no .claude directory, no settings.
+      expect(readdirSync(opts.cwd)).toEqual([]);
+      return runner(args, opts);
+    };
+
+    await createSlackSource(watching).fetchWindow(WINDOW, ctx);
+
+    expect(observed).toBeDefined();
+    expect(observed?.startsWith(tmpdir())).toBe(true);
+    expect(observed).not.toBe(process.cwd());
+    // Both the status probe and the fetch share the one directory.
+    expect(new Set(runner.options.map((o) => o.cwd)).size).toBe(1);
+    expect(existsSync(observed!)).toBe(false);
   });
 
   it("asks for structured output against a schema derived from the message schema", async () => {
@@ -349,6 +405,19 @@ describe("slack source local enforcement", () => {
 
     expect(batch.events).toHaveLength(2);
     expect(batch.warnings).toEqual([]);
+  });
+
+  it("requires the whole name to match, so a longer name is not admitted by its prefix", async () => {
+    const runner = fetchRunner(
+      json([
+        message({ author: "Test Userson" }),
+        message({ permalink: "https://example.slack.com/archives/C1/p2", author: "test" }),
+      ]),
+    );
+    const batch = await createSlackSource(runner).fetchWindow(WINDOW, ctx);
+
+    expect(batch.events).toEqual([]);
+    expect(batch.warnings.join(" ")).toContain("2 message(s) written by someone else");
   });
 
   it("drops private and DM messages even when the model was told to exclude them", async () => {
