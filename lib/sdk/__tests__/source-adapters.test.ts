@@ -162,7 +162,7 @@ describe("jiraSource", () => {
     const batch = await jiraSource(() => NOW).fetchWindow(window, ctx);
 
     expect(seenJql[0]).toBe(
-      '(assignee = "user@example.com" OR reporter = "user@example.com") AND updated >= "2026-03-02" AND updated <= "2026-03-08" ORDER BY updated DESC',
+      '(assignee = "user@example.com" OR reporter = "user@example.com") AND created <= "2026-03-08" AND updated >= "2026-03-02" ORDER BY updated DESC',
     );
 
     expect(batch.snapshots).toHaveLength(1);
@@ -219,13 +219,14 @@ describe("jiraSource", () => {
   });
 
   it("marks an issue with no datable change as spotted at the clock", async () => {
+    // No `updated` at all: something moved this issue into the search results and Jira
+    // will not say when, so the only honest date is the one we found it on.
     const undateable = {
       key: "TEAM-9999",
       fields: {
         summary: "Search Revamp rollout",
         status: { name: "Done" },
         created: "2026-01-05T09:00:00.000+0000",
-        updated: "2026-01-05T09:00:00.000+0000",
       },
     };
     server.use(http.post(`${BASE_URL}/rest/api/3/search/jql`, () => HttpResponse.json({ issues: [undateable] })));
@@ -412,7 +413,7 @@ describe("confluenceSource", () => {
 
     const batch = await confluenceSource(() => NOW).fetchWindow(window, makeContext());
 
-    expect(seenCql[0]).toBe(`contributor = "${ACCOUNT_ID}" AND type = page AND lastModified >= "2026-03-02" AND lastModified <= "2026-03-08"`);
+    expect(seenCql[0]).toBe(`contributor = "${ACCOUNT_ID}" AND type = page AND created <= "2026-03-08" AND lastModified >= "2026-03-02"`);
     expect(seenCql[1]).toBe(`type = comment AND creator = "${ACCOUNT_ID}" AND created >= "2026-03-02" AND created <= "2026-03-08"`);
 
     expect(batch.snapshots).toHaveLength(1);
@@ -623,7 +624,7 @@ describe("githubSource", () => {
 
     const batch = await githubSource(() => NOW).fetchWindow(window, makeContext());
 
-    expect(seenQueries[0]).toBe(`type:pr author:${USERNAME} org:example-org updated:2026-03-02..2026-03-08`);
+    expect(seenQueries[0]).toBe(`type:pr author:${USERNAME} org:example-org created:<=2026-03-08 updated:>=2026-03-02`);
     expect(seenQueries[1]).toBe(`type:pr reviewed-by:${USERNAME} org:example-org updated:2026-03-02..2026-03-08`);
 
     expect(batch.snapshots[0]).toMatchObject({
@@ -753,8 +754,11 @@ describe("githubSource", () => {
     expect(findEvent(batch.events, "review")?.at).toBe("2026-03-07T09:00:00.000Z");
     expect(findEvent(batch.events, "merged")?.at).toBe("2026-03-08T10:00:00.000Z");
 
-    expect(ctx.store.get("https://api.github.com/repos/example-org/repo/pulls/42/reviews")).toBe('"reviews-v2"');
-    expect(ctx.store.get("https://api.github.com/repos/example-org/repo/pulls/42")).toBe('"pr-v2"');
+    // Keyed by the watermark too: an ETag earned while scanning from 6 March says
+    // nothing about a scan that starts earlier.
+    const scope = `|since:${since.toISOString()}`;
+    expect(ctx.store.get(`https://api.github.com/repos/example-org/repo/pulls/42/reviews?per_page=100&page=1${scope}`)).toBe('"reviews-v2"');
+    expect(ctx.store.get(`https://api.github.com/repos/example-org/repo/pulls/42${scope}`)).toBe('"pr-v2"');
   });
 
   it("sends the stored ETag and does nothing at all with a 304", async () => {
@@ -772,11 +776,13 @@ describe("githubSource", () => {
       }),
     );
 
+    const since = new Date("2026-03-06T00:00:00Z");
+    const scope = `|since:${since.toISOString()}`;
     const ctx = makeContext();
-    ctx.store.set("https://api.github.com/repos/example-org/repo/pulls/42/reviews", '"reviews-v1"');
-    ctx.store.set("https://api.github.com/repos/example-org/repo/pulls/42", '"pr-v1"');
+    ctx.store.set(`https://api.github.com/repos/example-org/repo/pulls/42/reviews?per_page=100&page=1${scope}`, '"reviews-v1"');
+    ctx.store.set(`https://api.github.com/repos/example-org/repo/pulls/42${scope}`, '"pr-v1"');
 
-    const batch = await githubSource(() => NOW).fetchSince(new Date("2026-03-06T00:00:00Z"), [PR_URL], ctx);
+    const batch = await githubSource(() => NOW).fetchSince(since, [PR_URL], ctx);
 
     expect(sentHeaders).toEqual(['"reviews-v1"', '"pr-v1"']);
     expect(batch.events).toHaveLength(0);
@@ -885,7 +891,7 @@ describe("lifecycle events a week did not open in", () => {
     const secondWeek: SourceWindow = { start: new Date("2026-03-09T00:00:00Z"), end: new Date("2026-03-15T23:59:59Z") };
     const batch = await githubSource(() => NOW).fetchWindow(secondWeek, makeContext());
 
-    expect(seenQueries[0]).toContain("updated:2026-03-09..2026-03-15");
+    expect(seenQueries[0]).toContain("created:<=2026-03-15 updated:>=2026-03-09");
     expect(kinds(batch.events)).toEqual(["merged"]);
     expect(findEvent(batch.events, "merged")?.at).toBe("2026-03-11T09:00:00.000Z");
   });
