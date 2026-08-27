@@ -144,6 +144,12 @@ export const focusTrackingContent = [
   }),
 ].join("\n");
 
+/**
+ * `My Focus.md` at its real shape. The engineer's own document: priorities in prose, plus one
+ * tracking table of 128 rows that is most of the file's bytes and none of its meaning.
+ */
+const FOCUS_DOC_TABLE_ROWS = 128;
+
 export const focusDocContent = [
   "# My Focus",
   "",
@@ -154,6 +160,35 @@ export const focusDocContent = [
   "## P1 - Influence & Shape",
   "",
   lines(8, (i) => `- Current P1 item ${i}`),
+  "",
+  "## Tracking",
+  "",
+  "Everything in flight, kept here because it has to live somewhere.",
+  "",
+  "| Item | Owner | Status | Updated | Notes |",
+  "|---|---|---|---|---|",
+  lines(
+    FOCUS_DOC_TABLE_ROWS,
+    (i) =>
+      `| Tracked item ${i}, a piece of work someone is carrying | Owner ${i % 7} | ` +
+      `${["not started", "in progress", "blocked", "done"][i % 4]} | 2026-0${(i % 9) + 1}-01 | ` +
+      `Notes on tracked item ${i}: where it stands, who is waiting on it and what it needs next. |`,
+  ),
+  "",
+  "## People to Talk To",
+  "",
+  lines(4, (i) => `- Person ${i}, about the thing they own`),
+].join("\n");
+
+/** A small table, under the cap, that has to survive the trim untouched. */
+export const focusDocSmallTable = [
+  "# My Focus",
+  "",
+  "## Tracking",
+  "",
+  "| Item | Status |",
+  "|---|---|",
+  lines(8, (i) => `| Small item ${i} | in progress |`),
 ].join("\n");
 
 /**
@@ -220,8 +255,35 @@ export const memoryContent = [
 ].join("\n");
 
 export const profileContent = ["# Profile", "", "## Key Strengths", "", lines(60, (i) => `- Strength ${i}, observed over several weeks of work`)].join("\n");
-export const impactLogContent = ["# Impact Log", "", "## Impact Timeline", "", "| Date | Achievement | Scope | Core Value | Evidence |", "|---|---|---|---|---|",
-  lines(180, (i) => `| 2026-0${i % 9}-01 | Impact ${i} on a piece of work that mattered | Team | Craft | TEAM-${1000 + i} |`)].join("\n");
+/**
+ * An impact log the length of a career: 180 entries spread over three years, so roughly a third
+ * fall inside the 52-week window and the rest do not.
+ */
+const IMPACT_ROWS = 180;
+
+function impactRowDate(i: number): string {
+  const day = new Date("2026-03-16T00:00:00Z");
+  day.setUTCDate(day.getUTCDate() - Math.floor((i / IMPACT_ROWS) * 1095));
+  return day.toISOString().split("T")[0];
+}
+
+export const impactLogContent = [
+  "# Impact Log",
+  "",
+  "Achievements that carry weight in a review, with the evidence for them.",
+  "",
+  "## Impact Timeline",
+  "",
+  "| Date | Achievement | Scope | Core Value | Evidence |",
+  "|---|---|---|---|---|",
+  lines(
+    IMPACT_ROWS,
+    (i) => `| ${impactRowDate(i)} | Impact ${i} on a piece of work that mattered | Team | Craft | TEAM-${1000 + i} |`,
+  ),
+  "",
+  "**Last significant impact:** 2026-03-10 - Impact 0 on a piece of work that mattered",
+  "**Current gap:** None - recent entry added",
+].join("\n");
 export const coachPersona = lines(80, (i) => `Persona line ${i}, describing how the coach should sound when it speaks.`);
 export const careerContext = lines(190, (i) => `Career framework line ${i}, describing an expectation at one level of the ladder and how it is assessed.`);
 

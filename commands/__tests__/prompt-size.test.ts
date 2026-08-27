@@ -181,6 +181,32 @@ describe("brag book prompt size", () => {
     expect(memoryInputs.olderRows).toBeGreaterThan(0);
   });
 
+  it("carries the focus doc whole, minus a table that is a spreadsheet", async () => {
+    const { prompt, sections, omissions } = await buildPrompt();
+
+    expect(omissions.focusDocTablesOmitted).toBe(1);
+    expect(prompt).toContain("_(table of 128 rows omitted from the coaching prompt)_");
+    // The priorities and the prose around the table are what the coach reads.
+    expect(prompt).toContain("Current P0 item 0");
+    expect(prompt).toContain("## Tracking");
+    expect(prompt).toContain("Everything in flight, kept here because it has to live somewhere.");
+    expect(prompt).toContain("Person 0, about the thing they own");
+    expect(prompt).not.toContain("Tracked item 0,");
+    expect(sections.focusDoc).toBeLessThan(focusDocContent.length / 4);
+  });
+
+  it("carries a year of impact rows and counts the rest", async () => {
+    const { prompt, sections, omissions } = await buildPrompt();
+
+    expect(omissions.impactRowsDropped).toBeGreaterThan(0);
+    expect(prompt).toContain(`_(${omissions.impactRowsDropped} older entries not shown)_`);
+    // The gap analysis is what the coach does with this file.
+    expect(prompt).toContain("**Last significant impact:**");
+    expect(prompt).toContain("**Current gap:**");
+    expect(prompt).toContain("## Impact Timeline");
+    expect(sections.impact).toBeLessThan(impactLogContent.length);
+  });
+
   it("never carries the focus-tracking table, only what the coach acts on", async () => {
     const { prompt, sections } = await buildPrompt();
 

@@ -242,6 +242,174 @@ export function condenseMemoryNotes(content: string, fullSinceDate: string): Con
   return { content: lines.join("\n"), counts };
 }
 
+// --- Focus doc and impact log windows ---
+
+/** A markdown table found in a document, by line index. */
+interface TableBlock {
+  /** 0-based, inclusive. */
+  start: number;
+  /** 0-based, exclusive. */
+  end: number;
+  /** Absolute index of the separator row. */
+  separator: number;
+}
+
+/** `\r` when the file uses CRLF, so a line this module writes matches the ones around it. */
+function eolSuffix(line: string | undefined): string {
+  return line?.endsWith("\r") ? "\r" : "";
+}
+
+/**
+ * Every markdown table in the document, skipping anything inside a fenced block.
+ *
+ * A table is a run of consecutive pipe lines with a separator somewhere after its first line.
+ * A run without one is not a table, and is left alone.
+ */
+function findTables(lines: readonly string[]): TableBlock[] {
+  const tables: TableBlock[] = [];
+  let open: Fence | null = null;
+  let runStart = -1;
+  let separator = -1;
+
+  const flush = (end: number) => {
+    if (runStart !== -1 && separator > runStart) tables.push({ start: runStart, end, separator });
+    runStart = -1;
+    separator = -1;
+  };
+
+  for (const [i, line] of lines.entries()) {
+    const fence = readFence(line);
+    if (fence) {
+      if (!open) {
+        flush(i);
+        open = fence;
+        continue;
+      }
+      if (closesFence(open, fence)) {
+        open = null;
+        continue;
+      }
+    }
+    if (open) continue;
+
+    if (!line.trimStart().startsWith("|")) {
+      flush(i);
+      continue;
+    }
+    if (runStart === -1) runStart = i;
+    if (separator === -1 && isTableSeparator(line)) separator = i;
+  }
+
+  flush(lines.length);
+  return tables;
+}
+
+/** Above this many data rows, a focus doc table is a database rather than a priority list. */
+export const DEFAULT_FOCUS_TABLE_ROW_CAP = 20;
+
+export interface FocusDocTrim {
+  content: string;
+  /** How many tables were replaced by a placeholder. */
+  omitted: number;
+}
+
+/**
+ * Replace the large tables in the focus doc with a note saying how big they were.
+ *
+ * `My Focus.md` is the engineer's own document and the coach reads all of it, so it is carried
+ * whole. What the coach cannot use is a hundred-row tracking table someone keeps inside it: the
+ * priorities are in the prose and the headings, and the table is a spreadsheet that happens to
+ * live in a markdown file. Headings and prose survive untouched; only the rows go, and only in
+ * the prompt. The file on disk is never rewritten.
+ */
+export function omitLargeFocusTables(
+  content: string,
+  maxRows: number = DEFAULT_FOCUS_TABLE_ROW_CAP,
+): FocusDocTrim {
+  const lines = content.split("\n");
+  const placeholders = new Map<number, string>();
+  const removed = new Set<number>();
+  let omitted = 0;
+
+  for (const table of findTables(lines)) {
+    const rows = table.end - (table.separator + 1);
+    if (rows <= maxRows) continue;
+
+    omitted++;
+    placeholders.set(
+      table.start,
+      `_(table of ${rows} rows omitted from the coaching prompt)_${eolSuffix(lines[table.end - 1])}`,
+    );
+    for (let i = table.start; i < table.end; i++) removed.add(i);
+  }
+
+  if (omitted === 0) return { content, omitted };
+
+  const out: string[] = [];
+  for (const [i, line] of lines.entries()) {
+    const placeholder = placeholders.get(i);
+    if (placeholder !== undefined) out.push(placeholder);
+    if (!removed.has(i)) out.push(line);
+  }
+
+  return { content: out.join("\n"), omitted };
+}
+
+/** How far back the impact timeline reaches in the prompt. */
+export const DEFAULT_IMPACT_WINDOW_WEEKS = 52;
+
+export interface ImpactTrim {
+  content: string;
+  /** How many rows fell outside the window. */
+  dropped: number;
+}
+
+/**
+ * Keep the impact rows dated inside the window, and say how many older ones there are.
+ *
+ * The impact log is a career-length record, and the coach's job with it is the gap analysis:
+ * how long since the last significant impact, and is the pace healthy. A year of rows answers
+ * that. Rows from three years ago do not, and the ones that matter have already been promoted
+ * into a brag book. Everything that is not a dated row, which includes the last-impact and
+ * current-gap lines the schema depends on, passes through untouched.
+ *
+ * The prompt only. The writers and the cleanup still read the whole file.
+ */
+export function dropImpactRowsBefore(content: string, minDate: string): ImpactTrim {
+  const lines = content.split("\n");
+  const removed = new Set<number>();
+  const notes = new Map<number, string>();
+  let dropped = 0;
+
+  for (const table of findTables(lines)) {
+    let older = 0;
+    for (let i = table.separator + 1; i < table.end; i++) {
+      const date = scanRow(lines[i]).values[0] ?? "";
+      if (!isIsoDate(date) || date >= minDate) continue;
+      removed.add(i);
+      older++;
+    }
+    if (older === 0) continue;
+
+    dropped += older;
+    const eol = eolSuffix(lines[table.end - 1]);
+    // After the table, with a blank line, so it reads as its own paragraph rather than as a
+    // malformed row hanging off the end.
+    notes.set(table.end - 1, `${eol}\n_(${older} older entries not shown)_${eol}`);
+  }
+
+  if (dropped === 0) return { content, dropped };
+
+  const out: string[] = [];
+  for (const [i, line] of lines.entries()) {
+    if (!removed.has(i)) out.push(line);
+    const note = notes.get(i);
+    if (note !== undefined) out.push(note);
+  }
+
+  return { content: out.join("\n"), dropped };
+}
+
 // --- Prompt trimming ---
 //
 // The weekly prompt reached 254k characters, and most of it was material the coach reads past:
