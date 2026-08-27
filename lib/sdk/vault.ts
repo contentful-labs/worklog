@@ -1,7 +1,12 @@
 import { readFile, readdir, stat } from "node:fs/promises";
 import { existsSync, readFileSync } from "node:fs";
+import { unified } from "unified";
+import remarkParse from "remark-parse";
+import remarkFrontmatter from "remark-frontmatter";
+import type { Root, RootContent } from "mdast";
 import type { WorklogConfig } from "./types";
 import { weekIdForDate } from "./week-utils";
+import { canonicalText } from "./text-similarity";
 import { contractHome } from "../config";
 
 export interface VaultPaths {
@@ -127,6 +132,406 @@ export async function readCareerContext(paths: VaultPaths): Promise<string> {
   return parts.length > 0 ? parts.join("\n\n---\n\n") : "No career context available.";
 }
 
+// --- Prompt trimming ---
+//
+// The weekly prompt reached 254k characters, and most of it was material the coach reads past:
+// two prior brag books in full including their own coaching sessions, two archived focus docs in
+// full, and every organisational note ever recorded. These functions cut each input down to the
+// part that changes the coach's answer. They are pure so the trimming can be tested without a
+// vault, and they only ever remove: no input is rewritten or reordered.
+//
+// Structure comes from remark, not from scanning lines. A line scanner cannot tell a heading from
+// a `## Stats` inside a fenced example, and it cannot see a setext heading or a closing-hash one
+// at all. Each of those silently truncated a document in review.
+
+/** A top-level section: its heading node and the source lines it owns, heading included. */
+interface TopSection {
+  /** Case-folded, whitespace-collapsed heading text. */
+  heading: string;
+  depth: number;
+  /** 0-based, inclusive. */
+  startLine: number;
+  /** 0-based, exclusive. */
+  endLine: number;
+}
+
+function parseMarkdown(markdown: string): Root {
+  // Frontmatter is stripped by the plugin; without it the closing `---` of a tags block can be
+  // read as a setext underline and invent a heading.
+  return unified().use(remarkParse).use(remarkFrontmatter).parse(markdown);
+}
+
+/** Plain text of a node, so `## **Achievements**` reads the same as `## Achievements`. */
+function nodeText(node: RootContent): string {
+  if ("value" in node) return node.value;
+  if ("children" in node) return node.children.map(nodeText).join("");
+  return "";
+}
+
+function normalizeHeading(text: string): string {
+  return text.trim().toLowerCase().split(/\s+/).join(" ");
+}
+
+/**
+ * The document's top-level sections at `maxDepth` or shallower. Only headings that are direct
+ * children of the root count: one inside a fence is a code block, and one inside a blockquote
+ * belongs to the quote, so neither can cut a document short.
+ */
+function topSections(tree: Root, lineCount: number, maxDepth: number): TopSection[] {
+  const headings: Array<{ heading: string; depth: number; startLine: number }> = [];
+
+  for (const node of tree.children) {
+    if (node.type !== "heading" || node.depth > maxDepth || !node.position) continue;
+    headings.push({
+      heading: normalizeHeading(nodeText(node)),
+      depth: node.depth,
+      startLine: node.position.start.line - 1,
+    });
+  }
+
+  return headings.map((heading, i) => ({
+    ...heading,
+    endLine: headings[i + 1]?.startLine ?? lineCount,
+  }));
+}
+
+/** True for the headings that open an archived era, matching what the vault writers treat as live. */
+function isArchivedHeading(heading: string): boolean {
+  const words = heading.split(" ");
+  return words.includes("archived") || words.includes("historical");
+}
+
+/** Trailing blank lines make the joins below look ragged. */
+function trimTrailingBlanks(lines: string[]): string[] {
+  let end = lines.length;
+  while (end > 0 && lines[end - 1].trim() === "") end--;
+  return lines.slice(0, end);
+}
+
+/** The brag book sections the coach reads for continuity. Its own coaching notes are not among them. */
+const BRAG_BOOK_SUMMARY_SECTIONS = new Set(["achievements", "week in review"]);
+
+/**
+ * Reduce a brag book to what next week's coach needs from it: what was achieved, and how the week
+ * went. The rest of the document is that week's coaching session, its memory bookkeeping and its
+ * vault updates, all of which have already been applied to the vault files the prompt also
+ * carries, so injecting them says the same thing twice.
+ */
+export function extractBragBookSummary(content: string): string {
+  const lines = content.split("\n");
+  const sections = topSections(parseMarkdown(content), lines.length, 2);
+
+  const kept = sections
+    .filter((section) => BRAG_BOOK_SUMMARY_SECTIONS.has(section.heading))
+    .map((section) => trimTrailingBlanks(lines.slice(section.startLine, section.endLine)).join("\n"));
+
+  return kept.join("\n\n");
+}
+
+/** How `getBragBooks` joins the documents it returns. */
+const BRAG_BOOK_SEPARATOR = "\n\n---\n\n";
+
+/**
+ * Summarize the block of previous brag books the vault reader hands over, keeping the `### week`
+ * label that says which week each one is. A book that has neither section left contributes
+ * nothing rather than an empty heading.
+ *
+ * Input with no sections at all is passed through untouched: that is the reader's "no brag book
+ * entries found" line, not a document this could have summarized.
+ */
+export function summarizePreviousBragBooks(content: string): string {
+  const whole = parseMarkdown(content);
+  if (!whole.children.some((node) => node.type === "heading" && node.depth >= 2)) return content;
+
+  const parts: string[] = [];
+  for (const book of content.split(BRAG_BOOK_SEPARATOR)) {
+    const bookLines = book.split("\n");
+    const labels = topSections(parseMarkdown(book), bookLines.length, 3).filter((s) => s.depth === 3);
+    const labelAt = labels[0]?.startLine ?? -1;
+    const label = labelAt === -1 ? "" : bookLines[labelAt];
+    const summary = extractBragBookSummary(bookLines.slice(labelAt + 1).join("\n"));
+    if (!summary.trim()) continue;
+    parts.push(label ? `${label}\n\n${summary}` : summary);
+  }
+
+  return parts.join(BRAG_BOOK_SEPARATOR);
+}
+
+/** Words a focus doc's author writes when an item is finished with, whatever the outcome. */
+const CLOSED_MARKERS = new Set(["done", "dropped", "shipped", "abandoned", "cancelled", "canceled"]);
+
+/** Leading emphasis and list punctuation, so `**DONE**` and `DONE:` read the same. */
+function firstWordOf(body: string): string {
+  let word = "";
+  for (const char of body) {
+    const lower = char.toLowerCase();
+    if (lower >= "a" && lower <= "z") word += lower;
+    else if (word.length > 0) break;
+    else if (char !== "*" && char !== "_" && char !== "~" && char !== "[" && char !== " ") break;
+  }
+  return word;
+}
+
+/**
+ * An item its author has closed off: a ticked box, a strikethrough, or a marker word.
+ *
+ * The literal `[x]` is checked as well as mdast's `checked`, because remark is used here without
+ * the GFM plugin, so a task list arrives as plain text with the brackets still in it.
+ */
+function isClosedItem(text: string, checked: boolean | null | undefined): boolean {
+  if (checked === true) return true;
+  const body = text.trimStart();
+  if (body.startsWith("[x]") || body.startsWith("[X]")) return true;
+  if (body.startsWith("~~")) return true;
+  return CLOSED_MARKERS.has(firstWordOf(body));
+}
+
+/** An open item and the archived documents it survived unchanged in. */
+interface CarriedItem {
+  text: string;
+  labels: string[];
+}
+
+const CARRIED_ITEMS_HEADING = "## Open items carried across archived focus docs";
+
+/**
+ * Reduce archived focus docs to a record of what changed. Their headings and closed-off items are
+ * kept as written. Their open items are collapsed into one deduplicated list of item text with the
+ * archives it appeared in, which is what the prompt's stale-item rule needs: an item sitting
+ * unchanged across several versions is either blocked or being avoided, and the coach can only see
+ * that if the repetition survives the trim.
+ *
+ * Deduplication is by `canonicalText`, so a reworded bullet counts as the same item.
+ */
+export function summarizeArchivedFocusDocs(content: string): string {
+  const lines = content.split("\n");
+  const tree = parseMarkdown(content);
+
+  const kept: string[] = [];
+  const carried = new Map<string, CarriedItem>();
+  let label = "";
+
+  for (const node of tree.children) {
+    if (!node.position) continue;
+
+    if (node.type === "heading") {
+      kept.push(...lines.slice(node.position.start.line - 1, node.position.end.line));
+      const archived = archiveLabel(nodeText(node));
+      if (archived !== null) label = archived;
+      continue;
+    }
+
+    if (node.type !== "list") continue;
+
+    for (const item of node.children) {
+      if (!item.position) continue;
+      const text = nodeText(item).trim();
+      if (!text) continue;
+
+      if (isClosedItem(text, item.checked)) {
+        kept.push(...lines.slice(item.position.start.line - 1, item.position.end.line));
+        continue;
+      }
+
+      const key = canonicalText(text);
+      if (!key) continue;
+      const existing = carried.get(key);
+      if (existing) {
+        if (!existing.labels.includes(label)) existing.labels.push(label);
+      } else {
+        carried.set(key, { text: firstLineOf(text), labels: [label] });
+      }
+    }
+  }
+
+  const openLines = [...carried.values()].map((item) => {
+    const labels = [...item.labels].filter(Boolean).sort();
+    const seen = labels.length === 0
+      ? ""
+      : labels.length === 1
+        ? ` _(seen in ${labels[0]})_`
+        : ` _(first seen ${labels[0]}, last seen ${labels[labels.length - 1]})_`;
+    return `- ${item.text}${seen}`;
+  });
+
+  const out = trimTrailingBlanks(kept);
+  if (openLines.length > 0) out.push("", CARRIED_ITEMS_HEADING, "", ...openLines);
+  return out.join("\n");
+}
+
+/**
+ * The label of an archive boundary, or null for any other heading.
+ *
+ * `readArchivedFocusDocs` above is the only producer of these, and it always writes
+ * `### Focus Doc archived <label>`. Matching that exact prefix matters: a focus doc of its own
+ * with `### Blocked` and `### In progress` subheadings otherwise re-labels every item under them,
+ * and an item ends up "first seen Blocked, last seen In progress".
+ *
+ * `<label>` is the date from the filename, or the filename itself when it does not parse.
+ */
+function archiveLabel(headingText: string): string | null {
+  const prefix = "focus doc archived ";
+  const collapsed = headingText.trim().split(/\s+/).join(" ");
+  if (!collapsed.toLowerCase().startsWith(prefix)) return null;
+  return collapsed.slice(prefix.length).trim() || null;
+}
+
+/** A list item can span several lines; the carried list keeps one line per item. */
+function firstLineOf(text: string): string {
+  const newline = text.indexOf("\n");
+  return newline === -1 ? text : text.slice(0, newline).trim();
+}
+
+/** How many organisational notes the prompt carries before the rest are older than useful. */
+export const DEFAULT_ORG_NOTE_CAP = 40;
+
+const ORG_NOTES_HEADING = "organizational notes";
+
+/**
+ * Trim work-context to its live region and cap the organisational notes. The vault writer inserts
+ * new notes at the top of that section, so the first N are the most recent. Everything else in the
+ * file, the core values and the review cycle, is carried whole: it is short and the coach uses all
+ * of it.
+ *
+ * The file on disk is untouched. This only decides what the prompt carries.
+ */
+export function capOrganizationalNotes(content: string, cap: number = DEFAULT_ORG_NOTE_CAP): string {
+  const lines = content.split("\n");
+  const tree = parseMarkdown(content);
+  const sections = topSections(tree, lines.length, 2);
+
+  const archivedAt = sections.find((section) => isArchivedHeading(section.heading));
+  const liveEnd = archivedAt?.startLine ?? lines.length;
+
+  const notes = sections.find((section) => section.heading === ORG_NOTES_HEADING);
+  const dropped: Array<{ start: number; end: number }> = [];
+  let bullets = 0;
+
+  if (notes) {
+    for (const node of tree.children) {
+      if (node.type !== "list" || !node.position) continue;
+      const nodeStart = node.position.start.line - 1;
+      if (nodeStart < notes.startLine || nodeStart >= Math.min(notes.endLine, liveEnd)) continue;
+
+      for (const item of node.children) {
+        if (!item.position) continue;
+        bullets++;
+        if (bullets > cap) {
+          dropped.push({ start: item.position.start.line - 1, end: item.position.end.line });
+        }
+      }
+    }
+  }
+
+  const omitted = new Set<number>();
+  for (const range of dropped) {
+    for (let i = range.start; i < range.end; i++) omitted.add(i);
+  }
+
+  const out = lines.slice(0, liveEnd).filter((_, i) => !omitted.has(i));
+  const trimmed = trimTrailingBlanks(out);
+  if (bullets <= cap) return trimmed.join("\n");
+  return [...trimmed, "", `_${bullets - cap} older organisational note(s) omitted from this prompt._`].join("\n");
+}
+
+/** How many vault notes the prompt carries, and how much of each. */
+export const DEFAULT_VAULT_NOTE_CAP = 10;
+export const DEFAULT_VAULT_NOTE_LINES = 20;
+
+export interface VaultNote {
+  title: string;
+  excerpt: string;
+}
+
+/** Letters and digits are the body of an identifier; anything else ends one. */
+function isIdentifierChar(char: string | undefined): boolean {
+  if (char === undefined) return false;
+  return (char >= "0" && char <= "9") || (char >= "A" && char <= "Z") || (char >= "a" && char <= "z");
+}
+
+/**
+ * Does `haystack` contain `needle` as a whole identifier? Substring matching made `STEAM-123` a
+ * hit for `TEAM-123`, and let a `TEAM-12` term score every `TEAM-123` note ahead of the real one.
+ * Both strings are expected uppercase already.
+ */
+export function containsIdentifier(haystack: string, needle: string): boolean {
+  if (!needle) return false;
+  let from = haystack.indexOf(needle);
+  while (from !== -1) {
+    const before = from === 0 ? undefined : haystack[from - 1];
+    const after = haystack[from + needle.length];
+    if (!isIdentifierChar(before) && !isIdentifierChar(after)) return true;
+    from = haystack.indexOf(needle, from + 1);
+  }
+  return false;
+}
+
+/**
+ * Identifiers from this week's work log: ticket keys built from the configured prefixes, and the
+ * `#123` of a pull request. Scanned character by character rather than matched with a regex,
+ * because this reads a generated document and a regex over file content is what CodeQL flags.
+ *
+ * A key only counts on identifier boundaries, so `STEAM-123` is not a `TEAM` ticket.
+ */
+export function collectWorkTerms(workLogContent: string, ticketPrefixes: string[]): string[] {
+  const terms = new Set<string>();
+  const prefixes = ticketPrefixes.map((p) => p.toUpperCase()).filter(Boolean);
+  const upper = workLogContent.toUpperCase();
+
+  for (const prefix of prefixes) {
+    const needle = `${prefix}-`;
+    let from = upper.indexOf(needle);
+    while (from !== -1) {
+      const before = from === 0 ? undefined : upper[from - 1];
+      let end = from + needle.length;
+      while (end < upper.length && upper[end] >= "0" && upper[end] <= "9") end++;
+      const digits = end > from + needle.length;
+      if (digits && !isIdentifierChar(before) && !isIdentifierChar(upper[end])) {
+        terms.add(upper.slice(from, end));
+      }
+      from = upper.indexOf(needle, from + 1);
+    }
+  }
+
+  for (let i = 0; i < workLogContent.length; i++) {
+    if (workLogContent[i] !== "#") continue;
+    let end = i + 1;
+    while (end < workLogContent.length && workLogContent[end] >= "0" && workLogContent[end] <= "9") end++;
+    if (end > i + 1 && !isIdentifierChar(workLogContent[end])) terms.add(workLogContent.slice(i, end));
+  }
+
+  return [...terms];
+}
+
+/**
+ * Pick the vault notes most likely to be about this week. Modification time alone put whatever the
+ * engineer touched last at the top, which is often unrelated; a note that names one of the week's
+ * tickets or pull requests is about the week whenever it was saved. Ties keep the order they came
+ * in, which is still most-recently-modified first.
+ *
+ * Every candidate is scored before anything is dropped: capping first threw away the one relevant
+ * note in a week with more recent noise.
+ */
+export function rankVaultNotes(
+  notes: readonly VaultNote[],
+  terms: readonly string[],
+  cap: number = DEFAULT_VAULT_NOTE_CAP,
+): VaultNote[] {
+  const needles = terms.map((t) => t.toUpperCase()).filter(Boolean);
+
+  const scored = notes.map((note, index) => {
+    const haystack = `${note.title}\n${note.excerpt}`.toUpperCase();
+    let score = 0;
+    for (const needle of needles) {
+      if (containsIdentifier(haystack, needle)) score++;
+    }
+    return { note, index, score };
+  });
+
+  scored.sort((a, b) => (b.score - a.score) || (a.index - b.index));
+  return scored.slice(0, cap).map((s) => s.note);
+}
+
 const FIXED_FILES = new Set([
   "memory.md", "my-profile.md", "work-context.md", "impact-log.md",
   "coach-persona.md", "focus-tracking.md", "My Focus.md",
@@ -142,13 +547,29 @@ const WORK_KEYWORDS = [
   "onboarding", "offboarding", "handover", "runbook", "postmortem",
 ];
 
+/**
+ * The ticket prefixes in force for a given week. A historical week belongs to whichever team the
+ * timeline says it did, and that team may have used prefixes the current profile no longer lists.
+ * Falls back to the profile when the timeline entry has none.
+ */
+export function ticketPrefixesForWeek(
+  /** Only the prefixes are read, so a caller can pass anything carrying them. */
+  config: { profile: Pick<WorklogConfig["profile"], "ticketPrefixes"> },
+  teamEntry: TeamTimelineEntry | undefined,
+): string[] {
+  const fromTimeline = teamEntry?.ticketPrefixes ?? [];
+  return fromTimeline.length > 0 ? fromTimeline : config.profile.ticketPrefixes;
+}
+
 export async function discoverWeeklyNotes(
   config: WorklogConfig,
   paths: VaultPaths,
   startDate: Date,
   endDate: Date,
-): Promise<Array<{ title: string; excerpt: string }>> {
-  const prefixes = config.profile.ticketPrefixes.map(p => p.toLowerCase());
+  /** Optional so existing callers keep working; pass the week's team prefixes for a past week. */
+  ticketPrefixes: string[] = config.profile.ticketPrefixes,
+): Promise<VaultNote[]> {
+  const prefixes = ticketPrefixes.map(p => p.toLowerCase());
   const configTerms = [config.profile.company, config.profile.team, config.profile.teamDomain]
     .filter(Boolean)
     .map(t => t.toLowerCase());
@@ -180,15 +601,18 @@ export async function discoverWeeklyNotes(
     if (!isRelevant) continue;
 
     const content = await readFile(filePath, "utf-8");
-    const lines = content.split("\n").slice(0, 30);
+    const lines = content.split("\n").slice(0, DEFAULT_VAULT_NOTE_LINES);
     const excerpt = lines.join("\n").trim();
     const title = file.replace(/\.md$/, "");
 
     candidates.push({ title, excerpt, mtime });
   }
 
+  // Most-recently-modified first, and every qualifying note is returned. The caller scores these
+  // and keeps ten; cutting the list here first threw away the one relevant note in a week whose
+  // other twenty-five were noise.
   candidates.sort((a, b) => b.mtime - a.mtime);
-  return candidates.slice(0, 25).map(({ title, excerpt }) => ({ title, excerpt }));
+  return candidates.map(({ title, excerpt }) => ({ title, excerpt }));
 }
 
 export interface ReadTeamTimelineOptions {

@@ -25,6 +25,12 @@ import {
   formatTeamTimelineForPrompt,
   getCurrentTeam,
   discoverWeeklyNotes,
+  capOrganizationalNotes,
+  collectWorkTerms,
+  rankVaultNotes,
+  summarizeArchivedFocusDocs,
+  summarizePreviousBragBooks,
+  ticketPrefixesForWeek,
   type TeamTimeline,
 } from "../lib/sdk/vault";
 import {
@@ -425,7 +431,40 @@ function getEnvTokens(): { apiToken: string; githubToken: string } {
 const PROMPT_TEMPLATE_PATH = new URL("../prompts/weekly-brag-prompt.md", import.meta.url).pathname;
 const WRITING_STYLE_PATH = new URL("../prompts/_writing-style.md", import.meta.url).pathname;
 
-async function buildBragBookPrompt(
+/**
+ * Characters each part of the prompt contributes. Reported under `--verbose` so the next person
+ * to look at prompt size can see where the bytes actually go instead of guessing.
+ */
+export interface PromptSectionSizes {
+  /** The prompt file and the writing style guide, both fixed. */
+  template: number;
+  /** XML wrappers, the review-proximity block and the generation context. */
+  framing: number;
+  persona: number;
+  profile: number;
+  context: number;
+  impact: number;
+  memory: number;
+  priorBrags: number;
+  focus: number;
+  career: number;
+  notes: number;
+  worklog: number;
+}
+
+export interface BuiltPrompt {
+  prompt: string;
+  sections: PromptSectionSizes;
+}
+
+export function formatPromptBreakdown(sections: PromptSectionSizes): string {
+  const parts = Object.entries(sections)
+    .sort(([, a], [, b]) => b - a)
+    .map(([name, chars]) => `${name} ${(chars / 1000).toFixed(1)}k`);
+  return `Prompt breakdown: ${parts.join(", ")}`;
+}
+
+export async function buildBragBookPrompt(
   workLogContent: string,
   previousBragBooks: string,
   workContextContent: string,
@@ -443,7 +482,7 @@ async function buildBragBookPrompt(
   timeline: TeamTimeline,
   weekInfo: WeekInfo | undefined,
   config: Parameters<typeof buildConfigContext>[0],
-): Promise<string> {
+): Promise<BuiltPrompt> {
   const [rawPromptTemplate, writingStyle] = await Promise.all([
     Bun.file(PROMPT_TEMPLATE_PATH).text(),
     Bun.file(WRITING_STYLE_PATH).text(),
@@ -459,8 +498,20 @@ async function buildBragBookPrompt(
     writing_style: writingStyle,
   });
 
-  const vaultNotesSection = vaultNotes.length > 0
-    ? `\n---\n\n<vault_research_notes>\nThese are work-related notes from the engineer's vault that were created or updated this week.\nThey provide additional context about research, meetings, and work that may not appear in Jira/GitHub/Confluence.\n\n${vaultNotes.map((n) => `### ${n.title}\n${n.excerpt}`).join("\n\n")}\n</vault_research_notes>`
+  // Trimming happens here rather than in the readers: the vault files are read whole by other
+  // callers, and what the prompt carries is a decision about the prompt.
+  const trimmedWorkContext = capOrganizationalNotes(workContextContent);
+  const trimmedBragBooks = summarizePreviousBragBooks(previousBragBooks);
+  const trimmedFocusHistory = summarizeArchivedFocusDocs(focusHistoryContent);
+  // The week's own team prefixes, not today's. A historical week whose team used `OLD` scores
+  // nothing against the current profile, and its one relevant note falls off the end of the cap.
+  const rankedNotes = rankVaultNotes(
+    vaultNotes,
+    collectWorkTerms(workLogContent, ticketPrefixesForWeek(config, teamForWeek)),
+  );
+
+  const vaultNotesSection = rankedNotes.length > 0
+    ? `\n---\n\n<vault_research_notes>\nThese are work-related notes from the engineer's vault that were created or updated this week.\nThey provide additional context about research, meetings, and work that may not appear in Jira/GitHub/Confluence.\n\n${rankedNotes.map((n) => `### ${n.title}\n${n.excerpt}`).join("\n\n")}\n</vault_research_notes>`
     : "";
 
   const reviewProximitySection = reviewInfo
@@ -478,73 +529,47 @@ async function buildBragBookPrompt(
     return `\n<generation_context>\nIMPORTANT: You are generating a brag book for **Week ${weekInfo.weekNumber}, ${weekInfo.year}** (${weekInfo.startDate.toISOString().split("T")[0]} to ${weekInfo.endDate.toISOString().split("T")[0]}).\n\nThis may be a historical regeneration. The work log data below is from that specific time period — it is NOT broken tooling. The tickets, PRs, and pages shown are the engineer's actual work from that week.\n\nTeam assignment at that time: ${teamLabel}${teamEntry?.notes ? `\nNote: ${teamEntry.notes}` : ""}\n\nFull team timeline:\n${formatTeamTimelineForPrompt(timeline)}\n\nDo NOT reference the current date, current team assignment, or any context files that reflect a different time period. Generate the brag book AS IF you are writing it during that week.\n</generation_context>\n`;
   })();
 
-  return `${promptTemplate}
+  // The prompt is assembled as labelled chunks that partition it exactly, so the breakdown
+  // accounts for every character rather than for the inputs alone. `framing` is the XML wrappers,
+  // rules and generation context that hold the rest together.
+  const chunks: Array<[keyof PromptSectionSizes, string]> = [
+    ["template", promptTemplate],
+    ["framing", "\n\n---\n\n<coach_persona>\n"],
+    ["persona", coachPersona],
+    ["framing", "\n</coach_persona>\n\n---\n\n<engineer_profile>\n"],
+    ["profile", profileContent],
+    ["framing", "\n</engineer_profile>\n\n---\n\n<work_context>\n"],
+    ["context", trimmedWorkContext],
+    ["framing", "\n</work_context>\n\n---\n\n<impact_log>\n"],
+    ["impact", impactLogContent],
+    ["framing", "\n</impact_log>\n\n---\n\n<current_memory>\n"],
+    ["memory", memoryContent],
+    ["framing", "\n</current_memory>\n\n---\n\n<previous_brag_books>\n"],
+    ["priorBrags", trimmedBragBooks],
+    ["framing", "\n</previous_brag_books>\n\n---\n\n<focus_doc>\n"],
+    ["focus", focusDocContent],
+    ["framing", "\n</focus_doc>\n\n---\n\n<focus_history>\n"],
+    ["focus", trimmedFocusHistory],
+    ["framing", "\n</focus_history>\n\n---\n\n<career_context>\n"],
+    ["career", careerContext],
+    ["framing", `\n</career_context>\n${reviewProximitySection}\n`],
+    ["focus", openFocusSection],
+    ["framing", "\n"],
+    ["notes", vaultNotesSection],
+    ["framing", `\n---\n${generationContext}\n<this_weeks_work_log>\n`],
+    ["worklog", workLogContent],
+    ["framing", "\n</this_weeks_work_log>\n\n---\n\nReturn the object described by the schema. The brag book markdown goes in bragBookMarkdown."],
+  ];
 
----
+  const prompt = chunks.map(([, text]) => text).join("");
 
-<coach_persona>
-${coachPersona}
-</coach_persona>
+  const sections: PromptSectionSizes = {
+    template: 0, framing: 0, persona: 0, profile: 0, context: 0, impact: 0,
+    memory: 0, priorBrags: 0, focus: 0, career: 0, notes: 0, worklog: 0,
+  };
+  for (const [name, text] of chunks) sections[name] += text.length;
 
----
-
-<engineer_profile>
-${profileContent}
-</engineer_profile>
-
----
-
-<work_context>
-${workContextContent}
-</work_context>
-
----
-
-<impact_log>
-${impactLogContent}
-</impact_log>
-
----
-
-<current_memory>
-${memoryContent}
-</current_memory>
-
----
-
-<previous_brag_books>
-${previousBragBooks}
-</previous_brag_books>
-
----
-
-<focus_doc>
-${focusDocContent}
-</focus_doc>
-
----
-
-<focus_history>
-${focusHistoryContent}
-</focus_history>
-
----
-
-<career_context>
-${careerContext}
-</career_context>
-${reviewProximitySection}
-${openFocusSection}
-${vaultNotesSection}
----
-${generationContext}
-<this_weeks_work_log>
-${workLogContent}
-</this_weeks_work_log>
-
----
-
-Return the object described by the schema. The brag book markdown goes in bragBookMarkdown.`;
+  return { prompt, sections };
 }
 
 // --- Main worklog runner ---
@@ -709,8 +734,11 @@ export async function runWorklog(opts: {
     const memoryContent = dropDatedRowsBefore(fullMemoryContent, memoryCutoff);
     log(`Vault files loaded — memory: ${memoryContent.length} chars (of ${fullMemoryContent.length}, rows since ${memoryCutoff}), profile: ${profileContent.length} chars`);
 
-    const vaultNotes = await discoverWeeklyNotes(config, paths, weekInfo.startDate, weekInfo.endDate);
-    log(`Discovered ${vaultNotes.length} weekly vault notes`);
+    // Discovery matches note filenames against ticket prefixes too, so it gets the same week's
+    // prefixes the ranking does.
+    const weekPrefixes = ticketPrefixesForWeek(config, getTeamForDate(timeline, weekInfo.startDate));
+    const vaultNotes = await discoverWeeklyNotes(config, paths, weekInfo.startDate, weekInfo.endDate, weekPrefixes);
+    log(`Discovered ${vaultNotes.length} weekly vault notes (prefixes: ${weekPrefixes.join(", ") || "none"})`);
 
     const openFocusItems = selectOpenFocusItems(rawFocusTrackingContent, DEFAULT_INJECT_CAP);
     const focusHistorySummary = summarizeFocusHistory(
@@ -725,12 +753,13 @@ export async function runWorklog(opts: {
     const bragStart = performance.now();
     s.start("Generating brag book...");
 
-    const fullPrompt = await buildBragBookPrompt(
+    const { prompt: fullPrompt, sections: promptSections } = await buildBragBookPrompt(
       markdown, previousBragBooks, workContextContent, memoryContent, profileContent,
       impactLogContent, coachPersona, focusDocContent, focusHistoryContent,
       careerContext, vaultNotes, openFocusItems, focusHistorySummary, reviewInfo, timeline, weekInfo, config
     );
     log(`AI query — provider: ${provider}, model: ${config.ai.model ?? "default"}, prompt: ${fullPrompt.length} chars`);
+    log(formatPromptBreakdown(promptSections));
 
     let usage: AIUsage | null = null;
     const output = await aiQueryStructured({
