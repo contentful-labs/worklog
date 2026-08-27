@@ -46,6 +46,14 @@ describe("SDK barrel exports", () => {
     expect(sdk.toAnthropicJsonSchema).toBeTypeOf("function");
   });
 
+  it("exports model pricing", () => {
+    expect(sdk.priceFor).toBeTypeOf("function");
+    expect(sdk.pricedModels).toBeTypeOf("function");
+    expect(sdk.estimateCostUsd).toBeTypeOf("function");
+    expect(sdk.formatCostUsd).toBeTypeOf("function");
+    expect(sdk.PRICING_AS_OF).toBeDefined();
+  });
+
   it("exports markdown generation", () => {
     expect(sdk.generateMarkdown).toBeTypeOf("function");
   });
