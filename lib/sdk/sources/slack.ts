@@ -44,8 +44,12 @@ const AVAILABILITY_TIMEOUT_MS = 30_000;
 /** A week of one person's public Slack is well under this; the cap bounds prompt size and cost. */
 const MAX_MESSAGES = 60;
 
-/** Ceiling on the balanced-brace scan, so a huge reply cannot turn into quadratic work. */
-const MAX_JSON_CANDIDATES = 20;
+/**
+ * Ceiling on how many opening braces the fallback scan will try. Counting attempts rather than
+ * successes is what bounds the work: text full of unclosed braces yields nothing but would
+ * otherwise re-scan to the end from every one of them.
+ */
+const MAX_JSON_SCANS = 20;
 
 const GLEAN_MCP_SERVER = "glean_default";
 const GLEAN_TOOLS = [
@@ -402,14 +406,15 @@ function claudeArgs(prompt: string, mcpConfig: string): string[] {
 // --- Parsing ---
 
 /**
- * Every balanced JSON object in the text, outermost first, string literals respected. Used only
- * when structured output is missing, so a reply that wrapped the object in prose or a fence
- * still parses. A scan with a depth counter cannot backtrack the way a regex would.
+ * Balanced JSON objects in the text, in the order their opening brace appears, string literals
+ * respected. Used only when structured output is missing, so a reply that wrapped the object in
+ * prose or a fence still parses. A depth counter cannot backtrack the way a regex would.
  */
 function* jsonObjectCandidates(text: string): Generator<string> {
-  let found = 0;
-  for (let start = 0; start < text.length && found < MAX_JSON_CANDIDATES; start++) {
+  let scans = 0;
+  for (let start = 0; start < text.length && scans < MAX_JSON_SCANS; start++) {
     if (text[start] !== "{") continue;
+    scans++;
 
     let depth = 0;
     let inString = false;
@@ -428,7 +433,6 @@ function* jsonObjectCandidates(text: string): Generator<string> {
       else if (char === "}") {
         depth--;
         if (depth === 0) {
-          found++;
           yield text.slice(start, i + 1);
           break;
         }
@@ -539,12 +543,15 @@ function select(
   return { kept: [...byPermalink.values()].slice(0, MAX_MESSAGES), outOfRange };
 }
 
-function rejectionWarnings(counts: {
+interface RejectionCounts {
   malformed: number;
   notMine: number;
   notPublic: number;
   outOfRange: number;
-}): string[] {
+}
+
+/** One line per kind of rejection, so a silently empty week is never a mystery. */
+function rejectionWarnings(counts: RejectionCounts): string[] {
   const warnings: string[] = [];
   if (counts.notPublic > 0) {
     warnings.push(`Slack returned ${counts.notPublic} message(s) not in a public channel; they were dropped.`);
