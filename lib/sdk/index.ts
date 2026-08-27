@@ -59,7 +59,10 @@ export type { BragBookResult, ReviewInfo } from "./brag-book";
 export { parseBragBookResult, parseReviewCycle, ensureBragBookFrontmatter } from "./brag-book";
 
 // Focus tracking
-export type { FocusItem, FocusStatusUpdate, ApplyFocusOptions, ApplyFocusResult, FocusMigrationResult } from "./focus";
+export type {
+  FocusItem, FocusStatusUpdate, ApplyFocusOptions, ApplyFocusResult, NearDuplicateFocusItem,
+  FocusMigrationResult,
+} from "./focus";
 export {
   FOCUS_OPEN_STATUS, FOCUS_ONGOING_STATUS, FOCUS_LAPSED_STATUS, FOCUS_TRACKING_TEMPLATE,
   DEFAULT_LAPSE_AFTER, DEFAULT_INJECT_CAP, isOpenFocusStatus,
@@ -69,7 +72,17 @@ export {
 } from "./focus";
 
 // Markdown tables
-export { isTableSeparator, splitRow, escapeCell, renderRow, appendToFirstTable } from "./markdown-table";
+export type { TableBounds } from "./markdown-table";
+export type { ScannedRow } from "./markdown-table";
+export {
+  isTableSeparator, splitRow, scanRow, escapeCell, renderRow, renderScannedRow,
+  appendToFirstTable, findTable,
+} from "./markdown-table";
+
+// Text similarity
+export {
+  SIMILARITY_THRESHOLD, LOOKUP_MARGIN, canonicalText, exactText, normalizeText, textSimilarity,
+} from "./text-similarity";
 
 // Prep doc generation
 export type { PrepType, PrepContext, PrepOptions } from "./prep";
@@ -79,10 +92,13 @@ export {
 } from "./prep";
 
 // Vault updates
-export type { FocusFileMigration } from "./vault-updates";
+export type {
+  FocusFileMigration, VaultWriteResult, VaultWriteStatus, MemoryWriteResult, UnmatchedGraduation,
+  VaultRecordKind, VaultRecordsMigration,
+} from "./vault-updates";
 export {
   updateMemory, updateImpactLog, updateWorkContext, updateProfile,
-  updateFocusTracking, migrateFocusTrackingFile,
+  updateFocusTracking, migrateFocusTrackingFile, migrateVaultRecordsFile, isPlaceholder, isIsoDate,
 } from "./vault-updates";
 
 // Data fetching

@@ -60,6 +60,8 @@ import {
   updateProfile,
   updateFocusTracking,
   migrateFocusTrackingFile,
+  migrateVaultRecordsFile,
+  isIsoDate,
 } from "../lib/sdk/vault-updates";
 import { createLogger } from "../lib/sdk/logger";
 
@@ -486,6 +488,23 @@ export async function runWorklog(opts: {
     p.log.info(`Cleaned focus-tracking.md: ${migration.lapsed} stale open item(s) closed. Backup: ${migration.backup}`);
   }
 
+  // The other four vault files were written for months without a placeholder or
+  // duplicate check; clean up what that left behind before anything reads them.
+  for (const [kind, recordPath] of [
+    ["memory", paths.memory],
+    ["impact-log", paths.impactLog],
+    ["work-context", paths.workContext],
+    ["my-profile", paths.profile],
+  ] as const) {
+    const cleanup = await migrateVaultRecordsFile(recordPath, kind);
+    if (cleanup?.backup) {
+      p.log.info(
+        `Cleaned ${kind}.md: ${cleanup.placeholders} placeholder rows removed, ` +
+        `${cleanup.duplicates} duplicates collapsed. Backup: ${cleanup.backup}`,
+      );
+    }
+  }
+
   const weeksToGenerate = await getWeeksToGenerate(paths.vault, weeksBack, specificWeek, force, sinceDate);
 
   if (weeksToGenerate.length === 0) {
@@ -626,10 +645,22 @@ export async function runWorklog(opts: {
     s.start("Updating context...");
     log(`Context updates — memory: +${itemsToAdd.length}/-${itemsToRemove.length}, impact: ${impactLogEntry ? "yes" : "no"}, workContext: ${workContextUpdates.length}, profile: ${profileUpdate ? "yes" : "no"}, focus: ${focusItems.length}/${focusUpdates.length}`);
 
-    if (itemsToAdd.length > 0 || itemsToRemove.length > 0) await updateMemory(paths.memory, itemsToAdd, itemsToRemove);
-    if (impactLogEntry) await updateImpactLog(paths.impactLog, impactLogEntry);
-    if (workContextUpdates.length > 0) await updateWorkContext(paths.workContext, workContextUpdates);
-    if (profileUpdate) await updateProfile(paths.profile, profileUpdate);
+    const memoryResult = await updateMemory(paths.memory, itemsToAdd, itemsToRemove);
+    if (memoryResult.status === "no-section") p.log.warn("memory.md has no live table above its archived sections; items not written");
+    for (const missed of memoryResult.unmatchedGraduations) {
+      const closest = missed.candidate ? `; closest memory row is "${missed.candidate}"` : "";
+      p.log.warn(`could not graduate "${missed.requested}"${closest}`);
+    }
+    const impactResult = await updateImpactLog(paths.impactLog, impactLogEntry);
+    if (impactResult.status === "no-section") p.log.warn("impact-log.md has no `## Impact Timeline` section; entry not written");
+    if (impactLogEntry && !isIsoDate(impactLogEntry.date)) p.log.warn(`impact entry is dated "${impactLogEntry.date}", which is not a date; entry not written`);
+    const workContextResult = await updateWorkContext(paths.workContext, workContextUpdates);
+    if (workContextResult.status === "no-section") p.log.warn("work-context.md has no `## Organizational Notes` section; notes not written");
+    const profileResult = await updateProfile(paths.profile, profileUpdate);
+    if (profileResult.status === "no-section") p.log.warn("my-profile.md has no `## Key Strengths` section; strength not written");
+    const skipped = memoryResult.skipped + impactResult.skipped + workContextResult.skipped + profileResult.skipped;
+    const merged = memoryResult.merged + impactResult.merged + workContextResult.merged + profileResult.merged;
+    if (merged > 0 || skipped > 0) log(`Vault records: ${merged} merged into existing records, ${skipped} already present or empty`);
     if (focusItems.length > 0 || focusUpdates.length > 0 || openFocusItems.length > 0) {
       const focusResult = await updateFocusTracking(paths.focusTracking, {
         focusItems,
@@ -639,6 +670,7 @@ export async function runWorklog(opts: {
         lapseAfter: DEFAULT_LAPSE_AFTER,
       });
       log(`Focus: ${focusResult.resolved} resolved, ${focusResult.lapsed} lapsed, ${focusResult.added} added, ${focusResult.restated} restated`);
+      for (const near of focusResult.nearDuplicates) p.log.warn(`added "${near.item}"; looks close to open item ${near.candidateId}`);
     }
 
     const ctxMs = Math.round(performance.now() - ctxStart);
@@ -648,7 +680,7 @@ export async function runWorklog(opts: {
     p.log.success(`${wid} done in ${formatDuration(weekTotal)}`);
 
     timings.push({ weekId: wid, fetch: fetchMs, bragBook: bragMs, contextUpdates: ctxMs, total: weekTotal });
-    results.push({ weekId: wid, jira: issues.length, confluence: pages.length, prs: prs.length, reviews: reviews.length, memoryAdded: itemsToAdd.length, memoryRemoved: itemsToRemove.length, impactLog: !!impactLogEntry, workContextUpdates: workContextUpdates.length, profileUpdated: !!profileUpdate, focusItems: focusItems.length, focusUpdates: focusUpdates.length });
+    results.push({ weekId: wid, jira: issues.length, confluence: pages.length, prs: prs.length, reviews: reviews.length, memoryAdded: memoryResult.added + memoryResult.merged, memoryRemoved: memoryResult.removed, impactLog: impactResult.added + impactResult.merged > 0, workContextUpdates: workContextResult.added + workContextResult.merged, profileUpdated: profileResult.status === "written", focusItems: focusItems.length, focusUpdates: focusUpdates.length });
 
     progress.completedWeeks.push(wid);
     await saveProgress(progress);

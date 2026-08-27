@@ -13,6 +13,10 @@
 
 import { isTableSeparator, splitRow, renderRow, appendToFirstTable } from "./markdown-table";
 import { weekIdForDate } from "./week-utils";
+import { SIMILARITY_THRESHOLD, canonicalText, exactText, textSimilarity } from "./text-similarity";
+
+// Kept under the focus names so existing callers and the SDK barrel do not move.
+export { normalizeText as normalizeFocusText, textSimilarity as focusSimilarity } from "./text-similarity";
 
 export interface FocusItem {
   /** Stable short key, `<week>.<n>` — what the model quotes to close an item. */
@@ -74,7 +78,7 @@ const FORMAT_MARKER_PREFIX = "<!-- worklog-focus-format:";
 const FORMAT_MARKER = `${FORMAT_MARKER_PREFIX} ${FOCUS_FORMAT_VERSION} -->`;
 const WEEK_PATTERN = /^\d{4}-W\d{2}$/;
 /** Token overlap above this counts as the same suggestion reworded. */
-const RESTATEMENT_SIMILARITY = 0.6;
+const RESTATEMENT_SIMILARITY = SIMILARITY_THRESHOLD;
 
 export const FOCUS_TRACKING_TEMPLATE = `# Focus Tracking
 ${FORMAT_MARKER}
@@ -85,84 +89,6 @@ close as \`lapsed\` after ${DEFAULT_LAPSE_AFTER} reviews without follow-through.
 ${HEADER}
 ${SEPARATOR}
 `;
-
-/**
- * Drop the target of every markdown link, keeping the label.
- *
- * A scan rather than a `\[([^\]]*)\]\([^)]*\)` regex: that pattern backtracks
- * polynomially on crafted input (CodeQL js/polynomial-redos), and this text comes
- * straight from model output.
- */
-function stripLinkTargets(text: string): string {
-  let result = "";
-  let i = 0;
-  while (i < text.length) {
-    if (text[i] === "]" && text[i + 1] === "(") {
-      const end = text.indexOf(")", i + 2);
-      if (end !== -1) {
-        i = end + 1;
-        continue;
-      }
-    }
-    result += text[i];
-    i++;
-  }
-  return result;
-}
-
-/** Strip markdown down to comparable words. */
-export function normalizeFocusText(text: string): string {
-  // Bracket syntax is left to the alphanumeric filter below; only the URL has to go,
-  // since otherwise every item carrying a Jira link would look alike.
-  return stripLinkTargets(text)
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, " ")
-    .trim();
-}
-
-/**
- * Function words carry no identity, so counting them drags the score of two short
- * rewordings of the same suggestion below the threshold.
- */
-const STOP_WORDS = new Set([
-  "the", "and", "for", "with", "that", "this", "from", "into", "your", "you", "are", "was",
-  "were", "has", "have", "had", "its", "our", "their", "them", "then", "than", "but", "not",
-  "all", "any", "can", "out", "off", "per", "via", "get", "through", "before", "after",
-]);
-
-function tokenSet(text: string): Set<string> {
-  return new Set(
-    normalizeFocusText(text)
-      .split(" ")
-      .filter((token) => token.length > 2 && !STOP_WORDS.has(token)),
-  );
-}
-
-/** Below this many significant words, containment is too easy to hit by accident. */
-const MIN_TOKENS_FOR_CONTAINMENT = 4;
-
-/**
- * How much two suggestions are the same thing said differently.
- *
- * Jaccard alone is too strict here: one item is usually an elaboration of the other,
- * so the extra ticket numbers and trailing clauses in the longer one drag real
- * duplicates down to ~0.3. Containment (shared / smaller set) separates them cleanly,
- * but it reaches 1.0 whenever the shorter item is tiny, so it is only trusted once
- * both items carry enough substance.
- */
-export function focusSimilarity(a: string, b: string): number {
-  const left = tokenSet(a);
-  const right = tokenSet(b);
-  if (left.size === 0 || right.size === 0) return 0;
-
-  let shared = 0;
-  for (const token of left) if (right.has(token)) shared++;
-
-  const jaccard = shared / (left.size + right.size - shared);
-  const smaller = Math.min(left.size, right.size);
-  if (smaller < MIN_TOKENS_FOR_CONTAINMENT) return jaccard;
-  return Math.max(jaccard, shared / smaller);
-}
 
 interface LiveTable {
   lines: string[];
@@ -414,6 +340,14 @@ export interface FocusMigrationResult {
   assigned: number;
   collapsed: number;
   lapsed: number;
+  /**
+   * Rows kept side by side that read like each other.
+   *
+   * A score cannot tell "Document C++ build process" from "Review C++ build process",
+   * and this pass deletes lines from a file the user owns, so it collapses only rows
+   * that say the same thing and reports the rest for them to judge.
+   */
+  nearDuplicates: NearDuplicateFocusItem[];
 }
 
 /**
@@ -437,27 +371,39 @@ export function migrateFocusTracking(content: string, keepSinceWeek: string = de
 
   const parsed = parseFocusItems(content);
   // An empty legacy table still needs its header rewritten, or it would migrate on every run.
-  if (parsed.length === 0) return { content: stampFormat(rebuildTable(content, [])), assigned: 0, collapsed: 0, lapsed: 0 };
+  if (parsed.length === 0) {
+    return { content: stampFormat(rebuildTable(content, [])), assigned: 0, collapsed: 0, lapsed: 0, nearDuplicates: [] };
+  }
 
   const kept: FocusItem[] = [];
+  const nearDuplicates: NearDuplicateFocusItem[] = [];
   let collapsed = 0;
   let lapsed = 0;
 
   // Pass 1: collapse duplicates while every row still carries its original status, so two
   // stale pending rows compare equal before either of them is lapsed.
   for (const item of parsed) {
-    // Collapse into any similar row that would lose nothing the user typed; a similar row
-    // with a different outcome is not a match, but a later one may be.
+    // Collapse into a row that says the same thing and would lose nothing the user
+    // typed. Same words only: a row that merely reads alike is another commitment.
+    // Case is part of the words here, since this deletes a row and runs unattended:
+    // "Set API_KEY" is not "Set api_key".
+    const canonical = exactText(item.item);
     const duplicate = kept.find(
       (candidate) =>
         candidate.week === item.week &&
-        focusSimilarity(candidate.item, item.item) >= RESTATEMENT_SIMILARITY &&
+        exactText(candidate.item) === canonical &&
         carriesNothingBeyond(item, candidate),
     );
     if (duplicate) {
       collapsed++;
       continue;
     }
+
+    const near = kept.find(
+      (candidate) =>
+        candidate.week === item.week && textSimilarity(candidate.item, item.item) >= RESTATEMENT_SIMILARITY,
+    );
+    if (near) nearDuplicates.push({ item: item.item, candidateId: near.id });
     // Mutate rather than copy: the row's source position and extra cells are keyed on identity.
     item.id = nextId(item.week, kept);
     kept.push(item);
@@ -472,7 +418,13 @@ export function migrateFocusTracking(content: string, keepSinceWeek: string = de
     }
   }
 
-  return { content: stampFormat(rebuildTable(content, kept)), assigned: kept.length, collapsed, lapsed };
+  return {
+    content: stampFormat(rebuildTable(content, kept)),
+    assigned: kept.length,
+    collapsed,
+    lapsed,
+    nearDuplicates,
+  };
 }
 
 /** A duplicate row can go only if its outcome, notes and user cells are empty or already on the kept row. */
@@ -563,6 +515,13 @@ export interface ApplyFocusOptions {
   lapseAfter?: number;
 }
 
+/** A new item that reads like one already open, recorded for the user to judge. */
+export interface NearDuplicateFocusItem {
+  item: string;
+  /** Id of the open item it reads like. */
+  candidateId: string;
+}
+
 export interface ApplyFocusResult {
   content: string;
   /** Closed with a terminal status this week. */
@@ -572,6 +531,14 @@ export interface ApplyFocusResult {
   lapsed: number;
   added: number;
   restated: number;
+  /**
+   * Items that were added even though an open item scores as similar.
+   *
+   * Reported rather than merged: a score cannot tell "Document C++ build process" from
+   * "Review C++ build process", and folding the second into the first loses a task the
+   * coach asked for. The user decides.
+   */
+  nearDuplicates: NearDuplicateFocusItem[];
 }
 
 /**
@@ -620,19 +587,26 @@ export function applyFocusUpdates(content: string, options: ApplyFocusOptions): 
   }
 
   const created: FocusItem[] = [];
+  const nearDuplicates: NearDuplicateFocusItem[] = [];
   for (const text of newItems) {
     const trimmed = text.trim();
     if (!trimmed) continue;
 
     const open = [...items, ...created].filter((item) => isOpenFocusStatus(item.status));
-    const existing = open.find((item) => focusSimilarity(item.item, trimmed) >= RESTATEMENT_SIMILARITY);
+    const canonical = canonicalText(trimmed);
+    const existing = open.find((item) => canonicalText(item.item) === canonical);
     if (existing) {
-      // Re-raised rather than new: keep one row, reset its clock, and record the repeat.
+      // Re-raised word for word: keep one row, reset its clock, and record the repeat.
       existing.reviews = 0;
       existing.notes = appendNote(existing.notes, `restated ${weekLabel}`);
       restated++;
       continue;
     }
+
+    // Anything short of the same text is a new commitment. The score still has
+    // something useful to say about it, so say it rather than act on it.
+    const near = open.find((item) => textSimilarity(item.item, trimmed) >= RESTATEMENT_SIMILARITY);
+    if (near) nearDuplicates.push({ item: trimmed, candidateId: near.id });
 
     created.push({
       id: nextId(weekLabel, [...items, ...created]),
@@ -646,5 +620,5 @@ export function applyFocusUpdates(content: string, options: ApplyFocusOptions): 
 
   let next = writeItemsInPlace(content, items);
   next = appendToFirstTable(next, created.map((item) => renderItem(item)));
-  return { content: next, resolved, carried, lapsed, added: created.length, restated };
+  return { content: next, resolved, carried, lapsed, added: created.length, restated, nearDuplicates };
 }

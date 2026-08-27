@@ -36,7 +36,7 @@ const FILE = `# Focus Tracking
 describe("normalizeFocusText / focusSimilarity", () => {
   it("strips markdown so links and emphasis do not affect comparison", () => {
     expect(normalizeFocusText("Get **[TEAM-1234](https://x/y)** through [[review]]"))
-      .toBe("get team 1234 through review");
+      .toBe("get team-1234 through review");
   });
 
   it("scores real rewordings of the same suggestion as the same item", () => {
@@ -191,13 +191,44 @@ describe("applyFocusUpdates", () => {
     expect(result.content.indexOf("Brand new")).toBeLessThan(result.content.indexOf("ARCHIVED"));
   });
 
-  it("restates a reworded suggestion instead of duplicating it, and resets its clock", () => {
+  it("restates a suggestion re-raised word for word, and resets its clock", () => {
     const result = applyFocusUpdates(base, {
-      reviewedIds: [], updates: [], newItems: ["Review the RFC thoroughly"], weekLabel: "2026-W10",
+      reviewedIds: [], updates: [], newItems: ["  review   RFC "], weekLabel: "2026-W10",
     });
     expect(result.restated).toBe(1);
     expect(result.added).toBe(0);
+    expect(result.nearDuplicates).toEqual([]);
     expect(result.content).toContain("| Review RFC | pending | 0 | restated 2026-W10 |");
+  });
+
+  it("adds a reworded suggestion and reports what it reads like", () => {
+    const result = applyFocusUpdates(base, {
+      reviewedIds: [], updates: [], newItems: ["Review the RFC thoroughly"], weekLabel: "2026-W10",
+    });
+    expect(result.added).toBe(1);
+    expect(result.restated).toBe(0);
+    expect(result.nearDuplicates).toEqual([{ item: "Review the RFC thoroughly", candidateId: "2026-W09.2" }]);
+    expect(result.content).toContain("| Review RFC | pending | 1 |");
+    expect(result.content).toContain("| Review the RFC thoroughly | pending | 0 |");
+  });
+
+  it("does not fold a new task into an open one that shares a name", () => {
+    const withCpp = `# Focus Tracking
+
+| ID | Week | Focus Item | Status | Reviews | Notes |
+|------|------|------|------|------|------|
+| 2026-W09.1 | 2026-W09 | Document C++ build process | pending | 0 |  |
+`;
+
+    const result = applyFocusUpdates(withCpp, {
+      reviewedIds: [], updates: [], newItems: ["Review C++ build process"], weekLabel: "2026-W10",
+    });
+
+    expect(result.added).toBe(1);
+    expect(result.restated).toBe(0);
+    expect(result.nearDuplicates).toEqual([{ item: "Review C++ build process", candidateId: "2026-W09.1" }]);
+    expect(result.content).toContain("Document C++ build process");
+    expect(result.content).toContain("Review C++ build process");
   });
 
   it("ignores a status row for an id that does not exist", () => {
@@ -229,7 +260,7 @@ describe("migrateFocusTracking", () => {
 | 2026-W01 | Ancient open item | pending | |
 | 2026-W01 | Ancient closed item | completed | done |
 | 2026-W09 | Ship the Search Revamp release correctness loop via TEAM-1234 | pending | |
-| 2026-W09 | Ship the Search Revamp release correctness loop through TEAM-1234 | pending | |
+| 2026-W09 | Ship  the Search Revamp   release correctness loop via TEAM-1234 | pending | |
 | 2026-W10 | Recent open item | pending | |
 `;
 
@@ -238,7 +269,7 @@ describe("migrateFocusTracking", () => {
     expect(needsFocusMigration(FILE)).toBe(false);
   });
 
-  it("assigns ids, collapses rewordings, and closes the unreviewable backlog", () => {
+  it("assigns ids, collapses repeats, and closes the unreviewable backlog", () => {
     const { content, assigned, collapsed, lapsed } = migrateFocusTracking(legacy, "2026-W09");
     expect(collapsed).toBe(1);
     expect(assigned).toBe(4);
@@ -250,6 +281,50 @@ describe("migrateFocusTracking", () => {
     // older open items become history, resolved statuses are left alone
     expect(content).toContain("| 2026-W01.1 | 2026-W01 | Ancient open item | lapsed |");
     expect(content).toContain("| 2026-W01.2 | 2026-W01 | Ancient closed item | completed |");
+  });
+
+  it("keeps two legacy rows that differ only in case", () => {
+    const legacyCasing = `| Week | Focus Item | Status | Notes |
+|---|---|---|---|
+| 2026-W09 | Set API_KEY in the deploy job | pending | |
+| 2026-W09 | Set api_key in the deploy job | pending | |
+`;
+
+    const { content, assigned, collapsed } = migrateFocusTracking(legacyCasing, "2026-W09");
+
+    // This runs unattended on every worklog run, and one of these is not the other.
+    expect({ assigned, collapsed }).toEqual({ assigned: 2, collapsed: 0 });
+    expect(content).toContain("Set API_KEY in the deploy job");
+    expect(content).toContain("Set api_key in the deploy job");
+  });
+
+  it("keeps two legacy rows that read alike but are different tasks", () => {
+    const legacyCpp = `| Week | Focus Item | Status | Notes |
+|---|---|---|---|
+| 2026-W09 | Document C++ build process | pending | |
+| 2026-W09 | Review C++ build process | pending | |
+`;
+
+    const { content, assigned, collapsed, nearDuplicates } = migrateFocusTracking(legacyCpp, "2026-W09");
+
+    expect(collapsed).toBe(0);
+    expect(assigned).toBe(2);
+    expect(content).toContain("Document C++ build process");
+    expect(content).toContain("Review C++ build process");
+    expect(nearDuplicates).toEqual([{ item: "Review C++ build process", candidateId: "2026-W09.1" }]);
+  });
+
+  it("keeps an elaboration of a legacy row as its own commitment", () => {
+    const legacyPair = `| Week | Focus Item | Status | Notes |
+|---|---|---|---|
+| 2026-W09 | Ship the Search Revamp release via TEAM-1234 | pending | |
+| 2026-W09 | Ship the Search Revamp release via TEAM-1234 and TEAM-1235 | pending | |
+`;
+
+    const { assigned, collapsed, nearDuplicates } = migrateFocusTracking(legacyPair, "2026-W09");
+
+    expect({ assigned, collapsed }).toEqual({ assigned: 2, collapsed: 0 });
+    expect(nearDuplicates).toHaveLength(1);
   });
 
   it("lapses stale ongoing rows too, not only pending ones", () => {
@@ -407,7 +482,7 @@ describe("user-added columns", () => {
 |---|---|---|---|---|
 | 2026-W09 | Ship the Search Revamp release via TEAM-1234 | pending | first note | Owner A |
 | 2026-W09 | Ship the Search Revamp release through TEAM-1234 | pending | second note | Owner B |
-| 2026-W09 | Ship the Search Revamp release through TEAM-1234 again | pending |  |  |
+| 2026-W09 | Ship the Search Revamp release  through TEAM-1234 | pending |  |  |
 `;
     const { content, collapsed, assigned } = migrateFocusTracking(legacy, "2026-W09");
     // the empty third row collapses; the second carries its own note and owner, so it stays
@@ -421,8 +496,8 @@ describe("user-added columns", () => {
     const legacy = `| Week | Focus Item | Status | Notes |
 |---|---|---|---|
 | 2026-W09 | Ship the auth PR | completed | |
-| 2026-W09 | Ship auth PR now | pending | |
-| 2026-W09 | Ship the auth PR now | pending | |
+| 2026-W09 | Ship the auth PR | pending | |
+| 2026-W09 | Ship  the auth PR | pending | |
 `;
     const { assigned, collapsed } = migrateFocusTracking(legacy, "2026-W09");
     expect(collapsed).toBe(1);
@@ -433,7 +508,7 @@ describe("user-added columns", () => {
     const legacy = `| Week | Focus Item | Status | Notes |
 |---|---|---|---|
 | 2026-W01 | Ship the auth PR | pending | |
-| 2026-W01 | Ship auth PR now | pending | |
+| 2026-W01 | Ship  the auth PR | pending | |
 `;
     const { assigned, collapsed, lapsed } = migrateFocusTracking(legacy, "2026-W09");
     expect({ assigned, collapsed, lapsed }).toEqual({ assigned: 1, collapsed: 1, lapsed: 1 });
@@ -443,12 +518,12 @@ describe("user-added columns", () => {
     const legacy = `| Week | Focus Item | Status | Notes |
 |---|---|---|---|
 | 2026-W09 | Ship the auth PR | pending | |
-| 2026-W09 | Ship auth PR now | completed | |
+| 2026-W09 | Ship  the auth PR | completed | |
 `;
     const { content, collapsed } = migrateFocusTracking(legacy, "2026-W09");
     expect(collapsed).toBe(0);
     expect(content).toContain("| Ship the auth PR | pending |");
-    expect(content).toContain("| Ship auth PR now | completed |");
+    expect(content).toContain("| Ship  the auth PR | completed |");
   });
 
   it("survive the legacy migration, header included", () => {
