@@ -1617,18 +1617,65 @@ describe("commits pushed to a pull request that is already open", () => {
     expect(batch.events.filter((event) => event.kind === "commit").map((event) => event.id)).toEqual(["bbb222"]);
   });
 
-  it("count a commit whose author GitHub could not match, by the email git recorded", async () => {
-    const unmatched = [{
+  /** Every commit GitHub could not match to an account, one per way git can name a person. */
+  const unlinked = [
+    {
       sha: "ddd444",
-      commit: { message: "From a machine with no linked account", author: { name: "Example User", email: "User@Example.com", date: "2026-03-04T09:00:00Z" } },
-    }];
+      commit: {
+        message: "From a machine with no linked account",
+        author: { name: "Example User", email: "User@Example.com", date: "2026-03-04T09:00:00Z" },
+        // Somebody else put it on the branch, which is what a rebase or an amend by a
+        // reviewer looks like. The work is still this user's, so only the author line
+        // identifies them here.
+        committer: { name: "Other", email: "other@example.com", date: "2026-03-04T10:00:00Z" },
+      },
+    },
+    {
+      sha: "eee555",
+      commit: {
+        message: "Rebased onto main from another machine",
+        // The author line is somebody else's, or an address this user no longer uses.
+        author: { name: "Old Address", email: "old@elsewhere.example", date: "2026-03-05T09:00:00Z" },
+        committer: { name: "Example User", email: "user@example.com", date: "2026-03-05T11:00:00Z" },
+      },
+    },
+    {
+      sha: "fff666",
+      commit: {
+        message: "Not this user at all",
+        author: { name: "Other", email: "other@example.com", date: "2026-03-05T12:00:00Z" },
+        committer: { name: "Other", email: "other@example.com", date: "2026-03-05T12:00:00Z" },
+      },
+    },
+  ];
+
+  it("counts a commit whose author GitHub could not match, by the author email git recorded", async () => {
     server.use(
       searchHandler([{ ...authoredPR, closed_at: null, pull_request: { url: authoredPR.pull_request.url } }], []),
-      http.get("https://api.github.com/repos/example-org/repo/pulls/42/commits", () => HttpResponse.json(unmatched)),
+      http.get("https://api.github.com/repos/example-org/repo/pulls/42/commits", () => HttpResponse.json([unlinked[0]])),
     );
 
     const batch = await githubSource(() => NOW).fetchWindow(window, makeContext());
     expect(batch.events.filter((event) => event.kind === "commit").map((event) => event.id)).toEqual(["ddd444"]);
+  });
+
+  it("counts one where only the committer is this user, and still leaves other people's alone", async () => {
+    // The trigger: GitHub records the author and the committer separately, and a rebase,
+    // an amend from another machine, or a commit made through the web UI leaves the user
+    // as committer while the author line says something else. With no linked account
+    // either, checking only the author email missed it — and the window was then marked
+    // read, so it was never asked for again.
+    server.use(
+      searchHandler([{ ...authoredPR, closed_at: null, pull_request: { url: authoredPR.pull_request.url } }], []),
+      http.get("https://api.github.com/repos/example-org/repo/pulls/42/commits", () => HttpResponse.json(unlinked)),
+    );
+
+    const batch = await githubSource(() => NOW).fetchWindow(window, makeContext());
+    const commits = batch.events.filter((event) => event.kind === "commit");
+
+    expect(commits.map((event) => event.id)).toEqual(["ddd444", "eee555"]);
+    // Dated when the work was written, not when it was rewritten onto main.
+    expect(commits[1].at).toBe("2026-03-05T09:00:00.000Z");
   });
 
   it("says it did not finish when the commits will not load", async () => {

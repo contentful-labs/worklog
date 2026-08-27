@@ -207,15 +207,19 @@ function mergedAtOf(pr: SearchedPR): string | undefined {
 /**
  * One commit on a pull request.
  *
- * `author` is the GitHub account when it could be matched to one, and `commit.author` is
- * what git itself recorded — the name and email in the commit object. Either can identify
- * the user, and on a machine with an unmatched email only the second one does.
+ * Three separate places say who made it. `author` is the GitHub account, when GitHub
+ * could match one; `commit.author` and `commit.committer` are what git itself recorded,
+ * and they are different fields with different addresses in them — a rebase, an amend
+ * from another machine, or a commit made through the web UI leaves the user as committer
+ * while the author line says something else. On a machine whose email is not linked to
+ * the account, one of the git fields is the only thing that identifies the user at all.
  */
 interface GitHubCommit {
   sha: string;
   commit?: {
     message?: string;
     author?: { name?: string; email?: string; date?: string };
+    committer?: { name?: string; email?: string; date?: string };
   };
   author?: { login?: string };
 }
@@ -1202,10 +1206,14 @@ export function githubSource(now: Clock = () => new Date()): Source {
         rememberPageSize(url, opts.conditional, ctx, commits.length);
 
         for (const commit of commits) {
+          const mine = (address: string | undefined) => email.length > 0 && address?.toLowerCase() === email;
           const wroteIt = commit.author?.login === githubUserOf(ctx)
-            || (email.length > 0 && commit.commit?.author?.email?.toLowerCase() === email);
+            || mine(commit.commit?.author?.email)
+            || mine(commit.commit?.committer?.email);
           if (!wroteIt) continue;
-          const at = instant(commit.commit?.author?.date);
+          // Dated when it was written, falling back to when it was committed. The author
+          // date is the one that says when the work happened, which is what a week is.
+          const at = instant(commit.commit?.author?.date ?? commit.commit?.committer?.date);
           if (!at || !opts.keep(at)) continue;
           batch.events.push({
             source: "github",
