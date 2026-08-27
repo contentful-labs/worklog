@@ -52,6 +52,7 @@ import {
 } from "../lib/sdk/data-fetch";
 import { generateEventMarkdown } from "../lib/sdk/markdown";
 import { collectIntoLedger, openLedger, weekWindow } from "../lib/sdk/ledger";
+import { sourceContext } from "../lib/sdk/sources";
 import { allSources } from "../lib/sdk/source-adapters";
 import {
   toBragBookResult,
@@ -974,12 +975,12 @@ export async function runWorklog(opts: {
       ledger,
       sources,
       [weekWindow(wid, weekInfo.startDate, weekInfo.endDate)],
-      (source) => ({
+      (source) => sourceContext(source, {
         config,
         headers,
         identity: { atlassianAccountId: accountId, githubUsername },
-        onWarning: (message: string) => p.log.warn(message),
-        state: ledger.stateFor(source.name),
+        stateFor: (name) => ledger.stateFor(name),
+        onWarning: (message) => p.log.warn(message),
         log,
       }),
       runStartedAt,

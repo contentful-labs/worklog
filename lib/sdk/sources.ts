@@ -134,6 +134,36 @@ export interface Source {
 }
 
 /** An empty batch, for the paths where a source has nothing to say. */
+/**
+ * Everything a command has to resolve once before any source can run.
+ *
+ * Credentials, who the user is in each system, and where a source may keep its own
+ * state. Resolved once per run and shared by every source, so the weekly command and
+ * `refresh` cannot drift into handing sources different things.
+ */
+export interface SourceRuntime {
+  config: WorklogConfig;
+  headers: FetchHeaders;
+  identity: { atlassianAccountId: string; githubUsername: string };
+  /** Where this source keeps ETags and cursors. The ledger supplies it, keyed by name. */
+  stateFor: (source: string) => SourceState;
+  /** How a soft failure reaches the user. The command owns the output, not the source. */
+  onWarning: (message: string) => void;
+  log?: Logger;
+}
+
+/** The context one source runs with. */
+export function sourceContext(source: Source, runtime: SourceRuntime): SourceContext {
+  return {
+    config: runtime.config,
+    headers: runtime.headers,
+    identity: runtime.identity,
+    onWarning: runtime.onWarning,
+    state: runtime.stateFor(source.name),
+    log: runtime.log,
+  };
+}
+
 export function emptyBatch(): SourceBatch {
   return { snapshots: [], events: [], warnings: [] };
 }

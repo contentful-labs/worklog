@@ -20,7 +20,7 @@ import * as p from "@clack/prompts";
 import { existsSync } from "node:fs";
 
 import {
-  buildHeaders, getAccountId, getGitHubUsername, type FetchHeaders, type WeekInfo,
+  buildHeaders, getAccountId, getGitHubUsername, type WeekInfo,
 } from "../lib/sdk/data-fetch";
 import {
   collectIntoLedger, newEvents, openLedger, weekWindow,
@@ -28,7 +28,7 @@ import {
 } from "../lib/sdk/ledger";
 import { generateEventMarkdown } from "../lib/sdk/markdown";
 import { allSources } from "../lib/sdk/source-adapters";
-import type { Source, SourceContext, SourceEvent } from "../lib/sdk/sources";
+import { sourceContext, type Source, type SourceContext, type SourceEvent } from "../lib/sdk/sources";
 import { buildVaultPaths, getCurrentTeam, readTeamTimeline } from "../lib/sdk/vault";
 import { formatDuration, getWeekEnd, getWeekNumber, getWeekStart, weekId } from "../lib/sdk/week-utils";
 import { loadConfig } from "../lib/config";
@@ -204,23 +204,32 @@ export async function runRefresh(opts: RefreshOptions): Promise<void> {
     ledger,
     sources,
     weeks,
-    contextFor: (source) => sourceContext(source, { config, headers, atlassianAccountId, githubUsername, ledger, log }),
+    contextFor: (source) => sourceContext(source, {
+      config,
+      headers,
+      identity: { atlassianAccountId, githubUsername },
+      stateFor: (name) => ledger.stateFor(name),
+      onWarning: (message) => p.log.warn(message),
+      log,
+    }),
     now: startedAt,
     writeWeek: async ({ weekId: week, weekInfo, workLog, newMaterial }) => {
       if (!collected) {
         spinner.stop(`Collected from ${sources.length} source(s)`);
         collected = true;
       }
-      await Bun.write(`${paths.vault}/${weekInfo.filename}`, workLog);
-
       const bragBookPath = `${paths.vault}/${week} Brag Book.md`;
       const existingBragBook = existsSync(bragBookPath) ? await Bun.file(bragBookPath).text() : "";
 
       spinner.start(`${week}: writing up what is new...`);
+      // Neither document is written until the week validates, and then the brag book
+      // goes first. A refresh that fails mid-generation leaves the week exactly as it
+      // was rather than with a new work log and last month's entry.
       await generateWeek({
         weekInfo,
         wid: week,
         workLog,
+        workLogPath: `${paths.vault}/${weekInfo.filename}`,
         config,
         paths,
         timeline,
@@ -258,27 +267,6 @@ function describeForPrompt(events: readonly SourceEvent[]): string {
   return events
     .map((event) => `- ${event.at.slice(0, 16).replace("T", " ")} ${event.source} ${event.kind} on ${event.itemId}`)
     .join("\n");
-}
-
-function sourceContext(
-  source: Source,
-  deps: {
-    config: ReturnType<typeof requireConfig>;
-    headers: FetchHeaders;
-    atlassianAccountId: string;
-    githubUsername: string;
-    ledger: Ledger;
-    log: (message: string) => void;
-  },
-): SourceContext {
-  return {
-    config: deps.config,
-    headers: deps.headers,
-    identity: { atlassianAccountId: deps.atlassianAccountId, githubUsername: deps.githubUsername },
-    onWarning: (message) => p.log.warn(message),
-    state: deps.ledger.stateFor(source.name),
-    log: deps.log,
-  };
 }
 
 /** Where to start: the flag, else the current team's start date. */

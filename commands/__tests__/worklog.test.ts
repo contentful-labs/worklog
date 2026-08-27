@@ -9,10 +9,15 @@ vi.mock("../../lib/sdk/ai", () => ({ aiQueryStructured: vi.fn() }));
 
 // Same for the network. runWorklog's own control flow is what is under test.
 vi.mock("../../lib/sdk/data-fetch", () => ({
-  buildHeaders: () => ({}),
+  buildHeaders: () => ({ atlassian: {}, github: {} }),
   getAccountId: async () => "acct-1",
   getGitHubUsername: async () => "testuser",
   fetchDataForWeek: async () => ({ issues: [], pages: [], prs: [], reviews: [], teamSprintItems: [] }),
+  // The sources read through these. An empty week is the right shape here: what is under
+  // test is what runWorklog does with the model's answer.
+  fetchJiraIssues: async () => [],
+  searchConfluence: async () => [],
+  fetchGitHubPRs: async () => [],
 }));
 
 // Only writeFileAtomic is stood in for, so the rest of the vault writers stay real.
@@ -107,12 +112,14 @@ describe("runWorklog write ordering", () => {
     const configHome = join(tmp, "config");
     const vault = join(tmp, "vault");
     const previousConfigHome = process.env.XDG_CONFIG_HOME;
+    const previousCacheHome = process.env.XDG_CACHE_HOME;
     const previousAtlassian = process.env.ATLASSIAN_API_TOKEN;
     const previousGitHub = process.env.GITHUB_TOKEN;
 
     seedVault(vault);
     writeConfig(configHome, vault);
     process.env.XDG_CONFIG_HOME = configHome;
+    process.env.XDG_CACHE_HOME = join(tmp, "cache");
     process.env.ATLASSIAN_API_TOKEN = "test-atlassian-token";
     process.env.GITHUB_TOKEN = "test-github-token";
 
@@ -141,6 +148,8 @@ describe("runWorklog write ordering", () => {
     } finally {
       if (previousConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
       else process.env.XDG_CONFIG_HOME = previousConfigHome;
+      if (previousCacheHome === undefined) delete process.env.XDG_CACHE_HOME;
+      else process.env.XDG_CACHE_HOME = previousCacheHome;
       if (previousAtlassian === undefined) delete process.env.ATLASSIAN_API_TOKEN;
       else process.env.ATLASSIAN_API_TOKEN = previousAtlassian;
       if (previousGitHub === undefined) delete process.env.GITHUB_TOKEN;
@@ -156,12 +165,14 @@ describe("runWorklog write ordering", () => {
     const configHome = join(tmp, "config");
     const vault = join(tmp, "vault");
     const previousConfigHome = process.env.XDG_CONFIG_HOME;
+    const previousCacheHome = process.env.XDG_CACHE_HOME;
     const previousAtlassian = process.env.ATLASSIAN_API_TOKEN;
     const previousGitHub = process.env.GITHUB_TOKEN;
 
     seedVault(vault);
     writeConfig(configHome, vault);
     process.env.XDG_CONFIG_HOME = configHome;
+    process.env.XDG_CACHE_HOME = join(tmp, "cache");
     process.env.ATLASSIAN_API_TOKEN = "test-atlassian-token";
     process.env.GITHUB_TOKEN = "test-github-token";
 
@@ -202,6 +213,8 @@ describe("runWorklog write ordering", () => {
       restoreWrite();
       if (previousConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
       else process.env.XDG_CONFIG_HOME = previousConfigHome;
+      if (previousCacheHome === undefined) delete process.env.XDG_CACHE_HOME;
+      else process.env.XDG_CACHE_HOME = previousCacheHome;
       if (previousAtlassian === undefined) delete process.env.ATLASSIAN_API_TOKEN;
       else process.env.ATLASSIAN_API_TOKEN = previousAtlassian;
       if (previousGitHub === undefined) delete process.env.GITHUB_TOKEN;
@@ -215,12 +228,14 @@ describe("runWorklog write ordering", () => {
     const configHome = join(tmp, "config");
     const vault = join(tmp, "vault");
     const previousConfigHome = process.env.XDG_CONFIG_HOME;
+    const previousCacheHome = process.env.XDG_CACHE_HOME;
     const previousAtlassian = process.env.ATLASSIAN_API_TOKEN;
     const previousGitHub = process.env.GITHUB_TOKEN;
 
     seedVault(vault);
     writeConfig(configHome, vault);
     process.env.XDG_CONFIG_HOME = configHome;
+    process.env.XDG_CACHE_HOME = join(tmp, "cache");
     process.env.ATLASSIAN_API_TOKEN = "test-atlassian-token";
     process.env.GITHUB_TOKEN = "test-github-token";
 
@@ -247,6 +262,8 @@ describe("runWorklog write ordering", () => {
     } finally {
       if (previousConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
       else process.env.XDG_CONFIG_HOME = previousConfigHome;
+      if (previousCacheHome === undefined) delete process.env.XDG_CACHE_HOME;
+      else process.env.XDG_CACHE_HOME = previousCacheHome;
       if (previousAtlassian === undefined) delete process.env.ATLASSIAN_API_TOKEN;
       else process.env.ATLASSIAN_API_TOKEN = previousAtlassian;
       if (previousGitHub === undefined) delete process.env.GITHUB_TOKEN;

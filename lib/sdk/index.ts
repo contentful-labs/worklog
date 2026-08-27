@@ -148,9 +148,11 @@ export {
 // Sources and the event ledger
 export type {
   Source, SourceBatch, SourceEvent, SourceSnapshot, SourceContext, SourceState,
-  SourceAvailability, SourceWindow,
+  SourceAvailability, SourceWindow, SourceRuntime,
 } from "./sources";
-export { emptyBatch, mergeBatches, EVENT_KINDS, PAYLOAD_TITLE, PAYLOAD_URL, PAYLOAD_TEXT } from "./sources";
+export {
+  emptyBatch, mergeBatches, sourceContext, EVENT_KINDS, PAYLOAD_TITLE, PAYLOAD_URL, PAYLOAD_TEXT,
+} from "./sources";
 export type {
   Ledger, LedgerSnapshot, RecordResult, CollectionWeek, CollectionOutcome, SourceOutcome,
 } from "./ledger";
