@@ -108,10 +108,11 @@ export function toBragBookResult(output: BragBookOutput): BragBookResult {
     bragBookContent: output.bragBookMarkdown.trim(),
     itemsToAdd: keepValid(output.memoryItemsToAdd, validMemoryItemSchema)
       .map((row) => renderRow([row.date, row.item, row.category, row.notes])),
-    // updateMemory splits this string on "(now part of" to recover the text it matches
-    // against memory.md, so the separator has to stay exactly as written.
+    // Just the item. updateMemory matches on it alone, and it truncates at the first
+    // "(now part of", so appending the achievement would silently cut any item that
+    // already contains that phrase down to whatever precedes it.
     itemsToRemove: keepValid(output.memoryGraduations, validMemoryGraduationSchema)
-      .map((row) => `${unescapeCell(row.item)} (now part of: ${unescapeCell(row.nowPartOf)})`),
+      .map((row) => unescapeCell(row.item)),
     impactLogEntry: impact.success ? impact.data : null,
     workContextUpdates: keepValid(output.workContextUpdates, validWorkContextUpdateSchema),
     profileUpdate: profile.success ? profile.data : null,

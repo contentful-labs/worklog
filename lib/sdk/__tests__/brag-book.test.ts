@@ -197,13 +197,27 @@ describe("toBragBookResult", () => {
     expect(result.itemsToAdd[0]).toContain("Kept");
   });
 
-  it("keeps the graduation phrasing updateMemory splits on", () => {
+  it("passes the item alone, since updateMemory matches on it and drops the achievement", () => {
     const result = toBragBookResult(
       output({ memoryGraduations: [{ item: "Three small perf PRs", nowPartOf: "Search latency initiative" }] }),
     );
 
-    expect(result.itemsToRemove).toEqual(["Three small perf PRs (now part of: Search latency initiative)"]);
-    expect(result.itemsToRemove[0].split("(now part of")[0].trim()).toBe("Three small perf PRs");
+    expect(result.itemsToRemove).toEqual(["Three small perf PRs"]);
+  });
+
+  it("keeps an item that contains the graduation marker updateMemory truncates at", () => {
+    // updateMemory cuts a target at the first "(now part of". Appending the achievement
+    // used to put that phrase in every target, so an item already containing it was
+    // truncated to the text before it and matched nothing.
+    const result = toBragBookResult(
+      output({
+        memoryGraduations: [
+          { item: "Documented fallback (now part of SDK) behavior", nowPartOf: "SDK docs push" },
+        ],
+      }),
+    );
+
+    expect(result.itemsToRemove).toEqual(["Documented fallback (now part of SDK) behavior"]);
   });
 
   it("decodes a graduation target the model copied out of the rendered table", () => {
@@ -212,7 +226,7 @@ describe("toBragBookResult", () => {
       output({ memoryGraduations: [{ item: "Perf \\| work", nowPartOf: "Latency push" }] }),
     );
 
-    expect(result.itemsToRemove).toEqual(["Perf | work (now part of: Latency push)"]);
+    expect(result.itemsToRemove).toEqual(["Perf | work"]);
   });
 
   it("undoes exactly what escapeCell does, for any cell text", () => {
@@ -222,7 +236,7 @@ describe("toBragBookResult", () => {
         output({ memoryGraduations: [{ item: `x ${escapeCell(original)} x`, nowPartOf: "A" }] }),
       ).itemsToRemove[0];
 
-      expect(roundTripped).toBe(`x ${original} x (now part of: A)`);
+      expect(roundTripped).toBe(`x ${original} x`);
     }
   });
 
@@ -241,10 +255,7 @@ describe("toBragBookResult", () => {
       }),
     );
 
-    expect(result.itemsToRemove).toEqual([
-      "Perf | work (now part of: Search latency initiative)",
-      "Three small perf PRs (now part of: Search latency initiative)",
-    ]);
+    expect(result.itemsToRemove).toEqual(["Perf | work", "Three small perf PRs"]);
   });
 
   it("drops a graduation with no achievement to attribute it to", () => {
@@ -368,7 +379,7 @@ describe("graduations reaching memory.md", () => {
     const { itemsToRemove } = toBragBookResult(
       output({ memoryGraduations: [{ item: "202", nowPartOf: "Search reliability push" }] }),
     );
-    expect(itemsToRemove).toEqual(["202 (now part of: Search reliability push)"]);
+    expect(itemsToRemove).toEqual(["202"]);
 
     const result = await updateMemory(path, [], itemsToRemove);
 
@@ -402,6 +413,43 @@ ${renderRow(["2026-03-05", "Perf | work on a | b", "perf", ""])}
     const after = await readFile(path, "utf-8");
     expect(after).not.toContain("Perf");
     expect(after).toContain("Reviewed the search RFC");
+  });
+
+  // Known residual, writer-side. updateMemory still truncates any target at the first
+  // "(now part of" (vault-updates.ts, GRADUATION_MARKER), so an item containing that
+  // phrase is cut down before it is compared. The adapter no longer contributes to this:
+  // it passes the item through whole, which the toBragBookResult test above pins. Closing
+  // it needs the truncation removed from the writer, which no longer has a caller that
+  // appends the marker. This test records what happens today so the change is visible.
+  it("cannot yet graduate an item whose own text contains the graduation marker", async () => {
+    const path = join(tmpDir, "memory.md");
+    const stored = `# Memory
+
+## Team Now (2026 - present)
+
+| Date | Item | Category | Notes |
+|------|------|----------|-------|
+| 2026-03-05 | Documented fallback (now part of SDK) behavior | docs |  |
+| 2026-03-06 | Reviewed the search RFC | review |  |
+`;
+    await writeFile(path, stored, "utf-8");
+
+    const { itemsToRemove } = toBragBookResult(
+      output({
+        memoryGraduations: [
+          { item: "Documented fallback (now part of SDK) behavior", nowPartOf: "SDK docs push" },
+        ],
+      }),
+    );
+    // The adapter sends the whole item.
+    expect(itemsToRemove).toEqual(["Documented fallback (now part of SDK) behavior"]);
+
+    const result = await updateMemory(path, [], itemsToRemove);
+
+    // The writer cuts it at the marker, so it matches nothing and the row survives.
+    expect(result.removed).toBe(0);
+    expect(result.unmatchedGraduations.map((u) => u.requested)).toEqual(["Documented fallback"]);
+    expect(await readFile(path, "utf-8")).toBe(stored);
   });
 
   it("removes the one row a graduation names exactly", async () => {
