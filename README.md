@@ -15,6 +15,7 @@ You *can* generate retroactively for past weeks — and it works fine for that. 
 ## What it does
 
 - Pulls your Jira tickets, GitHub PRs, and Confluence pages each week
+- Optionally pulls your public Slack messages through Glean, when Claude Code can reach it
 - Generates a brag book entry with coaching feedback
 - Generates prep docs for 1:1s, self-reviews, promotion cases, and resume bullets
 - Everything stays local in a markdown vault on your machine
@@ -150,6 +151,9 @@ AI provider (pick one during `worklog init`):
 | `GITHUB_TOKEN` | GitHub PR data | [GitHub tokens](https://github.com/settings/tokens) |
 | `ANTHROPIC_API_KEY` | AI — Anthropic (if not using Claude Code CLI) | [Anthropic console](https://console.anthropic.com/settings/keys) |
 | `OPENAI_API_KEY` | AI — OpenAI (if not using ChatGPT subscription) | [OpenAI dashboard](https://platform.openai.com/api-keys) |
+
+Slack is optional and needs no token: it comes through Glean, which worklog reaches by asking your
+local Claude Code CLI. See [docs/setup.md](docs/setup.md#slack-optional).
 
 See [docs/setup.md](docs/setup.md) for detailed AI provider setup, first-time walkthrough, and configuration.
 

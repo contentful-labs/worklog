@@ -55,6 +55,33 @@ worklog init               # select "OpenAI"
 
 Get an API key at https://platform.openai.com/api-keys
 
+## Slack (optional)
+
+Slack has no API token here. worklog reaches it through Glean, and the only client that can talk
+to Glean is the Claude Code CLI with its Glean MCP server connected. So the Slack source is on
+when both of these are true, and silently off otherwise:
+
+```bash
+command -v claude                # the CLI is installed and on PATH
+claude mcp get glean_default     # prints "Connected"
+```
+
+If Glean is not connected, run `claude mcp login glean_default`.
+
+What to expect when it is on:
+
+- Each week's work log gains a `## Slack` section listing your own public-channel messages,
+  grouped by channel, with permalinks and timestamps. DMs and private channels are excluded.
+- At most 60 messages per week.
+- The fetch is an LLM query, so it is slow and its wording varies between runs. A measured week
+  took just under three minutes; the source gives up after four. A failed or unparseable answer
+  costs you the Slack section for that week and nothing else.
+- Slack material reaches the coach as context (decisions made, people unblocked, influence
+  shown), not as achievement evidence unless Jira, GitHub or Confluence corroborates it.
+
+When the source is unavailable, worklog prints one `Slack source skipped: <reason>` line per run
+and the output is exactly what it was before the source existed.
+
 ## Environment variables
 
 | Variable | Required for | How to get it |

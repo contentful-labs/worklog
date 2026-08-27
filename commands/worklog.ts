@@ -41,6 +41,8 @@ import {
   type WeekInfo,
 } from "../lib/sdk/data-fetch";
 import { generateMarkdown } from "../lib/sdk/markdown";
+import { slackMessagesFrom, slackSource, type SlackMessage } from "../lib/sdk/sources/slack";
+import type { SourceContext } from "../lib/sdk/sources";
 import {
   toBragBookResult,
   parseReviewCycle,
@@ -75,6 +77,29 @@ const FOCUS_SUMMARY_WEEKS = 12;
 
 function weeksBefore(date: Date, weeks: number): Date {
   return new Date(date.getTime() - weeks * 7 * 24 * 60 * 60 * 1000);
+}
+
+/**
+ * Slack comes in through an LLM query, so it is slow and can be unavailable. It is fetched
+ * separately from the API sources: a Slack failure must never cost the week its Jira,
+ * Confluence or GitHub data.
+ */
+async function fetchSlackMessages(
+  weekInfo: WeekInfo,
+  ctx: SourceContext,
+  spinner: ReturnType<typeof p.spinner>,
+): Promise<SlackMessage[]> {
+  const started = performance.now();
+  spinner.start("Fetching Slack via Glean (this takes a while)...");
+
+  // WeekInfo dates are calendar days at UTC midnight, so the week runs to the end of endDate.
+  const end = new Date(weekInfo.endDate.getTime() + 24 * 60 * 60 * 1000 - 1);
+  const batch = await slackSource.fetchWindow({ start: weekInfo.startDate, end }, ctx);
+
+  const messages = slackMessagesFrom(batch.snapshots.map((snapshot) => snapshot.payload));
+  spinner.stop(`Slack fetched in ${formatDuration(Math.round(performance.now() - started))} (${messages.length} messages)`);
+  for (const warning of batch.warnings) p.log.warn(warning);
+  return messages;
 }
 
 // --- Stats ---
@@ -567,6 +592,11 @@ export async function runWorklog(opts: {
   s.stop("Account IDs ready");
   log(`Atlassian accountId: ${accountId}, GitHub username: ${githubUsername}`);
 
+  // Optional source, checked once per run rather than once per week.
+  const slackAvailability = await slackSource.isAvailable({ config, log });
+  const slackAvailable = slackAvailability.ok;
+  if (!slackAvailability.ok) p.log.info(`Slack source skipped: ${slackAvailability.reason}`);
+
   const provider = config.ai.provider ?? "openai";
   const timings: WeekTiming[] = [];
   const results: WeekResult[] = [];
@@ -592,7 +622,11 @@ export async function runWorklog(opts: {
     s.stop(`Fetched in ${formatDuration(fetchMs)} (${issues.length} jira, ${pages.length} confluence, ${prs.length} PRs, ${reviews.length} reviews)`);
     log(`Jira: ${issues.length}, Confluence: ${pages.length}, PRs: ${prs.length}, Reviews: ${reviews.length}`);
 
-    const markdown = generateMarkdown(issues, pages, prs, reviews, teamSprintItems, weekInfo, additionalContext, config, accountId);
+    const slackMessages = slackAvailable
+      ? await fetchSlackMessages(weekInfo, { config, log }, s)
+      : [];
+
+    const markdown = generateMarkdown(issues, pages, prs, reviews, teamSprintItems, weekInfo, additionalContext, config, accountId, slackMessages);
     const workLogPath = `${paths.vault}/${weekInfo.filename}`;
     // Held in memory until the whole week validates. Writing it here would mean a --force
     // run destroyed the previous work log before the model had said anything usable.
