@@ -896,3 +896,207 @@ describe("lifecycle events a week did not open in", () => {
     expect(findEvent(batch.events, "merged")?.at).toBe("2026-03-11T09:00:00.000Z");
   });
 });
+
+describe("an item touched again after the week it moved in", () => {
+  it("is still found by that week's first fetch", async () => {
+    // The trigger: status changed 4 March, issue touched again 20 March. A search
+    // bounded above by the issue's current `updated` returns nothing for a 2–8 March
+    // backfill, and the window is then marked fetched, so 4 March is lost for good.
+    const seenJql: string[] = [];
+    const touchedLater = {
+      ...jiraIssue,
+      fields: { ...jiraIssue.fields, updated: "2026-03-20T17:00:00.000+0000", comment: { comments: [] } },
+      changelog: {
+        histories: [
+          { id: "h-1", created: "2026-03-04T10:00:00.000+0000", items: [{ field: "status", fromString: "To Do", toString: "In Progress" }] },
+        ],
+      },
+    };
+    server.use(
+      http.post(`${BASE_URL}/rest/api/3/search/jql`, async ({ request }) => {
+        seenJql.push(z.object({ jql: z.string() }).parse(await request.json()).jql);
+        return HttpResponse.json({ issues: [touchedLater] });
+      }),
+    );
+
+    const batch = await jiraSource(() => NOW).fetchWindow(window, makeContext());
+
+    expect(seenJql[0]).toContain('created <= "2026-03-08" AND updated >= "2026-03-02"');
+    expect(findEvent(batch.events, "status")?.at).toBe("2026-03-04T10:00:00.000Z");
+  });
+
+  it("says nothing about a week it merely existed through", async () => {
+    // The wider search matches long-lived work every week. A week it did nothing in has
+    // nothing to record, or every past week fills up with headings for old tickets.
+    const quiet = {
+      key: "TEAM-5",
+      fields: {
+        summary: "Search Revamp cleanup",
+        status: { name: "In Review" },
+        created: "2026-01-05T09:00:00.000+0000",
+        updated: "2026-06-01T09:00:00.000+0000",
+      },
+    };
+    server.use(http.post(`${BASE_URL}/rest/api/3/search/jql`, () => HttpResponse.json({ issues: [quiet] })));
+
+    const batch = await jiraSource(() => NOW).fetchWindow(window, makeContext());
+    expect(batch.events).toEqual([]);
+    expect(batch.snapshots).toEqual([]);
+  });
+});
+
+describe("reading a long history to the end", () => {
+  it("follows the pages of an issue's comments", async () => {
+    // The trigger: a search embeds the first page only. Comment 61 is as likely to be
+    // the one that mattered as comment 6.
+    const many = {
+      ...jiraIssue,
+      fields: {
+        ...jiraIssue.fields,
+        comment: {
+          total: 2,
+          comments: [
+            { id: "c-1", created: "2026-03-04T11:30:00.000+0000", author: { accountId: ACCOUNT_ID }, body: { content: [{ content: [{ text: "First." }] }] } },
+          ],
+        },
+      },
+    };
+    server.use(
+      http.post(`${BASE_URL}/rest/api/3/search/jql`, () => HttpResponse.json({ issues: [many] })),
+      http.get(`${BASE_URL}/rest/api/3/issue/TEAM-1234/comment`, () =>
+        HttpResponse.json({
+          comments: [
+            { id: "c-2", created: "2026-03-05T11:30:00.000+0000", author: { accountId: ACCOUNT_ID }, body: { content: [{ content: [{ text: "Second." }] }] } },
+          ],
+        }),
+      ),
+    );
+
+    const batch = await jiraSource(() => NOW).fetchWindow(window, makeContext());
+    expect(batch.events.filter((e) => e.kind === "comment").map((e) => e.id)).toEqual(["c-1", "c-2"]);
+  });
+
+  it("follows the pages of a pull request's reviews", async () => {
+    // The trigger: GitHub sends thirty per page by default, so review 31 is dropped.
+    const firstPage = Array.from({ length: 100 }, (_, i) => ({
+      id: 1000 + i, user: { login: USERNAME }, state: "COMMENTED", body: "n",
+      submitted_at: "2026-03-07T09:00:00Z",
+    }));
+    const seenPages: string[] = [];
+    server.use(
+      http.get("https://api.github.com/search/issues", () => HttpResponse.json({ total_count: 0, items: [] })),
+      http.get("https://api.github.com/repos/example-org/repo/pulls/42/reviews", ({ request }) => {
+        const page = new URL(request.url).searchParams.get("page") || "";
+        seenPages.push(page);
+        if (page === "1") return HttpResponse.json(firstPage);
+        return HttpResponse.json([
+          { id: 2001, user: { login: USERNAME }, state: "APPROVED", body: "The last word.", submitted_at: "2026-03-08T09:00:00Z" },
+        ]);
+      }),
+      http.get("https://api.github.com/repos/example-org/repo/pulls/42", () => HttpResponse.json(authoredPR)),
+    );
+
+    const batch = await githubSource(() => NOW).fetchSince(new Date("2026-03-06T00:00:00Z"), [PR_URL], makeContext());
+
+    expect(seenPages).toEqual(["1", "2"]);
+    expect(batch.events.filter((e) => e.kind === "review").map((e) => e.id)).toContain("2001");
+  });
+
+  it("walks a page's version history until it reaches one the watermark covers", async () => {
+    // The trigger: a fixed page cap. Version 201 can still be newer than the watermark,
+    // and the watermark then moves past it for good.
+    const since = new Date("2026-03-06T00:00:00Z");
+    const seenPaths: string[] = [];
+    server.use(
+      http.get(`${BASE_URL}/wiki/rest/api/content/search`, ({ request }) => {
+        const cql = new URL(request.url).searchParams.get("cql") || "";
+        return HttpResponse.json({ results: cql.includes("type = comment") ? [] : [confluencePage] });
+      }),
+      http.get(`${BASE_URL}/wiki/api/v2/pages/page-1/versions`, ({ request }) => {
+        const cursor = new URL(request.url).searchParams.get("cursor") || "start";
+        seenPaths.push(cursor);
+        if (cursor === "start") {
+          return HttpResponse.json({
+            results: [{ number: 9, createdAt: "2026-03-09T10:00:00.000Z" }, { number: 8, createdAt: "2026-03-08T10:00:00.000Z" }],
+            _links: { next: "/wiki/api/v2/pages/page-1/versions?cursor=older" },
+          });
+        }
+        return HttpResponse.json({
+          results: [{ number: 7, createdAt: "2026-03-07T10:00:00.000Z" }, { number: 6, createdAt: "2026-03-05T10:00:00.000Z" }],
+        });
+      }),
+    );
+
+    const batch = await confluenceSource(() => NOW).fetchSince(since, ["page-1"], makeContext());
+
+    // It went past the first page, and stopped on the one holding a version it already had.
+    expect(seenPaths).toEqual(["start", "older"]);
+    expect(batch.events.filter((e) => e.kind === "version").map((e) => e.id)).toEqual([
+      "page-1:v9", "page-1:v8", "page-1:v7",
+    ]);
+  });
+});
+
+describe("work the user did on somebody else's pull request", () => {
+  it("is discovered by the delta even when they never authored anything", async () => {
+    // The trigger: the user reviews a PR they did not open, after its week was fetched.
+    // It is neither authored nor in the known ids, so a search for authored PRs alone
+    // never asks about it and the review is recorded nowhere.
+    const seenQueries: string[] = [];
+    server.use(
+      http.get("https://api.github.com/search/issues", ({ request }) => {
+        const q = new URL(request.url).searchParams.get("q") || "";
+        seenQueries.push(q);
+        const items = q.includes("reviewed-by:") ? [reviewedPR] : [];
+        return HttpResponse.json({ total_count: items.length, items });
+      }),
+      http.get("https://api.github.com/repos/example-org/repo/pulls/7/reviews", () =>
+        HttpResponse.json([
+          { id: 701, user: { login: USERNAME }, state: "APPROVED", body: "Ship it.", submitted_at: "2026-03-09T15:00:00Z" },
+        ]),
+      ),
+      http.get("https://api.github.com/repos/example-org/repo/pulls/7", () => HttpResponse.json(reviewedPR)),
+    );
+
+    const batch = await githubSource(() => NOW).fetchSince(new Date("2026-03-08T00:00:00Z"), [], makeContext());
+
+    expect(seenQueries.some((q) => q.includes("reviewed-by:example-user"))).toBe(true);
+    expect(seenQueries.some((q) => q.includes("commenter:example-user"))).toBe(true);
+    expect(batch.snapshots.map((s) => s.id)).toEqual([REVIEWED_PR_URL]);
+    expect(findEvent(batch.events, "review")?.id).toBe("701");
+    // Somebody else opened it, so its creation is not this user's news.
+    expect(batch.events.some((e) => e.kind === "created")).toBe(false);
+  });
+});
+
+describe("an ETag earned while scanning a recent week", () => {
+  it("is not replayed against a scan that reaches further back", async () => {
+    // The trigger: the recent scan discards the older review and stores the ETag. The
+    // older week's scan then gets a 304 and never sees it — permanently.
+    const reviews = [
+      { id: 601, user: { login: USERNAME }, state: "APPROVED", body: "Early review.", submitted_at: "2026-03-04T09:00:00Z" },
+      { id: 602, user: { login: USERNAME }, state: "CHANGES_REQUESTED", body: "Later review.", submitted_at: "2026-03-07T09:00:00Z" },
+    ];
+    const sentEtags: Array<string | null> = [];
+    server.use(
+      http.get("https://api.github.com/search/issues", () => HttpResponse.json({ total_count: 0, items: [] })),
+      http.get("https://api.github.com/repos/example-org/repo/pulls/42/reviews", ({ request }) => {
+        const sent = request.headers.get("If-None-Match");
+        sentEtags.push(sent);
+        if (sent === '"reviews-v2"') return new HttpResponse(null, { status: 304 });
+        return HttpResponse.json(reviews, { headers: { ETag: '"reviews-v2"' } });
+      }),
+      http.get("https://api.github.com/repos/example-org/repo/pulls/42", () => HttpResponse.json(authoredPR)),
+    );
+
+    const ctx = makeContext();
+    const recent = await githubSource(() => NOW).fetchSince(new Date("2026-03-06T00:00:00Z"), [PR_URL], ctx);
+    expect(recent.events.filter((e) => e.kind === "review").map((e) => e.id)).toEqual(["602"]);
+
+    const older = await githubSource(() => NOW).fetchSince(new Date("2026-03-01T00:00:00Z"), [PR_URL], ctx);
+
+    // The older scan asked without the recent scan's ETag, and got the early review.
+    expect(sentEtags).toEqual([null, null]);
+    expect(older.events.filter((e) => e.kind === "review").map((e) => e.id)).toEqual(["601", "602"]);
+  });
+});

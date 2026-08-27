@@ -677,3 +677,56 @@ describe("regenerating a week that already has an entry", () => {
     expect(firstDroppedLine("", "# Brag Book\n\n## Achievements\n\n- Something new.")).toBeUndefined();
   });
 });
+
+describe("moving an achievement instead of keeping it", () => {
+  const existing = [
+    "# Brag Book - Week 36, 2026",
+    "",
+    "## Achievements",
+    "",
+    "- Cut search indexing from 40 minutes to 6.",
+    "",
+    "<!-- COACHING_SESSION -->",
+    "### What went well",
+    "",
+    "You said no to the extra scope.",
+    "<!-- /COACHING_SESSION -->",
+  ].join("\n");
+
+  it("does not count a mention in the coaching prose as keeping the achievement", () => {
+    // The trigger: the line is taken out of the achievements and repeated in the
+    // coaching text. A check for the words anywhere in the document sees them and calls
+    // it preserved; the list someone reads next year has lost the entry.
+    const moved = [
+      "# Brag Book - Week 36, 2026",
+      "",
+      "## Achievements",
+      "",
+      "- Shipped the query parser rewrite.",
+      "",
+      "<!-- COACHING_SESSION -->",
+      "### What went well",
+      "",
+      "Earlier you noted: - Cut search indexing from 40 minutes to 6.",
+      "<!-- /COACHING_SESSION -->",
+    ].join("\n");
+
+    expect(firstDroppedLine(existing, moved)).toBe("- Cut search indexing from 40 minutes to 6.");
+  });
+
+  it("does not count an achievement bullet as keeping a coaching heading", () => {
+    const moved = existing
+      .replace("### What went well", "Nothing in particular.")
+      .replace("- Cut search indexing from 40 minutes to 6.", "- Cut search indexing from 40 minutes to 6.\n- ### What went well");
+
+    expect(firstDroppedLine(existing, moved)).toBe("### What went well");
+  });
+
+  it("is happy when both sections keep what they had", () => {
+    const added = existing.replace(
+      "- Cut search indexing from 40 minutes to 6.",
+      "- Cut search indexing from 40 minutes to 6.\n- Shipped the query parser rewrite.",
+    );
+    expect(firstDroppedLine(existing, added)).toBeUndefined();
+  });
+});

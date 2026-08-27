@@ -131,7 +131,10 @@ broke. Two known exceptions are pinned in the test itself: the work log carries 
 **The event ledger**: Activity is cached as first-seen snapshots plus timestamped events
 under `$XDG_CACHE_HOME/worklog/ledger`, never in the vault. How far a source has been
 read is recorded per week, not per source, so refreshing one week cannot claim coverage
-on behalf of a week it never asked about. A week is exactly the events
+on behalf of a week it never asked about. The ledger also records, per week, the events
+that were in it the last time its work log was written: that is what "new material"
+means when a week is amended, and it is why an event discovered days before its week is
+regenerated still reaches the model. A week is exactly the events
 whose timestamps fall inside it, which is what makes a past week a closed record rather
 than a view of today: a ticket closed in September does not turn August's entry into a
 story about a finished ticket. Recording is idempotent, so re-fetching a week matches
@@ -181,29 +184,39 @@ gets rewritten, what the model is told — is the ledger's job.
    events for the things that happened to them. Date each event by when it happened.
    When the system gives you no date, date it now and mark the payload `spotted: true`
    so the work log can say so.
-2. `fetchWindow` must find an item by its **activity** in the window, not by when it was
-   created, and must report each thing that happened to it on that thing's own date —
-   read the changelog or version history rather than the item's current state. A ticket
-   opened in one week and closed in the next has something to say to both weeks.
+2. `fetchWindow` must find every item **alive during** the window — created on or before
+   it ended, touched on or after it began — and then report each thing that happened on
+   that thing's own date, read from the changelog or version history rather than from the
+   item's current state. Bounding the search by the item's current `updated` hides an
+   issue that moved on the Monday and was touched again three weeks later, permanently,
+   because the window is marked fetched either way. An item the week has nothing to say
+   about gets no snapshot and no event.
 3. `fetchSince` gets the ids the ledger already knows, but it must also **go looking**:
    run the source's own "what have I touched since" query and union the two. An item
    created after a week was first fetched is in nobody's list of known ids, and a source
    that only asks about what it already knows will never see it again.
 4. Report only the user's own work. A ticket assigned to them collects other people's
-   comments; filter by `ctx.identity`.
-5. Give every event the system's own id when there is one. That is what makes a
+   comments; filter by `ctx.identity`. Do look for work that leaves no trace in a search
+   for what they authored, though — a review on somebody else's pull request is theirs.
+5. Read collections to the end. A search embeds one page of comments, GitHub sends
+   thirty reviews, and a version history is as long as the page is old. The entry that
+   mattered is as likely to be number 61 as number 6.
+6. Anything conditional (an ETag, a cursor) must be keyed by the question it answered.
+   `ctx.state` is shared across runs, and a 304 earned while scanning last week is not
+   an answer about last month.
+7. Give every event the system's own id when there is one. That is what makes a
    re-fetch match instead of duplicate.
-6. Report soft failures through `ctx.onWarning` and the batch's `warnings`, and say why
+8. Report soft failures through `ctx.onWarning` and the batch's `warnings`, and say why
    in `isAvailable` when the source cannot run. An unavailable source is skipped, never
    fatal.
-7. Name it in `/^[a-z0-9_-]+$/`. The name becomes a file name in the cache, and anything
+9. Name it in `/^[a-z0-9_-]+$/`. The name becomes a file name in the cache, and anything
    that could be a path is refused.
-8. Add it to `allSources()`, which is the one list both `worklog` and `worklog refresh`
-   read.
-9. Test it with msw in `lib/sdk/__tests__/source-adapters.test.ts`. Note that
-   `vitest.config.ts` only includes `lib/__tests__`, `lib/sdk/__tests__` and
-   `commands/__tests__` — a test elsewhere is silently skipped.
-10. Update `prompts/weekly-brag-prompt.md` if the AI needs to understand the new data.
+10. Add it to `allSources()`, which is the one list both `worklog` and `worklog refresh`
+    read.
+11. Test it with msw in `lib/sdk/__tests__/source-adapters.test.ts`. Note that
+    `vitest.config.ts` only includes `lib/__tests__`, `lib/sdk/__tests__` and
+    `commands/__tests__` — a test elsewhere is silently skipped.
+12. Update `prompts/weekly-brag-prompt.md` if the AI needs to understand the new data.
 
 ## Submitting changes
 

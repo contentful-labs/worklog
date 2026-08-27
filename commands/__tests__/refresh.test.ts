@@ -296,3 +296,80 @@ describe("what the command accepts on the command line", () => {
     expect(() => parseWeek("nonsense")).toThrow(/YYYY-WNN/);
   });
 });
+
+describe("an event discovered days before its week is refreshed", () => {
+  const augustWeek = week("2026-W33", "2026-08-10", "2026-08-16");
+  const augustComment: SourceBatch = {
+    snapshots: [{
+      id: "TEAM-1234", firstSeenAt: "2026-08-11T09:00:00.000Z",
+      payload: { title: "Search Revamp indexer", url: "https://example.atlassian.net/browse/TEAM-1234" },
+    }],
+    events: [{
+      source: "jira", kind: "comment", itemId: "TEAM-1234",
+      at: "2026-08-11T09:00:00.000Z", payload: { text: "an older comment" }, id: "c-old",
+    }],
+    warnings: [],
+  };
+
+  beforeEach(async () => {
+    await mkdir(vault, { recursive: true });
+  });
+
+  it("still reaches the model when that week is finally written", async () => {
+    // The trigger: September's run discovers an August event and files it. August is
+    // refreshed later; measured against the state at the start of that run, the event is
+    // already there and counts as old, so the prompt is handed nothing new and told that
+    // everything else is already accounted for. The event is then never written up.
+    const september = await runOnce(stubSource("jira", augustComment));
+    expect(september.written).toEqual([]);
+    expect(september.waiting).toEqual(["2026-W33"]);
+
+    const august = await runOnce(stubSource("jira", { snapshots: [], events: [], warnings: [] }), [augustWeek]);
+
+    expect(august.written.map((w) => w.weekId)).toEqual(["2026-W33"]);
+    expect(august.written[0].newMaterial).toContain("comment on TEAM-1234");
+  });
+
+  it("is not offered again once the week that received it has been written", async () => {
+    await runOnce(stubSource("jira", augustComment));
+    await runOnce(stubSource("jira", { snapshots: [], events: [], warnings: [] }), [augustWeek]);
+
+    const again = await runOnce(stubSource("jira", augustComment), [augustWeek]);
+    expect(again.written).toEqual([]);
+  });
+});
+
+describe("a week whose cached events cannot all be read", () => {
+  beforeEach(async () => {
+    await mkdir(vault, { recursive: true });
+  });
+
+  it("is not written into the vault, and is named as skipped", async () => {
+    // The trigger: one unreadable row plus one new event. Generating from what is left
+    // turns a damaged cache file, which can be refetched, into a damaged week, which
+    // cannot.
+    await runOnce(stubSource("jira", oneComment));
+    const weekFile = join(cache, "events", "2026-W36.json");
+    const rows = JSON.parse(await readFile(weekFile, "utf-8"));
+    await writeFile(weekFile, JSON.stringify([...rows, { source: "jira", kind: 7 }], null, 2), "utf-8");
+    const cacheBefore = await readFile(weekFile, "utf-8");
+    const vaultBefore = await snapshotOfDisk(vault);
+
+    const later: SourceBatch = {
+      snapshots: [],
+      events: [{
+        source: "jira", kind: "status", itemId: "TEAM-1234",
+        at: "2026-09-03T09:00:00.000Z", payload: { from: "In Progress", to: "Done" },
+      }],
+      warnings: [],
+    };
+    const run = await runOnce(stubSource("jira", later));
+
+    expect(run.written).toEqual([]);
+    expect(run.skipped).toEqual(["2026-W36"]);
+    expect(run.rows).toEqual([{ weekId: "2026-W36", regenerated: false }]);
+    // Neither the vault nor the damaged file was touched.
+    expect(await snapshotOfDisk(vault)).toEqual(vaultBefore);
+    expect(await readFile(weekFile, "utf-8")).toBe(cacheBefore);
+  });
+});

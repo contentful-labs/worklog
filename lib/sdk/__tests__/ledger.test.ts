@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtemp, readFile, rm, writeFile, readdir } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile, readdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -582,5 +582,147 @@ describe("a ledger file this version cannot read", () => {
     expect(await readFile(path, "utf-8")).toBe(before);
     // In memory the week is complete enough to write a work log from.
     expect(ledger.eventsForWeek("2026-W36").map((event) => event.kind)).toEqual(["comment", "status"]);
+  });
+});
+
+describe("a clock that runs fast somewhere else", () => {
+  const week = (weekId: string, start: string, end: string) => ({
+    weekId,
+    window: { start: new Date(`${start}T00:00:00.000Z`), end: new Date(`${end}T23:59:59.999Z`) },
+  });
+
+  const ctx = (): SourceContext => ({
+    // SAFETY: this fake source reads nothing from config; a real one is handed a real
+    // config by the command, and this test is about the ledger, not about it.
+    config: {} as SourceContext["config"],
+  });
+
+  it("does not let a future-dated event carry the watermark past the moment we asked", async () => {
+    // The trigger: a delta answers with an item stamped a week into the future. Trusting
+    // it moves the reading position there, and everything committed in between is never
+    // asked for again.
+    const asked: string[] = [];
+    const weeks = [week("2026-W36", "2026-08-31", "2026-09-06")];
+    const firstRun = new Date("2026-09-07T10:00:00.000Z");
+    const secondRun = new Date("2026-09-07T11:00:00.000Z");
+    const fromTheFuture = {
+      source: "jira", kind: "comment", itemId: "TEAM-1234",
+      at: "2026-09-14T09:00:00.000Z", payload: {}, id: "c-skewed",
+    };
+
+    const source = (deltaEvents: typeof fromTheFuture[]): Source => ({
+      name: "jira",
+      isAvailable: async () => ({ ok: true }),
+      fetchWindow: async () => ({ snapshots: [], events: [], warnings: [] }),
+      fetchSince: async (since) => {
+        asked.push(since.toISOString());
+        return { snapshots: [], events: deltaEvents, warnings: [] };
+      },
+    });
+
+    // Run one windows the week and reads it up to when it asked.
+    const first = await openLedger(root);
+    await collectIntoLedger(first, [source([])], weeks, ctx, firstRun);
+    await first.save();
+
+    // Run two's delta brings back the skewed event.
+    const second = await openLedger(root);
+    await collectIntoLedger(second, [source([fromTheFuture])], weeks, ctx, secondRun);
+    await second.save();
+
+    const third = await openLedger(root);
+    expect(third.watermarkFor("jira", "2026-W36")?.toISOString()).toBe(secondRun.toISOString());
+
+    await collectIntoLedger(third, [source([])], weeks, ctx, new Date("2026-09-07T12:00:00.000Z"));
+
+    // The third run asks from when the second one ran, not from next week.
+    expect(asked).toEqual([firstRun.toISOString(), secondRun.toISOString()]);
+  });
+});
+
+describe("a cache written by the previous version", () => {
+  it("keeps its collected weeks but not the watermark that was never about them", async () => {
+    // The trigger: version 1 kept one reading position for a whole source, advanced by
+    // whichever week was refreshed last. Copying it into every week would claim that a
+    // week nobody checked had been checked.
+    await mkdir(root, { recursive: true });
+    await writeFile(join(root, "meta.json"), JSON.stringify({
+      version: 1,
+      sources: { jira: { fetchedAt: "2026-08-27T09:00:00.000Z", windows: ["2026-W33", "2026-W35"], state: { "etag:x": "abc" } } },
+    }), "utf-8");
+
+    const ledger = await openLedger(root);
+
+    // The expensive window fetches are not repeated.
+    expect(ledger.hasWindow("jira", "2026-W33")).toBe(true);
+    expect(ledger.hasWindow("jira", "2026-W35")).toBe(true);
+    // But neither week claims to have been read to any particular point.
+    expect(ledger.watermarkFor("jira", "2026-W33")).toBeUndefined();
+    expect(ledger.watermarkFor("jira", "2026-W35")).toBeUndefined();
+    // The source's own state survives; it was never week-specific.
+    expect(ledger.stateFor("jira").get("etag:x")).toBe("abc");
+    expect(ledger.notices()[0]).toContain("older version");
+  });
+});
+
+describe("a ledger file that is not JSON at all", () => {
+  it("is reported, bars its week from being written, and is left alone", async () => {
+    const ledger = await openLedger(root);
+    ledger.record("jira", batch({
+      events: [{ source: "jira", kind: "comment", itemId: "TEAM-1234", at: "2026-08-31T11:00:00.000Z", payload: {}, id: "c-1" }],
+    }), seenAt);
+    await ledger.save();
+
+    const path = join(root, "events", "2026-W36.json");
+    await writeFile(path, "{ this is not json", "utf-8");
+    const before = await readFile(path, "utf-8");
+
+    const reopened = await openLedger(root);
+
+    expect(reopened.problems()[0]).toContain("not valid JSON");
+    expect(reopened.unreadableWeeks()).toEqual(["2026-W36"]);
+
+    reopened.record("jira", batch({
+      events: [{ source: "jira", kind: "status", itemId: "TEAM-1234", at: "2026-09-02T09:00:00.000Z", payload: {} }],
+    }), seenAt);
+    await reopened.save();
+
+    expect(await readFile(path, "utf-8")).toBe(before);
+  });
+});
+
+describe("what a week's work log has already been told", () => {
+  const comment = { source: "jira", kind: "comment", itemId: "TEAM-1234", at: "2026-08-31T11:00:00.000Z", payload: {}, id: "c-1" };
+  const status = { source: "jira", kind: "status", itemId: "TEAM-1234", at: "2026-09-02T09:00:00.000Z", payload: {} };
+
+  it("is everything when the week has never been written", async () => {
+    const ledger = await openLedger(root);
+    ledger.record("jira", batch({ events: [comment, status] }), seenAt);
+
+    expect(ledger.unwrittenEvents("2026-W36")).toHaveLength(2);
+    expect(ledger.pendingWeeks()).toEqual(["2026-W36"]);
+  });
+
+  it("is nothing straight after a write, and the new event after that", async () => {
+    const ledger = await openLedger(root);
+    ledger.record("jira", batch({ events: [comment] }), seenAt);
+    ledger.markWritten("2026-W36");
+
+    expect(ledger.unwrittenEvents("2026-W36")).toEqual([]);
+    expect(ledger.pendingWeeks()).toEqual([]);
+
+    ledger.record("jira", batch({ events: [status] }), seenAt);
+    expect(ledger.unwrittenEvents("2026-W36").map((event) => event.kind)).toEqual(["status"]);
+  });
+
+  it("survives being reopened, so a week written days ago is not told twice", async () => {
+    const first = await openLedger(root);
+    first.record("jira", batch({ events: [comment] }), seenAt);
+    first.markWritten("2026-W36");
+    await first.save();
+
+    const second = await openLedger(root);
+    second.record("jira", batch({ events: [status] }), seenAt);
+    expect(second.unwrittenEvents("2026-W36").map((event) => event.kind)).toEqual(["status"]);
   });
 });

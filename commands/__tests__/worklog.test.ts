@@ -407,3 +407,68 @@ describe("amending a week that already has an entry", () => {
     }
   });
 });
+
+describe("regenerating a week that already has an entry", () => {
+  it("writes nothing when --force returns a document that drops an achievement", async () => {
+    // The trigger: `worklog --week X --force` on a week that already has a brag book.
+    // The response is valid and contains only the new material. Without amend mode the
+    // week is overwritten and what it recorded is gone.
+    const tmp = mkdtempSync(join(tmpdir(), "worklog-force-"));
+    const configHome = join(tmp, "config");
+    const vault = join(tmp, "vault");
+    const previousConfigHome = process.env.XDG_CONFIG_HOME;
+    const previousCacheHome = process.env.XDG_CACHE_HOME;
+    const previousAtlassian = process.env.ATLASSIAN_API_TOKEN;
+    const previousGitHub = process.env.GITHUB_TOKEN;
+
+    seedVault(vault);
+    writeConfig(configHome, vault);
+    process.env.XDG_CONFIG_HOME = configHome;
+    process.env.XDG_CACHE_HOME = join(tmp, "cache");
+    process.env.ATLASSIAN_API_TOKEN = "test-atlassian-token";
+    process.env.GITHUB_TOKEN = "test-github-token";
+
+    vi.stubGlobal("Bun", {
+      write: async (path: string, content: string) => writeFileSync(path, content),
+      file: (path: string) => ({ text: async () => readFileSync(path, "utf8") }),
+    });
+
+    try {
+      vi.resetModules();
+      const { aiQueryStructured } = await import("../../lib/sdk/ai");
+      vi.mocked(aiQueryStructured).mockResolvedValue({
+        ...BAD_OUTPUT,
+        bragBookMarkdown: "# Brag Book - Week 09, 2026\n\n## Achievements\n\n- Only the new thing",
+      });
+
+      const { runWorklog } = await import("../worklog");
+      await expect(
+        runWorklog({ week: WEEK, noPrompt: true, force: true, verbose: false }),
+      ).rejects.toThrow(/Refusing to write the brag book/);
+
+      expect(readFileSync(join(vault, `${WEEK} Brag Book.md`), "utf8")).toBe(EXISTING_BRAG_BOOK);
+      expect(readFileSync(join(vault, `${WEEK} Work Log.md`), "utf8")).toBe(EXISTING_WORK_LOG);
+    } finally {
+      if (previousConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
+      else process.env.XDG_CONFIG_HOME = previousConfigHome;
+      if (previousCacheHome === undefined) delete process.env.XDG_CACHE_HOME;
+      else process.env.XDG_CACHE_HOME = previousCacheHome;
+      if (previousAtlassian === undefined) delete process.env.ATLASSIAN_API_TOKEN;
+      else process.env.ATLASSIAN_API_TOKEN = previousAtlassian;
+      if (previousGitHub === undefined) delete process.env.GITHUB_TOKEN;
+      else process.env.GITHUB_TOKEN = previousGitHub;
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("what the weekly command accepts on the command line", () => {
+  it("makes the same two checks refresh makes", async () => {
+    const { makeWorklogCommand } = await import("../worklog");
+    const command = makeWorklogCommand().exitOverride().configureOutput({ writeErr: () => {} });
+
+    // The trigger: 2027 has 52 weeks, and `new Date` turns 31 February into 3 March.
+    expect(() => command.parse(["--week", "2027-W53"], { from: "user" })).toThrow(/not a week of 2027/);
+    expect(() => command.parse(["--since", "2026-02-31"], { from: "user" })).toThrow(/real date/);
+  });
+});

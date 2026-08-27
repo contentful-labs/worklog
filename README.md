@@ -102,7 +102,9 @@ comment written this week lands in this week even when the ticket is from August
 the weeks whose activity actually changed are written again, so a run that finds
 nothing makes no AI call and touches no file.
 
-A regeneration **adds** to a week's brag book and never removes from it. The existing
+A regeneration **adds** to a week's brag book and never removes from it. This holds for
+`worklog` as much as for `worklog refresh`, and `--force` is no exception: it means
+"generate this week again", never "throw away what the week already says". The existing
 entry goes back to the model with only the new material, and the run refuses to write a
 document that has dropped an achievement or a coaching heading the entry already had —
 your week keeps what it had, and the error names what went missing.
@@ -169,7 +171,8 @@ August and closed in September reads as work in progress in August, because Sept
 is not in August's file. Deleting the cache costs you nothing but a refetch.
 
 If a file in the cache is edited into something the tool cannot read, it says which file
-and which row, carries on with the rest, and does not write that file back. Nothing in
+and which row, does not write that file back, and does not write that week into your
+vault either. A damaged cache file can be refetched; a damaged week cannot. Nothing in
 there heals itself by deleting the evidence.
 
 ## Weekly workflow
