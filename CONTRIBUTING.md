@@ -67,6 +67,21 @@ To test the full pipeline you'll need API tokens (Jira, GitHub) and an AI provid
 
 Tests live next to the code in `__tests__/` folders (`lib/__tests__`, `lib/sdk/__tests__`, `commands/__tests__`) and run with vitest + msw for HTTP mocking.
 
+### Tests never touch your real config or cache
+
+The CLI resolves its directories from `XDG_CONFIG_HOME`, `XDG_CACHE_HOME` and, failing
+those, `homedir()`. A test that sets none of them reads and writes your own
+`~/.config/worklog` and `~/.cache/worklog`, which happened three times before this was
+caught. `test/setup.ts` runs as a vitest `setupFile` -- before any module reads those
+variables, which a `beforeAll` would be too late for -- and points all three at a temp
+directory, removed when the file finishes. It then asserts the resolved directories really
+are inside it, so a typo in the redirection fails the run rather than leaking silently.
+
+These are defaults. A test that wants its own config home still sets and restores it as
+before, usually around `vi.resetModules()`, and wins. If a test computes a path itself,
+`assertOutsideRealHome` from `test/home.ts` will say so loudly rather than letting it show
+up later in a diff of someone's actual vault.
+
 ### The end-to-end harness
 
 `commands/__tests__/worklog.e2e.test.ts` runs one week of `runWorklog` over a temp vault.
