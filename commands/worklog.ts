@@ -64,6 +64,7 @@ import {
   updateFocusTracking,
   migrateFocusTrackingFile,
   migrateVaultRecordsFile,
+  migrateWeeklyFrontmatter,
   isIsoDate,
   writeFileAtomic,
 } from "../lib/sdk/vault-updates";
@@ -601,6 +602,13 @@ export async function runWorklog(opts: {
         `${cleanup.duplicates} duplicates collapsed. Backup: ${cleanup.backup}`,
       );
     }
+  }
+
+  // Weeks generated before the writers emitted frontmatter have none, so the vault
+  // cannot find them by tag. Give them the block their writers emit today.
+  const frontmatter = await migrateWeeklyFrontmatter(paths.vault);
+  if (frontmatter.updated.length > 0) {
+    p.log.info(`Added frontmatter to ${frontmatter.updated.length} weekly document(s)`);
   }
 
   const weeksToGenerate = await getWeeksToGenerate(paths.vault, weeksBack, specificWeek, force, sinceDate);

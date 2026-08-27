@@ -5,7 +5,8 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
   updateMemory, updateImpactLog, updateWorkContext, updateProfile,
-  updateFocusTracking, migrateFocusTrackingFile, migrateVaultRecordsFile, isPlaceholder, isIsoDate,
+  updateFocusTracking, migrateFocusTrackingFile, migrateVaultRecordsFile, migrateWeeklyFrontmatter,
+  isPlaceholder, isIsoDate,
 } from "../vault-updates";
 import { appendToFirstTable, splitRow } from "../markdown-table";
 import { generateProfileDoc, generateWorkContextDoc } from "../doc-generators";
@@ -4307,5 +4308,167 @@ describe("a duplicate that lists the same evidence twice", () => {
     const content = await readFile(path, "utf-8");
     expect(content).toContain("| A, B |");
     expect(content).not.toContain("B, B");
+  });
+});
+
+describe("migrateWeeklyFrontmatter", () => {
+  const BRAG = "---\ntags:\n  - areas/work\n  - areas/work/brag-book\n---\n\n";
+  const LOG = "---\ntags:\n  - areas/work\n  - areas/work/work-log\n---\n\n";
+
+  async function seed(name: string, content: string) {
+    await writeFile(join(tmpDir, name), content, "utf-8");
+  }
+
+  const read = (name: string) => readFile(join(tmpDir, name), "utf-8");
+
+  it("gives an old brag book the block its writer emits today", async () => {
+    await seed("2026-W05 Brag Book.md", "# Brag Book - Week 05, 2026\n\n## Achievements\n\n- Shipped auth\n");
+
+    const result = await migrateWeeklyFrontmatter(tmpDir);
+
+    expect(result.updated).toEqual(["2026-W05 Brag Book.md"]);
+    expect(result.skipped).toBe(0);
+    expect(await read("2026-W05 Brag Book.md")).toBe(`${BRAG}# Brag Book - Week 05, 2026\n\n## Achievements\n\n- Shipped auth\n`);
+  });
+
+  it("tags a work log as a work log, not as a brag book", async () => {
+    // The two blocks differ only in the second tag, and getting it wrong would file a
+    // year of work logs under the wrong note type.
+    await seed("2026-W05 Work Log.md", "# Work Log - Week 5, 2026\n");
+
+    await migrateWeeklyFrontmatter(tmpDir);
+
+    expect(await read("2026-W05 Work Log.md")).toBe(`${LOG}# Work Log - Week 5, 2026\n`);
+  });
+
+  it("keeps a backup of the file as it was", async () => {
+    const original = "# Brag Book - Week 05, 2026\n";
+    await seed("2026-W05 Brag Book.md", original);
+
+    await migrateWeeklyFrontmatter(tmpDir);
+
+    expect(await read("2026-W05 Brag Book.md.pre-frontmatter.bak")).toBe(original);
+  });
+
+  it("does nothing on a second run, and takes no second backup", async () => {
+    await seed("2026-W05 Brag Book.md", "# Brag Book - Week 05, 2026\n");
+    await migrateWeeklyFrontmatter(tmpDir);
+    const afterFirst = await read("2026-W05 Brag Book.md");
+
+    const second = await migrateWeeklyFrontmatter(tmpDir);
+
+    expect(second.updated).toEqual([]);
+    expect(second.skipped).toBe(1);
+    expect(await read("2026-W05 Brag Book.md")).toBe(afterFirst);
+    expect(existsSync(join(tmpDir, "2026-W05 Brag Book.md.pre-frontmatter.2.bak"))).toBe(false);
+  });
+
+  it("leaves frontmatter someone else wrote alone", async () => {
+    // Hand-edited, and a second block would break the one that is there.
+    const hand = "---\ntags:\n  - personal/notes\naliases:\n  - W05\n---\n\n# Brag Book\n";
+    await seed("2026-W05 Brag Book.md", hand);
+
+    const result = await migrateWeeklyFrontmatter(tmpDir);
+
+    expect(result.updated).toEqual([]);
+    expect(result.skipped).toBe(1);
+    expect(await read("2026-W05 Brag Book.md")).toBe(hand);
+  });
+
+  it("leaves frontmatter hidden behind a byte order mark alone", async () => {
+    // A BOM hides the fence from a startsWith test, and a second block would turn the
+    // metadata that was there into body text.
+    const withBom = `\uFEFF${BRAG}# Brag Book - Week 05, 2026\n`;
+    await seed("2026-W05 Brag Book.md", withBom);
+
+    const result = await migrateWeeklyFrontmatter(tmpDir);
+
+    expect(result.updated).toEqual([]);
+    expect(result.skipped).toBe(1);
+    expect(await read("2026-W05 Brag Book.md")).toBe(withBom);
+  });
+
+  it("leaves frontmatter behind a leading blank line alone", async () => {
+    const withBlank = `\n\n${BRAG}# Brag Book - Week 05, 2026\n`;
+    await seed("2026-W05 Brag Book.md", withBlank);
+
+    const result = await migrateWeeklyFrontmatter(tmpDir);
+
+    expect(result.updated).toEqual([]);
+    expect(result.skipped).toBe(1);
+    expect(await read("2026-W05 Brag Book.md")).toBe(withBlank);
+  });
+
+  it("still adds frontmatter to a BOM file that has none", async () => {
+    // The mark is not itself frontmatter, so this one is genuinely missing a block.
+    await seed("2026-W05 Brag Book.md", "\uFEFF# Brag Book - Week 05, 2026\n");
+
+    const result = await migrateWeeklyFrontmatter(tmpDir);
+
+    expect(result.updated).toEqual(["2026-W05 Brag Book.md"]);
+  });
+
+  it("migrates only the filenames the generator produces", async () => {
+    // A suffix test caught hand-written notes that merely end the same way.
+    await seed("Personal Work Log.md", "# My own notes\n");
+    await seed("Brag Book Index.md", "# Index\n");
+    await seed("2026-W09 Work Log.md", "# Work Log - Week 9, 2026\n");
+
+    const result = await migrateWeeklyFrontmatter(tmpDir);
+
+    expect(result.updated).toEqual(["2026-W09 Work Log.md"]);
+    expect(await read("Personal Work Log.md")).toBe("# My own notes\n");
+    expect(await read("Brag Book Index.md")).toBe("# Index\n");
+    expect(existsSync(join(tmpDir, "Personal Work Log.md.pre-frontmatter.bak"))).toBe(false);
+  });
+
+  it("keeps CRLF files on CRLF", async () => {
+    const crlf = "# Brag Book - Week 05, 2026\r\n\r\n## Achievements\r\n";
+    await seed("2026-W05 Brag Book.md", crlf);
+
+    await migrateWeeklyFrontmatter(tmpDir);
+
+    const after = await read("2026-W05 Brag Book.md");
+    expect(after).toBe(`---\r\ntags:\r\n  - areas/work\r\n  - areas/work/brag-book\r\n---\r\n\r\n${crlf}`);
+    expect(after).not.toMatch(/[^\r]\n/);
+  });
+
+  it("leaves an empty file alone rather than writing a header over nothing", async () => {
+    await seed("2026-W05 Brag Book.md", "");
+    await seed("2026-W06 Brag Book.md", "   \n\n");
+
+    const result = await migrateWeeklyFrontmatter(tmpDir);
+
+    expect(result.updated).toEqual([]);
+    expect(result.skipped).toBe(2);
+    expect(await read("2026-W05 Brag Book.md")).toBe("");
+  });
+
+  it("touches only the weekly documents", async () => {
+    await seed("memory.md", "# Memory\n");
+    await seed("My Focus.md", "# Focus\n");
+    await seed("2026-W05 Brag Book.md", "# Brag Book\n");
+
+
+    const result = await migrateWeeklyFrontmatter(tmpDir);
+
+    expect(result.updated).toEqual(["2026-W05 Brag Book.md"]);
+    expect(await read("memory.md")).toBe("# Memory\n");
+    expect(await read("My Focus.md")).toBe("# Focus\n");
+  });
+
+  it("reports every file it changed, sorted, and counts the rest", async () => {
+    await seed("2026-W05 Brag Book.md", "# W05\n");
+    await seed("2026-W07 Work Log.md", "# W07\n");
+    await seed("2026-W06 Brag Book.md", `${BRAG}# W06\n`);
+
+    const result = await migrateWeeklyFrontmatter(tmpDir);
+
+    expect(result.updated).toEqual(["2026-W05 Brag Book.md", "2026-W07 Work Log.md"]);
+    expect(result.skipped).toBe(1);
+  });
+
+  it("says nothing happened when the vault directory is not there", async () => {
+    expect(await migrateWeeklyFrontmatter(join(tmpDir, "no-such-vault"))).toEqual({ updated: [], skipped: 0 });
   });
 });

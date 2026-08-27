@@ -34,7 +34,9 @@ vi.mock("@clack/prompts", () => ({
 }));
 
 const WEEK = "2026-W09";
-const EXISTING_WORK_LOG = "# Work Log 2026-W09\n\nReal fetched activity from the original run.\n";
+// Frontmatter included because that is what a work log the writers produced looks
+// like; without it the frontmatter migration would rewrite the fixture mid-test.
+const EXISTING_WORK_LOG = "---\ntags:\n  - areas/work\n  - areas/work/work-log\n---\n\n# Work Log 2026-W09\n\nReal fetched activity from the original run.\n";
 const EXISTING_BRAG_BOOK = "---\ntags:\n  - areas/work\n---\n\n# Brag Book - Week 09, 2026\n\n## Achievements\n\n- Real work\n";
 
 /** A structurally valid response whose document would fail validation. */
