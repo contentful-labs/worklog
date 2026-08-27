@@ -721,6 +721,19 @@ describe("condenseMemoryNotes", () => {
     expect(condenseMemoryNotes(fenced, "2026-01-01").content).toBe(fenced);
   });
 
+  it("does not open a fence on a run of fewer than three markers", () => {
+    // Two backticks is inline-code punctuation, not a fence. Reading it as one swallowed the
+    // rest of the file and left every row after it uncondensed.
+    const notAFence = [
+      "``",
+      "| 2020-01-01 | Older row | Category | older notes |",
+    ].join("\n");
+    const { content } = condenseMemoryNotes(notAFence, "2026-01-01");
+
+    expect(content).not.toContain("older notes");
+    expect(content).toContain("Older row");
+  });
+
   it("treats an unclosed fence as running to the end of the file", () => {
     const fenced = ["```md", "| 2020-01-01 | Example | Category | example notes |"].join("\n");
 
