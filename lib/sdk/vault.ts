@@ -316,8 +316,8 @@ export function summarizeArchivedFocusDocs(content: string): string {
 
     if (node.type === "heading") {
       kept.push(...lines.slice(node.position.start.line - 1, node.position.end.line));
-      // `### Focus Doc archived 2026-03-01` labels everything until the next such heading.
-      if (node.depth === 3) label = archiveLabel(nodeText(node));
+      const archived = archiveLabel(nodeText(node));
+      if (archived !== null) label = archived;
       continue;
     }
 
@@ -359,21 +359,21 @@ export function summarizeArchivedFocusDocs(content: string): string {
   return out.join("\n");
 }
 
-/** `Focus Doc archived 2026-03-01` reads as `2026-03-01`; anything else keeps its own words. */
-function archiveLabel(headingText: string): string {
-  const words = headingText.trim().split(/\s+/);
-  const last = words[words.length - 1] ?? "";
-  return isIsoDateLike(last) ? last : headingText.trim();
-}
-
-function isIsoDateLike(value: string): boolean {
-  if (value.length !== 10) return false;
-  for (let i = 0; i < 10; i++) {
-    const char = value[i];
-    const digit = char >= "0" && char <= "9";
-    if (i === 4 || i === 7 ? char !== "-" : !digit) return false;
-  }
-  return true;
+/**
+ * The label of an archive boundary, or null for any other heading.
+ *
+ * `readArchivedFocusDocs` above is the only producer of these, and it always writes
+ * `### Focus Doc archived <label>`. Matching that exact prefix matters: a focus doc of its own
+ * with `### Blocked` and `### In progress` subheadings otherwise re-labels every item under them,
+ * and an item ends up "first seen Blocked, last seen In progress".
+ *
+ * `<label>` is the date from the filename, or the filename itself when it does not parse.
+ */
+function archiveLabel(headingText: string): string | null {
+  const prefix = "focus doc archived ";
+  const collapsed = headingText.trim().split(/\s+/).join(" ");
+  if (!collapsed.toLowerCase().startsWith(prefix)) return null;
+  return collapsed.slice(prefix.length).trim() || null;
 }
 
 /** A list item can span several lines; the carried list keeps one line per item. */
@@ -547,13 +547,29 @@ const WORK_KEYWORDS = [
   "onboarding", "offboarding", "handover", "runbook", "postmortem",
 ];
 
+/**
+ * The ticket prefixes in force for a given week. A historical week belongs to whichever team the
+ * timeline says it did, and that team may have used prefixes the current profile no longer lists.
+ * Falls back to the profile when the timeline entry has none.
+ */
+export function ticketPrefixesForWeek(
+  /** Only the prefixes are read, so a caller can pass anything carrying them. */
+  config: { profile: Pick<WorklogConfig["profile"], "ticketPrefixes"> },
+  teamEntry: TeamTimelineEntry | undefined,
+): string[] {
+  const fromTimeline = teamEntry?.ticketPrefixes ?? [];
+  return fromTimeline.length > 0 ? fromTimeline : config.profile.ticketPrefixes;
+}
+
 export async function discoverWeeklyNotes(
   config: WorklogConfig,
   paths: VaultPaths,
   startDate: Date,
   endDate: Date,
+  /** Optional so existing callers keep working; pass the week's team prefixes for a past week. */
+  ticketPrefixes: string[] = config.profile.ticketPrefixes,
 ): Promise<VaultNote[]> {
-  const prefixes = config.profile.ticketPrefixes.map(p => p.toLowerCase());
+  const prefixes = ticketPrefixes.map(p => p.toLowerCase());
   const configTerms = [config.profile.company, config.profile.team, config.profile.teamDomain]
     .filter(Boolean)
     .map(t => t.toLowerCase());

@@ -7,10 +7,13 @@ import {
   rankVaultNotes,
   summarizeArchivedFocusDocs,
   summarizePreviousBragBooks,
+  ticketPrefixesForWeek,
   DEFAULT_ORG_NOTE_CAP,
   DEFAULT_VAULT_NOTE_CAP,
+  type TeamTimelineEntry,
   type VaultNote,
 } from "../vault";
+const config = { profile: { ticketPrefixes: ["TEAM"] } };
 
 const BRAG_BOOK = `# Brag Book - Week 12, 2026
 
@@ -216,6 +219,38 @@ describe("summarizeArchivedFocusDocs", () => {
     ].join("\n");
 
     expect(summarizeArchivedFocusDocs(punctuated).split("igration").length - 1).toBe(2);
+  });
+
+  it("only takes a label from an archive boundary, not from any H3 inside a doc", () => {
+    // `readArchivedFocusDocs` writes `### Focus Doc archived <date>`; a focus doc may use its own
+    // H3s for status. Treating those as boundaries produced "first seen Blocked, last seen Done".
+    const nested = [
+      "### Focus Doc archived 2026-03-01",
+      "",
+      "### Blocked",
+      "",
+      "- Ship migration",
+      "",
+      "### In progress",
+      "",
+      "- Write the RFC",
+      "",
+      "---",
+      "",
+      "### Focus Doc archived 2026-02-01",
+      "",
+      "### Blocked",
+      "",
+      "- Ship migration",
+    ].join("\n");
+
+    const summary = summarizeArchivedFocusDocs(nested);
+
+    expect(summary).toContain("- Ship migration _(first seen 2026-02-01, last seen 2026-03-01)_");
+    expect(summary).toContain("- Write the RFC _(seen in 2026-03-01)_");
+    expect(summary).not.toContain("first seen Blocked");
+    expect(summary).not.toContain("seen in Blocked");
+    expect(summary).not.toContain("seen in In progress");
   });
 
   it("does not mistake a word merely starting with a marker for a closed item", () => {
@@ -512,6 +547,31 @@ describe("rankVaultNotes", () => {
     const ranked = rankVaultNotes([...noisy, oldest], ["TEAM-123"], 10);
 
     expect(ranked[0].title).toBe("Oldest but relevant");
+  });
+});
+
+describe("ticketPrefixesForWeek", () => {
+  const entry = (ticketPrefixes: string[]): TeamTimelineEntry => ({
+    team: "Old Team", domain: null, start: "2024-01-01", end: "2025-01-01", ticketPrefixes, notes: null,
+  });
+
+  it("uses the prefixes the week's team actually used", () => {
+    expect(ticketPrefixesForWeek(config, entry(["OLD"]))).toEqual(["OLD"]);
+  });
+
+  it("falls back to the profile when the timeline entry lists none", () => {
+    expect(ticketPrefixesForWeek(config, entry([]))).toEqual(["TEAM"]);
+  });
+
+  it("falls back to the profile when there is no entry for that week", () => {
+    expect(ticketPrefixesForWeek(config, undefined)).toEqual(["TEAM"]);
+  });
+
+  it("finds a historical week's tickets that the current profile would miss", () => {
+    const workLog = "### [OLD-42] A ticket from a team that no longer exists";
+
+    expect(collectWorkTerms(workLog, ticketPrefixesForWeek(config, entry(["OLD"])))).toEqual(["OLD-42"]);
+    expect(collectWorkTerms(workLog, ticketPrefixesForWeek(config, undefined))).toEqual([]);
   });
 });
 

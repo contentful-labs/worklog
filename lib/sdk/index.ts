@@ -52,6 +52,8 @@ export {
   capOrganizationalNotes,
   collectWorkTerms,
   rankVaultNotes,
+  ticketPrefixesForWeek,
+  containsIdentifier,
   DEFAULT_ORG_NOTE_CAP,
   DEFAULT_VAULT_NOTE_CAP,
   DEFAULT_VAULT_NOTE_LINES,

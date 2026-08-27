@@ -30,6 +30,7 @@ import {
   rankVaultNotes,
   summarizeArchivedFocusDocs,
   summarizePreviousBragBooks,
+  ticketPrefixesForWeek,
   type TeamTimeline,
 } from "../lib/sdk/vault";
 import {
@@ -502,9 +503,11 @@ export async function buildBragBookPrompt(
   const trimmedWorkContext = capOrganizationalNotes(workContextContent);
   const trimmedBragBooks = summarizePreviousBragBooks(previousBragBooks);
   const trimmedFocusHistory = summarizeArchivedFocusDocs(focusHistoryContent);
+  // The week's own team prefixes, not today's. A historical week whose team used `OLD` scores
+  // nothing against the current profile, and its one relevant note falls off the end of the cap.
   const rankedNotes = rankVaultNotes(
     vaultNotes,
-    collectWorkTerms(workLogContent, config.profile.ticketPrefixes),
+    collectWorkTerms(workLogContent, ticketPrefixesForWeek(config, teamForWeek)),
   );
 
   const vaultNotesSection = rankedNotes.length > 0
@@ -731,8 +734,11 @@ export async function runWorklog(opts: {
     const memoryContent = dropDatedRowsBefore(fullMemoryContent, memoryCutoff);
     log(`Vault files loaded — memory: ${memoryContent.length} chars (of ${fullMemoryContent.length}, rows since ${memoryCutoff}), profile: ${profileContent.length} chars`);
 
-    const vaultNotes = await discoverWeeklyNotes(config, paths, weekInfo.startDate, weekInfo.endDate);
-    log(`Discovered ${vaultNotes.length} weekly vault notes`);
+    // Discovery matches note filenames against ticket prefixes too, so it gets the same week's
+    // prefixes the ranking does.
+    const weekPrefixes = ticketPrefixesForWeek(config, getTeamForDate(timeline, weekInfo.startDate));
+    const vaultNotes = await discoverWeeklyNotes(config, paths, weekInfo.startDate, weekInfo.endDate, weekPrefixes);
+    log(`Discovered ${vaultNotes.length} weekly vault notes (prefixes: ${weekPrefixes.join(", ") || "none"})`);
 
     const openFocusItems = selectOpenFocusItems(rawFocusTrackingContent, DEFAULT_INJECT_CAP);
     const focusHistorySummary = summarizeFocusHistory(
