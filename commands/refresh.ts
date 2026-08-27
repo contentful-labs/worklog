@@ -163,9 +163,13 @@ export async function refreshWeeks(deps: {
 
     const added = ledger.unwrittenEvents(weekId);
     await writeWeek({ weekId, weekInfo, workLog, newMaterial: describeEvents(added) });
-    // Only now. A week that was not written — because the run stopped, or because the
-    // generation refused — is still owed one on the next run, with the same material.
+    // Only now, and straight to disk. A week that was not written — because the run
+    // stopped, or because the generation refused — is still owed one on the next run,
+    // with the same material. And a week that *was* written must not lose its marker
+    // because a later week in the same run threw: the next run would offer its events
+    // again as new and the entry would say everything twice.
     ledger.markWritten(weekId);
+    await ledger.save();
   }
 
   await ledger.save();

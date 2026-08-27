@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, afterEach } from "vitest";
+import { describe, it, expect, beforeAll, beforeEach, afterAll, afterEach } from "vitest";
 import { http, HttpResponse } from "msw";
 import { setupServer } from "msw/node";
 import { z } from "zod";
@@ -93,7 +93,18 @@ function findEvent(events: SourceEvent[], kind: string, itemId?: string): Source
 
 const server = setupServer();
 
+/** The history of `confluencePage`: one edit, the user's, matching its `lastUpdated`. */
+const defaultVersions = http.get(`${BASE_URL}/wiki/api/v2/pages/:id/versions`, () =>
+  HttpResponse.json({ results: [{ number: 4, createdAt: "2026-03-05T16:00:00.000Z", authorId: ACCOUNT_ID }] }),
+);
+
 beforeAll(() => server.listen({ onUnhandledRequest: "error" }));
+/** No pull request conversation, for the tests that are about something else. */
+const defaultIssueComments = http.get("https://api.github.com/repos/:owner/:repo/issues/:number/comments", () =>
+  HttpResponse.json([]),
+);
+
+beforeEach(() => server.use(defaultVersions, defaultIssueComments));
 afterEach(() => server.resetHandlers());
 afterAll(() => server.close());
 
@@ -375,7 +386,7 @@ const confluencePage = {
   status: "current",
   space: { name: "Engineering", key: "ENG" },
   _links: { webui: "/spaces/ENG/pages/page-1" },
-  version: { number: 4 },
+  version: { number: 4, authorId: ACCOUNT_ID },
   history: {
     createdBy: { accountId: ACCOUNT_ID },
     createdDate: "2026-03-03T09:00:00.000Z",
@@ -442,8 +453,13 @@ describe("confluenceSource", () => {
   });
 
   it("marks a page with no usable edit time as spotted at the clock", async () => {
+    // No last-updated date, and a version history that will not answer: the edit is real
+    // and there is nothing to date it by, so the only honest date is when we found it.
     const undateable = { ...confluencePage, history: { createdBy: { accountId: "someone-else" } } };
-    server.use(confluenceHandler([undateable], []));
+    server.use(
+      confluenceHandler([undateable], []),
+      http.get(`${BASE_URL}/wiki/api/v2/pages/page-1/versions`, () => HttpResponse.json({}, { status: 503 })),
+    );
 
     const batch = await confluenceSource(() => NOW).fetchWindow(window, makeContext());
 
@@ -499,7 +515,7 @@ describe("confluenceSource", () => {
         return HttpResponse.json({ results: cql.includes("type = comment") ? [] : [{ ...confluencePage, id: "page-new" }] });
       }),
       http.get(`${BASE_URL}/wiki/api/v2/pages/page-new/versions`, () =>
-        HttpResponse.json({ results: [{ number: 1, createdAt: "2026-03-09T10:00:00.000Z" }] }),
+        HttpResponse.json({ results: [{ number: 1, createdAt: "2026-03-09T10:00:00.000Z", authorId: ACCOUNT_ID }] }),
       ),
     );
 
@@ -533,9 +549,9 @@ describe("confluenceSource", () => {
       http.get(`${BASE_URL}/wiki/api/v2/pages/page-1/versions`, () =>
         HttpResponse.json({
           results: [
-            { number: 5, createdAt: "2026-03-08T10:00:00.000Z" },
-            { number: 4, createdAt: "2026-03-07T10:00:00.000Z" },
-            { number: 3, createdAt: "2026-03-05T10:00:00.000Z" }, // older than the watermark
+            { number: 5, createdAt: "2026-03-08T10:00:00.000Z", authorId: ACCOUNT_ID },
+            { number: 4, createdAt: "2026-03-07T10:00:00.000Z", authorId: ACCOUNT_ID },
+            { number: 3, createdAt: "2026-03-05T10:00:00.000Z", authorId: ACCOUNT_ID }, // older than the watermark
           ],
         }),
       ),
@@ -560,17 +576,32 @@ describe("confluenceSource", () => {
 const PR_URL = "https://github.com/example-org/repo/pull/42";
 const REVIEWED_PR_URL = "https://github.com/example-org/repo/pull/7";
 
+/**
+ * As GitHub's *search* endpoint describes a merged pull request.
+ *
+ * Search answers with issues, and an issue has no top-level `merged_at`: merging is
+ * described in the nested `pull_request` object, while `closed_at` is set for a merge
+ * too. A fixture that invented a top-level `merged_at` let a merge read as a closure in
+ * the real world while every test passed, so these mirror the documented shape.
+ */
 const authoredPR = {
   number: 42,
   title: "Search Revamp: index writer",
   state: "closed",
   created_at: "2026-03-03T09:00:00Z",
   updated_at: "2026-03-05T09:00:00Z",
-  merged_at: "2026-03-05T09:00:00Z",
   closed_at: "2026-03-05T09:00:00Z",
+  pull_request: { url: "https://api.github.com/repos/example-org/repo/pulls/42", merged_at: "2026-03-05T09:00:00Z" },
   html_url: PR_URL,
   repository_url: "https://api.github.com/repos/example-org/repo",
   user: { login: USERNAME },
+};
+
+/** As the pull request endpoint describes the same thing, where `merged_at` is top level. */
+const authoredPRDetail = {
+  ...authoredPR,
+  pull_request: undefined,
+  merged_at: "2026-03-05T09:00:00Z",
 };
 
 const reviewedPR = {
@@ -579,16 +610,17 @@ const reviewedPR = {
   state: "open",
   created_at: "2026-03-02T09:00:00Z",
   updated_at: "2026-03-04T09:00:00Z",
+  pull_request: { url: "https://api.github.com/repos/example-org/repo/pulls/7" },
   html_url: REVIEWED_PR_URL,
   repository_url: "https://api.github.com/repos/example-org/repo",
   user: { login: "other-user" },
 };
 
-/** Answers the authored search with `authored` and the reviewed-by search with `reviewed`. */
+/** Answers the authored search with `authored`, and every other-people search with `reviewed`. */
 function searchHandler(authored: unknown[], reviewed: unknown[]) {
   return http.get("https://api.github.com/search/issues", ({ request }) => {
     const q = new URL(request.url).searchParams.get("q") || "";
-    const items = q.includes("reviewed-by:") ? reviewed : authored;
+    const items = q.includes(`author:${USERNAME}`) ? authored : reviewed;
     return HttpResponse.json({ total_count: items.length, items });
   });
 }
@@ -617,7 +649,7 @@ describe("githubSource", () => {
       http.get("https://api.github.com/search/issues", ({ request }) => {
         const q = new URL(request.url).searchParams.get("q") || "";
         seenQueries.push(q);
-        const items = q.includes("reviewed-by:") ? [] : [authoredPR];
+        const items = q.includes(`author:${USERNAME}`) ? [authoredPR] : [];
         return HttpResponse.json({ total_count: items.length, items });
       }),
     );
@@ -625,7 +657,7 @@ describe("githubSource", () => {
     const batch = await githubSource(() => NOW).fetchWindow(window, makeContext());
 
     expect(seenQueries[0]).toBe(`type:pr author:${USERNAME} org:example-org created:<=2026-03-08 updated:>=2026-03-02`);
-    expect(seenQueries[1]).toBe(`type:pr reviewed-by:${USERNAME} org:example-org updated:2026-03-02..2026-03-08`);
+    expect(seenQueries[1]).toBe(`type:pr reviewed-by:${USERNAME} org:example-org created:<=2026-03-08 updated:>=2026-03-02`);
 
     expect(batch.snapshots[0]).toMatchObject({
       id: PR_URL,
@@ -639,7 +671,7 @@ describe("githubSource", () => {
   });
 
   it("reports a closed PR that was never merged", async () => {
-    const abandoned = { ...authoredPR, merged_at: undefined, closed_at: "2026-03-04T12:00:00Z" };
+    const abandoned = { ...authoredPR, pull_request: { url: authoredPR.pull_request.url }, closed_at: "2026-03-04T12:00:00Z" };
     server.use(searchHandler([abandoned], []));
 
     const batch = await githubSource(() => NOW).fetchWindow(window, makeContext());
@@ -697,7 +729,7 @@ describe("githubSource", () => {
 
     const batch = await githubSource(() => NOW).fetchWindow(window, makeContext());
 
-    expect(batch.warnings.some((w) => w.includes("GitHub reviewed-PR search failed"))).toBe(true);
+    expect(batch.warnings.some((w) => w.includes("A GitHub reviewed-by search failed"))).toBe(true);
     expect(batch.snapshots).toHaveLength(1);
   });
 
@@ -709,7 +741,7 @@ describe("githubSource", () => {
   it("goes looking for pull requests it has never seen, not only the ones it knows", async () => {
     const seenQueries: string[] = [];
     const freshPR = { ...authoredPR, number: 99, html_url: "https://github.com/example-org/repo/pull/99",
-      created_at: "2026-03-09T09:00:00Z", merged_at: null, closed_at: null };
+      created_at: "2026-03-09T09:00:00Z", pull_request: { url: "https://api.github.com/repos/example-org/repo/pulls/99" }, closed_at: null };
     server.use(
       http.get("https://api.github.com/search/issues", ({ request }) => {
         seenQueries.push(new URL(request.url).searchParams.get("q") || "");
@@ -740,7 +772,7 @@ describe("githubSource", () => {
       ),
       http.get("https://api.github.com/repos/example-org/repo/pulls/42", () =>
         HttpResponse.json(
-          { ...authoredPR, merged_at: "2026-03-08T10:00:00Z", closed_at: "2026-03-08T10:00:00Z" },
+          { ...authoredPRDetail, merged_at: "2026-03-08T10:00:00Z", closed_at: "2026-03-08T10:00:00Z" },
           { headers: { ETag: '"pr-v2"' } },
         ),
       ),
@@ -878,12 +910,15 @@ describe("lifecycle events a week did not open in", () => {
     // means the merging week never finds the PR, and the opening week throws the merge
     // away for being out of range, so the merge is recorded nowhere at all.
     const seenQueries: string[] = [];
-    const mergedLater = { ...authoredPR, created_at: "2026-03-03T09:00:00Z", merged_at: "2026-03-11T09:00:00Z", closed_at: "2026-03-11T09:00:00Z" };
+    const mergedLater = {
+      ...authoredPR, created_at: "2026-03-03T09:00:00Z", closed_at: "2026-03-11T09:00:00Z",
+      pull_request: { ...authoredPR.pull_request, merged_at: "2026-03-11T09:00:00Z" },
+    };
     server.use(
       http.get("https://api.github.com/search/issues", ({ request }) => {
         const q = new URL(request.url).searchParams.get("q") || "";
         seenQueries.push(q);
-        const items = q.includes("reviewed-by:") ? [] : [mergedLater];
+        const items = q.includes(`author:${USERNAME}`) ? [mergedLater] : [];
         return HttpResponse.json({ total_count: items.length, items });
       }),
     );
@@ -993,7 +1028,7 @@ describe("reading a long history to the end", () => {
           { id: 2001, user: { login: USERNAME }, state: "APPROVED", body: "The last word.", submitted_at: "2026-03-08T09:00:00Z" },
         ]);
       }),
-      http.get("https://api.github.com/repos/example-org/repo/pulls/42", () => HttpResponse.json(authoredPR)),
+      http.get("https://api.github.com/repos/example-org/repo/pulls/42", () => HttpResponse.json(authoredPRDetail)),
     );
 
     const batch = await githubSource(() => NOW).fetchSince(new Date("2026-03-06T00:00:00Z"), [PR_URL], makeContext());
@@ -1017,12 +1052,18 @@ describe("reading a long history to the end", () => {
         seenPaths.push(cursor);
         if (cursor === "start") {
           return HttpResponse.json({
-            results: [{ number: 9, createdAt: "2026-03-09T10:00:00.000Z" }, { number: 8, createdAt: "2026-03-08T10:00:00.000Z" }],
+            results: [
+              { number: 9, createdAt: "2026-03-09T10:00:00.000Z", authorId: ACCOUNT_ID },
+              { number: 8, createdAt: "2026-03-08T10:00:00.000Z", authorId: ACCOUNT_ID },
+            ],
             _links: { next: "/wiki/api/v2/pages/page-1/versions?cursor=older" },
           });
         }
         return HttpResponse.json({
-          results: [{ number: 7, createdAt: "2026-03-07T10:00:00.000Z" }, { number: 6, createdAt: "2026-03-05T10:00:00.000Z" }],
+          results: [
+            { number: 7, createdAt: "2026-03-07T10:00:00.000Z", authorId: ACCOUNT_ID },
+            { number: 6, createdAt: "2026-03-05T10:00:00.000Z", authorId: ACCOUNT_ID },
+          ],
         });
       }),
     );
@@ -1047,7 +1088,7 @@ describe("work the user did on somebody else's pull request", () => {
       http.get("https://api.github.com/search/issues", ({ request }) => {
         const q = new URL(request.url).searchParams.get("q") || "";
         seenQueries.push(q);
-        const items = q.includes("reviewed-by:") ? [reviewedPR] : [];
+        const items = q.includes(`author:${USERNAME}`) ? [] : [reviewedPR];
         return HttpResponse.json({ total_count: items.length, items });
       }),
       http.get("https://api.github.com/repos/example-org/repo/pulls/7/reviews", () =>
@@ -1086,7 +1127,7 @@ describe("an ETag earned while scanning a recent week", () => {
         if (sent === '"reviews-v2"') return new HttpResponse(null, { status: 304 });
         return HttpResponse.json(reviews, { headers: { ETag: '"reviews-v2"' } });
       }),
-      http.get("https://api.github.com/repos/example-org/repo/pulls/42", () => HttpResponse.json(authoredPR)),
+      http.get("https://api.github.com/repos/example-org/repo/pulls/42", () => HttpResponse.json(authoredPRDetail)),
     );
 
     const ctx = makeContext();

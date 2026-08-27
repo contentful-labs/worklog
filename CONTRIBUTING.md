@@ -141,6 +141,12 @@ story about a finished ticket. Recording is idempotent, so re-fetching a week ma
 what is already there and writes nothing, and that is what lets `worklog refresh` know
 which weeks actually changed.
 
+**Known limits worth not rediscovering**: Jira has no comment-author search, so comment
+discovery reaches only tickets the user is assignee or reporter of, or that the ledger
+already tracks. GitHub's issue search describes a merged pull request as closed unless
+you read `pull_request.merged_at`, and Confluence's contributor search keeps returning a
+page long after the user's own last edit, so versions have to be filtered by `authorId`.
+
 **Research tools**: `lib/ai-tools.ts` defines six tools (Jira, Confluence, vault read/search) once, then adapts them to the Vercel AI SDK for OpenAI and to an in-process MCP server for the Claude Agent SDK. Both providers see the same tool names, which `prompts/weekly-brag-prompt.md` refers to directly.
 
 ## Making changes

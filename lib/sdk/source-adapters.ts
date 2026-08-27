@@ -147,6 +147,39 @@ interface ConfluenceVersion {
   number?: number;
   createdAt?: string;
   message?: string;
+  /**
+   * Who made this edit.
+   *
+   * A page the user contributed to once keeps matching the contributor search for ever,
+   * and every later edit by anybody comes back with it. Without this, a colleague's
+   * Tuesday becomes an entry in the user's week.
+   */
+  authorId?: string;
+}
+
+/**
+ * A pull request as the *search* endpoint describes it.
+ *
+ * Search answers with issues, and an issue says nothing about merging: whether and when
+ * a pull request was merged lives in a nested `pull_request` object, while `closed_at`
+ * sits at the top level and is set for merges too. Reading only the top level makes
+ * every merged pull request look like a closed one.
+ */
+type SearchedPR = GitHubPR & {
+  pull_request?: { merged_at?: string | null; url?: string };
+};
+
+/** When this pull request was merged, from wherever the endpoint in hand puts it. */
+function mergedAtOf(pr: SearchedPR): string | undefined {
+  return pr.pull_request?.merged_at ?? pr.merged_at ?? undefined;
+}
+
+/** One comment on a pull request's conversation. */
+interface GitHubIssueComment {
+  id: number;
+  body?: string;
+  created_at?: string;
+  user?: { login?: string };
 }
 
 interface GitHubReview {
@@ -556,6 +589,11 @@ export function jiraSource(now: Clock = () => new Date()): Source {
       // tracked; the assignee/reporter half is what finds an issue that did not exist
       // when the week was first fetched. Without it a ticket created after the first run
       // is invisible for ever, because it is in nobody's list of known ids.
+      // A known limit: stock Jira has no way to search for issues a person commented on,
+      // so a comment on a ticket somebody else owns and reports, that the ledger has
+      // never seen, is not found. Assignee, reporter and already-tracked ids are the
+      // whole reach. Adding it would need a project-wide scan of every updated issue,
+      // which is a different order of cost, or a Jira with ScriptRunner installed.
       const mine = `assignee = "${email}" OR reporter = "${email}"`;
       const scope = itemIds.length > 0 ? `(${mine} OR key in (${itemIds.join(", ")}))` : `(${mine})`;
       const jql = `${scope} AND updated > "${jqlDateTime(since)}"`;
@@ -618,7 +656,7 @@ export function confluenceSource(now: Clock = () => new Date()): Source {
    * between two runs would report one edit, on the day of the last one, and the three
    * weeks the other edits belong to would never hear about them.
    */
-  async function versionsOf(pageId: string, since: Date, ctx: SourceContext, batch: SourceBatch): Promise<ConfluenceVersion[]> {
+  async function versionsOf(pageId: string, coveredThrough: Date, ctx: SourceContext, batch: SourceBatch): Promise<ConfluenceVersion[]> {
     const versions: ConfluenceVersion[] = [];
     let path: string | undefined = `/wiki/api/v2/pages/${pageId}/versions?limit=50&sort=-modified-date`;
     let page = 0;
@@ -640,7 +678,7 @@ export function confluenceSource(now: Clock = () => new Date()): Source {
 
         const reachedTheKnown = parsed.results.some((version) => {
           const at = instant(version.createdAt);
-          return at !== undefined && !after(at, since);
+          return at !== undefined && !after(at, coveredThrough);
         });
         if (reachedTheKnown || parsed.results.length === 0) break;
         path = parsed._links?.next;
@@ -736,34 +774,42 @@ export function confluenceSource(now: Clock = () => new Date()): Source {
           batch.events.push({ source: "confluence", kind: EVENT_KINDS.created, itemId: page.id, at: created.iso, payload: {} });
         }
 
-        const updated = instant(page.history?.lastUpdated?.when);
-        if (updated && inWindow(updated, window)) {
+        // Every edit made during the week, not the state the page happens to be in now.
+        // A page edited three times in one week has three things to say about it, and the
+        // search only ever reports the last of them.
+        const versions = await versionsOf(page.id, window.start, ctx, batch);
+        for (const version of versions) {
+          if (version.authorId !== accountId) continue;
+          const at = instant(version.createdAt);
+          if (!at || !inWindow(at, window)) continue;
           batch.events.push({
             source: "confluence",
             kind: EVENT_KINDS.version,
             itemId: page.id,
-            at: updated.iso,
-            id: page.version?.number ? `${page.id}:v${page.version.number}` : undefined,
-            payload: {},
+            at: at.iso,
+            id: version.number ? `${page.id}:v${version.number}` : undefined,
+            payload: version.message ? { [PAYLOAD_TEXT]: version.message } : {},
           });
         }
 
-        // Nothing datable inside the window. As with Jira: a last edit inside the week
-        // means something happened that Confluence will not describe, no usable date
-        // means it happened and we can only say when we found it, and a last edit
-        // elsewhere means the page was merely alive while the week went by.
         if (batch.events.length === eventsBefore) {
-          if (updated && !inWindow(updated, window)) {
+          // The history answered and none of it was this user's work this week, so the
+          // page was merely alive while the week went by.
+          const updated = instant(page.history?.lastUpdated?.when);
+          if (versions.length > 0 || (updated && !inWindow(updated, window))) {
             batch.snapshots.pop();
             seen.delete(page.id);
             continue;
           }
+          // The history could not be read at all. Fall back to what the search knows: an
+          // edit landed in this week, or there is no usable date and the only honest
+          // answer is when we found it.
           batch.events.push({
             source: "confluence",
             kind: EVENT_KINDS.version,
             itemId: page.id,
-            at: spottedAt,
-            payload: { [PAYLOAD_SPOTTED]: true },
+            at: updated ? updated.iso : spottedAt,
+            payload: updated ? {} : { [PAYLOAD_SPOTTED]: true },
           });
         }
       }
@@ -804,6 +850,9 @@ export function confluenceSource(now: Clock = () => new Date()): Source {
         // than only the newest one dated when the page last moved.
         const versions = await versionsOf(page.id, since, ctx, batch);
         for (const version of versions) {
+          // A page the user once contributed to keeps matching the contributor search,
+          // so most of what comes back may be somebody else's editing.
+          if (version.authorId !== accountId) continue;
           const at = instant(version.createdAt);
           // CQL only filters to the day, so the exact watermark is applied here.
           if (!at || !after(at, since)) continue;
@@ -947,6 +996,57 @@ export function githubSource(now: Clock = () => new Date()): Source {
     }
   }
 
+  /**
+   * Comments the user left on one pull request's conversation.
+   *
+   * Not the same endpoint as reviews, and not the same kind of work: most of what gets
+   * said on a pull request is said here, and a week that only counts formal approvals
+   * reads as though the user spent it in silence.
+   */
+  async function commentEvents(
+    repo: string,
+    number: number,
+    itemId: string,
+    ctx: SourceContext,
+    batch: SourceBatch,
+    opts: { conditional: Date | false; keep: (at: Instant) => boolean },
+  ): Promise<void> {
+    try {
+      for (let page = 1; page <= GITHUB_REVIEW_PAGES; page++) {
+        const url = `https://api.github.com/repos/${repo}/issues/${number}/comments?per_page=100&page=${page}`;
+        const { status, body } = await conditionalGet(url, ctx, opts.conditional);
+        if (status === 304) return;
+        if (status !== 200) {
+          warn(batch, ctx, `Could not read comments on ${repo}#${number}, they will be missing: HTTP ${status}`);
+          return;
+        }
+        // SAFETY: the issue-comments endpoint returns an array of comments; every field
+        // read below is optional and guarded, so a shape change drops comments rather
+        // than throwing.
+        const comments = (Array.isArray(body) ? body : []) as GitHubIssueComment[];
+
+        for (const comment of comments) {
+          if (comment.user?.login !== githubUserOf(ctx)) continue;
+          const at = instant(comment.created_at);
+          if (!at || !opts.keep(at)) continue;
+          batch.events.push({
+            source: "github",
+            kind: EVENT_KINDS.comment,
+            itemId,
+            at: at.iso,
+            id: String(comment.id),
+            payload: { [PAYLOAD_TEXT]: comment.body ?? "" },
+          });
+        }
+
+        if (comments.length < 100) return;
+      }
+      warn(batch, ctx, `${repo}#${number} has more comments than one run will read; the oldest of them are missing.`);
+    } catch (err) {
+      warn(batch, ctx, `Could not read comments on ${repo}#${number}, they will be missing: ${String(err)}`);
+    }
+  }
+
   return {
     name: "github",
 
@@ -979,12 +1079,19 @@ export function githubSource(now: Clock = () => new Date()): Source {
 
       const authoredUrls = new Set(authored.map((pr) => pr.html_url));
 
-      // Reviews are supplementary; a failed search must not lose the authored PRs with it.
-      let reviewed: GitHubPR[] = [];
-      try {
-        reviewed = await fetchGitHubPRs(headersOf(ctx), `type:pr reviewed-by:${username} ${orgFilter} updated:${startDate}..${endDate}`, "updated");
-      } catch (err) {
-        warn(batch, ctx, `GitHub reviewed-PR search failed, reviews will be missing from this window: ${String(err)}`);
+      // The same overlap bounds, for the same reason. A review left during this week on
+      // a pull request that moved on two weeks later would otherwise be excluded by the
+      // pull request's current `updated`, and the window is marked fetched either way.
+      // Other people's work is supplementary: a failed search must not lose the authored
+      // pull requests with it.
+      const others = new Map<string, GitHubPR>();
+      for (const role of ["reviewed-by", "commenter"]) {
+        try {
+          const found = await fetchGitHubPRs(headersOf(ctx), `type:pr ${role}:${username} ${orgFilter} created:<=${endDate} updated:>=${startDate}`, "updated");
+          for (const pr of found) others.set(pr.html_url, pr);
+        } catch (err) {
+          warn(batch, ctx, `A GitHub ${role} search failed, so some of what you did on other people's pull requests will be missing from this window: ${String(err)}`);
+        }
       }
 
       for (const pr of authored) {
@@ -995,7 +1102,7 @@ export function githubSource(now: Clock = () => new Date()): Source {
           batch.events.push({ source: "github", kind: EVENT_KINDS.created, itemId: pr.html_url, at: created.iso, payload: {} });
         }
 
-        const merged = instant(pr.merged_at);
+        const merged = instant(mergedAtOf(pr));
         if (merged && inWindow(merged, window)) {
           batch.events.push({ source: "github", kind: EVENT_KINDS.merged, itemId: pr.html_url, at: merged.iso, payload: {} });
         }
@@ -1006,13 +1113,15 @@ export function githubSource(now: Clock = () => new Date()): Source {
         }
       }
 
-      for (const pr of reviewed) {
+      for (const pr of others.values()) {
         // Own PRs came back from the authored search already, and you don't review yourself.
         if (authoredUrls.has(pr.html_url)) continue;
         batch.snapshots.push({ id: pr.html_url, firstSeenAt: spottedAt, payload: githubPayload(pr) });
-        // No window filter: a review carries its own date, and the ledger files it by that,
-        // which is the whole point of reporting when things happened instead of when we looked.
+        // No window filter on either: a review and a comment each carry their own date,
+        // and the ledger files them by that, which is the whole point of reporting when
+        // things happened instead of when we looked.
         await reviewEvents(repoPathOf(pr), pr.number, pr.html_url, ctx, batch, { conditional: false, keep: () => true });
+        await commentEvents(repoPathOf(pr), pr.number, pr.html_url, ctx, batch, { conditional: false, keep: () => true });
       }
 
       return batch;
@@ -1069,6 +1178,7 @@ export function githubSource(now: Clock = () => new Date()): Source {
         const { repo, number } = parsed;
 
         await reviewEvents(repo, number, itemId, ctx, batch, { conditional: since, keep: (at) => after(at, since) });
+        await commentEvents(repo, number, itemId, ctx, batch, { conditional: since, keep: (at) => after(at, since) });
 
         const prUrl = `https://api.github.com/repos/${repo}/pulls/${number}`;
         try {
@@ -1083,7 +1193,7 @@ export function githubSource(now: Clock = () => new Date()): Source {
           // costs this PR's merge and closure rather than throwing.
           const pr = body as GitHubPR;
 
-          const merged = instant(pr.merged_at);
+          const merged = instant(mergedAtOf(pr));
           if (merged && after(merged, since)) {
             batch.events.push({ source: "github", kind: EVENT_KINDS.merged, itemId, at: merged.iso, payload: {} });
           }

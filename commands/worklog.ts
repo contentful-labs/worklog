@@ -1038,8 +1038,10 @@ export async function runWorklog(opts: {
     if (amend) log(`${wid} already has a brag book; adding to it (${amend.newMaterial.split("\n").filter(Boolean).length} new event(s))`);
 
     const week = await generateWeek({ weekInfo, wid, workLog: markdown, workLogPath, config, paths, timeline, log, spinner: s, amend });
-    // The week is on disk, so it is no longer owed a write. Left unsaid, the next
-    // refresh would find it still pending and regenerate a week nothing had changed in.
+    // The week is on disk, so it is no longer owed a write, and the marker goes to disk
+    // with it. Left unsaid, the next refresh would find the week still pending and
+    // regenerate it; left unsaved, a later week failing in the same run would take this
+    // week's marker down with it and its events would be offered again as new.
     ledger.markWritten(wid);
     await ledger.save();
     lastBragBookPath = week.bragBookPath;

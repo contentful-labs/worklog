@@ -26,12 +26,39 @@ import { z } from "zod";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
-import { join } from "node:path";
+import { join, isAbsolute, relative, resolve } from "node:path";
 
 import type {
   Source, SourceBatch, SourceContext, SourceEvent, SourceSnapshot, SourceState, SourceWindow,
 } from "./sources";
 import { weekIdForDate } from "./week-utils";
+
+/** The part of `node:path` this module needs, so a test can supply another platform's. */
+export interface PathRules {
+  join(...parts: string[]): string;
+  resolve(...parts: string[]): string;
+  relative(from: string, to: string): string;
+  isAbsolute(path: string): boolean;
+}
+
+const nodePaths: PathRules = { join, resolve, relative, isAbsolute };
+
+/**
+ * `<dir>/<name>.json`, but only when that really is inside `dir`.
+ *
+ * The last guard on a source name. `isSafeSourceName` rejects anything that could be a
+ * path, and this checks the answer rather than trusting it, because the cost of being
+ * wrong is a write somewhere else on the disk. Asked as a question about the two paths
+ * rather than about the text of one: a separator is not always a slash, and a guard that
+ * assumed it was would quietly refuse every legitimate write on Windows and let the run
+ * carry on believing it had saved them.
+ */
+export function insidePath(paths: PathRules, dir: string, name: string): string | undefined {
+  const target = paths.resolve(paths.join(dir, `${name}.json`));
+  const step = paths.relative(paths.resolve(dir), target);
+  if (step === "" || step.startsWith("..") || paths.isAbsolute(step)) return undefined;
+  return target;
+}
 
 /** The ledger format on disk. Bumped only when an older layout can no longer be read. */
 const LEDGER_VERSION = 2;
@@ -409,18 +436,6 @@ export async function openLedger(root: string = ledgerRoot()): Promise<Ledger> {
     return (events.get(weekId) ?? []).filter((event) => !already.has(eventKey(event)));
   };
 
-  /**
-   * A path inside the ledger, or nothing.
-   *
-   * The last guard on a source name. `isSafeSourceName` rejects anything that could be
-   * a path, and this checks the answer rather than trusting it, because the cost of
-   * being wrong is a write somewhere else on the disk.
-   */
-  const insideLedger = (dir: string, name: string): string | undefined => {
-    const path = join(dir, `${name}.json`);
-    return path.startsWith(`${dir}/`) ? path : undefined;
-  };
-
   return {
     eventsForWeek(weekId) {
       return [...(events.get(weekId) ?? [])];
@@ -556,12 +571,12 @@ export async function openLedger(root: string = ledgerRoot()): Promise<Ledger> {
       for (const weekId of dirtyWeeks) {
         const week = [...(events.get(weekId) ?? [])].sort(compareEvents);
         events.set(weekId, week);
-        const path = insideLedger(eventsDir, weekId);
+        const path = insidePath(nodePaths, eventsDir, weekId);
         if (!path || frozen.has(path)) continue;
         await writeJsonAtomic(path, week);
       }
       for (const source of dirtySources) {
-        const path = insideLedger(snapshotsDir, source);
+        const path = insidePath(nodePaths, snapshotsDir, source);
         if (!path || frozen.has(path)) continue;
         await writeJsonAtomic(path, snapshots.get(source) ?? {});
       }

@@ -159,6 +159,8 @@ worklog configure coaching
 
 All data stays local. Nothing leaves your machine except API calls to OpenAI to generate text, and API calls to Jira/GitHub/Confluence to fetch your own activity.
 
+**One known gap:** Jira comments are found on tickets you are the assignee or reporter of, or that a work log already tracks. Jira has no way to search for tickets you commented on, so a comment on somebody else's ticket that has never come up before will not be picked up. Mention it in the prompt and it lands in the week anyway.
+
 ### The event ledger
 
 Fetched activity is cached as timestamped events under `$XDG_CACHE_HOME/worklog/ledger`
