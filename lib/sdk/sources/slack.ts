@@ -354,7 +354,9 @@ interface DirIdentity {
 async function directoryIdentity(path: string): Promise<DirIdentity | null> {
   const stats = await lstat(path);
   // lstat does not follow the link, so a retargeted path shows up here rather than silently
-  // resolving to whatever it now points at.
+  // resolving to whatever it now points at. The isDirectory test is belt and braces: a symlink
+  // has its own inode and so already fails the dev/ino comparison. Kept because this guards an
+  // rm -rf and the intent should be readable without working that out.
   return stats.isDirectory() ? { dev: stats.dev, ino: stats.ino } : null;
 }
 
