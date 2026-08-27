@@ -2,8 +2,16 @@
  * ISO week date utilities — pure functions, no I/O.
  */
 
+/**
+ * The ISO week a moment falls in.
+ *
+ * Read in UTC, deliberately. The collection windows are UTC, so filing an event by the
+ * host's local calendar puts anything near midnight in a different week from the window
+ * that fetched it: under `TZ=Europe/London`, an event at 23:30Z on a Sunday belongs to
+ * the week that has just ended and was being filed into the one beginning.
+ */
 export function getWeekNumber(date: Date): number {
-  const d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
+  const d = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
   const dayNum = d.getUTCDay() || 7;
   d.setUTCDate(d.getUTCDate() + 4 - dayNum);
   const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
@@ -16,7 +24,7 @@ export function weekId(week: number, year: number): string {
 
 export function weekIdForDate(d: Date): string {
   const wn = getWeekNumber(d);
-  const utc = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
+  const utc = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
   const dayNum = utc.getUTCDay() || 7;
   utc.setUTCDate(utc.getUTCDate() + 4 - dayNum);
   const isoYear = utc.getUTCFullYear();
@@ -54,7 +62,7 @@ export function getExpectedBragBookWeeks(
 
   for (let i = 0; i < weeks; i++) {
     const d = new Date(end);
-    d.setDate(d.getDate() - i * 7);
+    d.setUTCDate(d.getUTCDate() - i * 7);
     const wid = weekIdForDate(d);
 
     if (sinceWeekId && wid < sinceWeekId) break;

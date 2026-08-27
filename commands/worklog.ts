@@ -882,6 +882,15 @@ export async function runWorklog(opts: {
   // the engineer's team rather than "Unknown Team".
   const timeline = resolveTeamTimeline(readTeamTimeline(paths, { onWarning: (message) => p.log.warn(message) }), config);
 
+  // Before the migrations below, which rewrite vault files and leave backups behind.
+  // A run that is going to stop should stop before it has changed anything.
+  const ledger = await openLedger();
+  const blocked = ledger.unusable();
+  if (blocked) {
+    p.log.error(blocked);
+    process.exit(1);
+  }
+
   // Focus items are keyed by id now; upgrade a pre-id file before anything reads it.
   const migration = await migrateFocusTrackingFile(paths.focusTracking);
   if (migration?.kind === "ids") {
@@ -963,14 +972,6 @@ export async function runWorklog(opts: {
   const { apiToken, githubToken } = getEnvTokens();
   const headers = buildHeaders(config, { atlassianApiToken: apiToken, githubToken });
 
-  const ledger = await openLedger();
-  // Nothing may be generated from a ledger that cannot say what has already been written
-  // up; it would offer every week again and be unable to record that it had.
-  const blocked = ledger.unusable();
-  if (blocked) {
-    p.log.error(blocked);
-    process.exit(1);
-  }
   const sources = allSources();
   // One clock for the whole run: watermarks move to when it started, not when each
   // fetch happened to finish.

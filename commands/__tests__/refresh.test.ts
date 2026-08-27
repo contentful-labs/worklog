@@ -346,10 +346,11 @@ describe("a week whose cached events cannot all be read", () => {
     await mkdir(vault, { recursive: true });
   });
 
-  it("is not written into the vault, and is named as skipped", async () => {
+  it("is not written into the vault, and its new events are refused rather than half-kept", async () => {
     // The trigger: one unreadable row plus one new event. Generating from what is left
     // turns a damaged cache file, which can be refetched, into a damaged week, which
-    // cannot.
+    // cannot — and keeping the new event in memory alone would move the reading position
+    // past an event that was never saved.
     await runOnce(stubSource("jira", oneComment));
     const weekFile = join(cache, "events", "2026-W36.json");
     const rows = JSON.parse(await readFile(weekFile, "utf-8"));
@@ -368,11 +369,42 @@ describe("a week whose cached events cannot all be read", () => {
     const run = await runOnce(stubSource("jira", later));
 
     expect(run.written).toEqual([]);
-    expect(run.skipped).toEqual(["2026-W36"]);
     expect(run.rows).toEqual([{ weekId: "2026-W36", regenerated: false }]);
     // Neither the vault nor the damaged file was touched.
     expect(await snapshotOfDisk(vault)).toEqual(vaultBefore);
     expect(await readFile(weekFile, "utf-8")).toBe(cacheBefore);
+
+    // And the week is recorded as not fully read, which is what stops the next run from
+    // treating its reading position as coverage and skipping the event that was refused.
+    const ledger = await openLedger(cache);
+    expect(ledger.incompleteWeeks()).toEqual(["2026-W36"]);
+  });
+
+  it("asks for the refused events again once the file is repaired", async () => {
+    // The trigger Codex named: corrupt, fetch, repair, fetch. The middle fetch must not
+    // buy coverage, or the event it dropped is never asked for again.
+    await runOnce(stubSource("jira", oneComment));
+    const weekFile = join(cache, "events", "2026-W36.json");
+    const healthy = await readFile(weekFile, "utf-8");
+    await writeFile(weekFile, JSON.stringify([...JSON.parse(healthy), { source: "jira", kind: 7 }], null, 2), "utf-8");
+
+    const later: SourceBatch = {
+      snapshots: [],
+      events: [{
+        source: "jira", kind: "status", itemId: "TEAM-1234",
+        at: "2026-09-03T09:00:00.000Z", payload: { from: "In Progress", to: "Done" }, id: "s-1",
+      }],
+      warnings: [],
+    };
+    await runOnce(stubSource("jira", later));
+
+    // The user repairs the file by putting back what could be read.
+    await writeFile(weekFile, healthy, "utf-8");
+    const run = await runOnce(stubSource("jira", later));
+
+    const ledger = await openLedger(cache);
+    expect(ledger.eventsForWeek("2026-W36").map((event) => event.kind).sort()).toEqual(["comment", "status"]);
+    expect(run.written.map((week) => week.weekId)).toEqual(["2026-W36"]);
   });
 });
 

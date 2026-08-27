@@ -164,7 +164,7 @@ describe("what is written to disk", () => {
 
     const meta = JSON.parse(await readFile(join(root, "meta.json"), "utf-8"));
     expect(meta).toMatchObject({
-      version: 2,
+      version: 3,
       sources: { jira: { windows: { "2026-W33": seenAt.toISOString() } } },
       written: {},
     });
@@ -573,15 +573,18 @@ describe("a ledger file this version cannot read", () => {
     expect(ledger.problems()[0]).toContain("2026-W36.json");
     expect(ledger.problems()[0]).toContain("row 1");
 
-    // The run carries on with what it could read, and files a new event into that week.
-    ledger.record("jira", batch({
+    // A new event for that week is fetched and refused, because the file it would have to
+    // be written into cannot be rewritten. Keeping it in memory only would let the
+    // watermark move past it while it was never saved, and it would never be fetched again.
+    const result = ledger.record("jira", batch({
       events: [{ source: "jira", kind: "status", itemId: "TEAM-1234", at: "2026-09-02T09:00:00.000Z", payload: {} }],
     }), seenAt);
     await ledger.save();
 
+    expect(result.addedEvents).toBe(0);
+    expect(ledger.problems().some((problem) => problem.includes("2026-W36.json") && problem.includes("thrown away"))).toBe(true);
     expect(await readFile(path, "utf-8")).toBe(before);
-    // In memory the week is complete enough to write a work log from.
-    expect(ledger.eventsForWeek("2026-W36").map((event) => event.kind)).toEqual(["comment", "status"]);
+    expect(ledger.eventsForWeek("2026-W36").map((event) => event.kind)).toEqual(["comment"]);
   });
 });
 

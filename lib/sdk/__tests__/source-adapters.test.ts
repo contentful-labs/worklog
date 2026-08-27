@@ -452,9 +452,10 @@ describe("confluenceSource", () => {
     expect(kinds(batch.events)).toEqual(["version"]);
   });
 
-  it("marks a page with no usable edit time as spotted at the clock", async () => {
-    // No last-updated date, and a version history that will not answer: the edit is real
-    // and there is nothing to date it by, so the only honest date is when we found it.
+  it("records nothing about a page whose history will not say who edited it", async () => {
+    // A page that moved and a history that will not answer. Dating the move at the clock
+    // and calling it the user's own would be a guess about authorship, and the ledger is
+    // append-only: a later read proving it was a colleague's could not take it back.
     const undateable = { ...confluencePage, history: { createdBy: { accountId: "someone-else" } } };
     server.use(
       confluenceHandler([undateable], []),
@@ -463,10 +464,10 @@ describe("confluenceSource", () => {
 
     const batch = await confluenceSource(() => NOW).fetchWindow(window, makeContext());
 
-    expect(batch.events).toHaveLength(1);
-    expect(batch.events[0].kind).toBe("version");
-    expect(batch.events[0].at).toBe(NOW_ISO);
-    expect(renderable(batch.events[0].payload).spotted).toBe(true);
+    expect(batch.events).toEqual([]);
+    expect(batch.snapshots).toEqual([]);
+    // Marked unfinished, so the week is not written up and is asked about again.
+    expect(batch.incomplete).toBe(true);
   });
 
   it("records a comment against its container, snapshotting a page it only saw that way", async () => {
@@ -1365,10 +1366,11 @@ describe("what the user said on their own pull request", () => {
 });
 
 describe("a read that did not finish", () => {
-  it("keeps the Confluence page rather than concluding nobody touched it", async () => {
-    // The trigger: page one is fifty of a colleague's versions, the user's edit is on
-    // page two, and page two returns 503. Treating the half-answer as complete drops the
-    // page — and the week is then watermarked, so the edit is never asked for again.
+  it("says it did not finish rather than inventing an edit of the user's", async () => {
+    // The trigger: the user edited this page months ago, a colleague edits it this week,
+    // and page two of the history returns 503. Falling back to the page's `lastUpdated`
+    // records the colleague's edit as the user's work, and the append-only ledger cannot
+    // take it back once a complete read proves otherwise.
     // Created by somebody else, so the only thing this week could record is an edit.
     const theirPage = { ...confluencePage, history: { ...confluencePage.history, createdBy: { accountId: "someone-else" } } };
     server.use(
@@ -1387,9 +1389,10 @@ describe("a read that did not finish", () => {
 
     expect(batch.incomplete).toBe(true);
     expect(batch.warnings.some((w) => w.includes("version history of Confluence page page-1"))).toBe(true);
-    // The page is still there to be asked about again, dated by what the search knows.
-    expect(batch.snapshots.map((s) => s.id)).toEqual(["page-1"]);
-    expect(batch.events.filter((e) => e.kind === "version")).toHaveLength(1);
+    // Nothing is recorded about a page whose authorship this run could not establish.
+    // Being incomplete is what brings the week back, not a guess left behind in the file.
+    expect(batch.snapshots).toEqual([]);
+    expect(batch.events).toEqual([]);
   });
 
   it("still drops a page whose history was read in full and held nothing of the user's", async () => {

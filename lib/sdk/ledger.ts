@@ -61,7 +61,7 @@ export function insidePath(paths: PathRules, dir: string, name: string): string 
 }
 
 /** The ledger format on disk. Bumped only when an older layout can no longer be read. */
-const LEDGER_VERSION = 2;
+const LEDGER_VERSION = 3;
 
 /**
  * What a source may be called.
@@ -102,6 +102,14 @@ interface SourceMeta {
    * exactly that, and every change to an older week made between the two runs was lost.
    */
   windows: Record<string, string>;
+  /**
+   * Weeks this source has not finished reading, oldest first.
+   *
+   * Kept on disk, not only for the run that found out. A GitHub page that failed last
+   * night still leaves this week half-read this morning, and a run scoped to another
+   * source has no way of knowing that unless it is written down.
+   */
+  incomplete: string[];
   /** ETags, cursors: opaque to everything but the source that wrote it. */
   state: Record<string, string>;
 }
@@ -145,7 +153,7 @@ function emptyMeta(): LedgerMeta {
 function sourceMeta(meta: LedgerMeta, source: string): SourceMeta {
   const existing = meta.sources[source];
   if (existing) return existing;
-  const created: SourceMeta = { windows: {}, state: {} };
+  const created: SourceMeta = { windows: {}, incomplete: [], state: {} };
   meta.sources[source] = created;
   return created;
 }
@@ -158,12 +166,40 @@ function laterOf(current: string | undefined, next: string): string {
 /**
  * What makes two events the same event.
  *
- * The system's own id when it gave us one, since that is the only thing that survives
- * a payload being reworded. Otherwise the four things that identify an occurrence, so
- * a re-fetch of the same week matches rather than duplicates.
+ * The system's own id when it gave us one, since that is the only thing that survives a
+ * payload being reworded — but scoped by what it is an id *of*. Nothing in the `Source`
+ * contract promises an id is unique across kinds, and GitHub in particular numbers
+ * reviews and issue comments separately: review 42 and comment 42 on the same pull
+ * request are two different things, and keying on the id alone silently dropped the
+ * second of them. When there is no id, the time stands in for one.
  */
 function eventKey(event: SourceEvent): string {
+  const what = event.id ?? event.at;
+  return `${event.source}|${event.kind}|${event.itemId}|${what}`;
+}
+
+/** How version 2 keyed an event, kept only to recognise what an old cache wrote down. */
+function legacyEventKey(event: SourceEvent): string {
   return event.id ? `${event.source}|${event.id}` : `${event.source}|${event.kind}|${event.itemId}|${event.at}`;
+}
+
+/**
+ * Bring a version 2 record of what has been written up into the new key format.
+ *
+ * Rewriting keys is safe here because the events themselves are still on disk: each one
+ * knows both its old key and its new one, so a week's record of "already written up"
+ * survives the change. Skipping this would make every stored event look new and hand
+ * the whole history back to the coach.
+ */
+function migrateWrittenKeys(written: Record<string, string[]>, events: Map<string, SourceEvent[]>): void {
+  for (const [weekId, keys] of Object.entries(written)) {
+    const before = new Set(keys);
+    const after = new Set<string>();
+    for (const event of events.get(weekId) ?? []) {
+      if (before.has(legacyEventKey(event)) || before.has(eventKey(event))) after.add(eventKey(event));
+    }
+    written[weekId] = [...after].sort();
+  }
 }
 
 /** Events in file order: by time, then by key, so a rewrite is byte-stable. */
@@ -211,17 +247,28 @@ const snapshotSchema = z.object({
 const sourceMetaSchema = z.object({
   fetchedAt: z.string().optional(),
   windows: z.union([z.array(z.string()), z.record(z.string(), z.string())]).default({}),
+  incomplete: z.array(z.string()).default([]),
   state: z.record(z.string(), z.string()).default({}),
-}).transform(({ windows, state }): SourceMeta => ({
+}).transform(({ windows, incomplete, state }): SourceMeta => ({
   windows: Array.isArray(windows)
     ? Object.fromEntries(windows.map((week) => [week, ""]))
     : windows,
+  incomplete,
   state,
 }));
 
+/**
+ * The fields an existing metadata file must actually carry.
+ *
+ * Defaults are for fields a past version did not write, not for a file that has lost its
+ * contents. A zero-byte file, whitespace, or `{}` would satisfy a schema of nothing but
+ * defaults and read as a fresh install — and a fresh install means every event already
+ * on disk looks unwritten, so the whole history goes back to the coach. Only a file that
+ * is not there at all means fresh.
+ */
 const metaSchema = z.object({
-  version: z.number().default(LEDGER_VERSION),
-  sources: z.record(z.string(), sourceMetaSchema).default({}),
+  version: z.number(),
+  sources: z.record(z.string(), sourceMetaSchema),
   written: z.record(z.string(), z.array(z.string())).default({}),
 });
 
@@ -233,14 +280,18 @@ const metaSchema = z.object({
  */
 type FileRead<T> = { ok: true; value: T } | { ok: false; why: string };
 
-async function readParsed<T>(path: string, schema: z.ZodType<T>, fallback: T): Promise<FileRead<T>> {
-  // Nothing there and nothing written yet are both "no data", which is the normal state
-  // of a fresh install and of a run killed between opening a temp file and renaming it
-  // over the real one. A file with something unreadable in it is a different thing.
+async function readParsed<T>(path: string, schema: z.ZodType<T>, fallback: T, emptyIsFresh = true): Promise<FileRead<T>> {
+  // Nothing there is "no data", which is the normal state of a fresh install.
   if (!existsSync(path)) return { ok: true, value: fallback };
 
   const raw = await readFile(path, "utf-8");
-  if (raw.trim().length === 0) return { ok: true, value: fallback };
+  // An empty file is a run killed between opening a temp file and renaming it over the
+  // real one. For a week's events that costs a refetch. For the metadata it would read
+  // as a fresh install and hand the whole history back to the coach, so there it counts
+  // as damage rather than absence.
+  if (raw.trim().length === 0) {
+    return emptyIsFresh ? { ok: true, value: fallback } : { ok: false, why: "it is empty" };
+  }
 
   let json: unknown;
   try {
@@ -315,6 +366,17 @@ export interface Ledger {
    * can be refetched, into a damaged week, which cannot.
    */
   unreadableWeeks(): string[];
+  /**
+   * Weeks some source has not finished reading, from any run, oldest first.
+   *
+   * Remembered on disk rather than only for the run that found out, so a later run
+   * scoped to a different source still knows the week is short of something.
+   */
+  incompleteWeeks(): string[];
+  /** This source has not finished reading this week. Kept until it does. */
+  markIncomplete(source: string, weekId: string): void;
+  /** This source has now read this week in full. */
+  clearIncomplete(source: string, weekId: string): void;
   /** Anything unreadable found on disk, in the words the user should see. */
   problems(): string[];
   /**
@@ -360,7 +422,7 @@ export async function openLedger(root: string = ledgerRoot()): Promise<Ledger> {
   const unreadable = new Set<string>();
 
   const metaPath = join(root, "meta.json");
-  const rawMeta = await readParsed(metaPath, z.unknown(), undefined);
+  const rawMeta = await readParsed(metaPath, z.unknown(), undefined, false);
   const parsedMeta = rawMeta.ok && rawMeta.value !== undefined ? metaSchema.safeParse(rawMeta.value) : undefined;
   /**
    * Why nothing may be written while the metadata is unreadable.
@@ -386,9 +448,9 @@ export async function openLedger(root: string = ledgerRoot()): Promise<Ledger> {
   if (storedVersion < LEDGER_VERSION) {
     meta.version = LEDGER_VERSION;
     notices.push(
-      `The activity cache was written by an older version. Each week it already holds will be checked once from the week's own start, ` +
-      `because the version it came from kept a single reading position for a whole source and that says nothing about any one week. ` +
-      `Anything already recorded is matched rather than duplicated.`,
+      `The activity cache was written by an older version, so it is being brought forward: each week it already holds will be checked ` +
+      `once from the week's own start, and the keys it uses to tell one event from another are rewritten to tell apart two things that ` +
+      `share a number. Anything already recorded is matched rather than duplicated, and no week already written up is offered again.`,
     );
   }
 
@@ -436,6 +498,10 @@ export async function openLedger(root: string = ledgerRoot()): Promise<Ledger> {
     }
     snapshots.set(file.slice(0, -".json".length), Object.fromEntries(kept));
   }
+
+  // Now that the events are in hand, each one can say both what it used to be called and
+  // what it is called now, so the record of what has been written up survives the change.
+  if (storedVersion < LEDGER_VERSION) migrateWrittenKeys(meta.written, events);
 
   const dirtyWeeks = new Set<string>();
   const dirtySources = new Set<string>();
@@ -508,6 +574,30 @@ export async function openLedger(root: string = ledgerRoot()): Promise<Ledger> {
       return [...unreadable].sort();
     },
 
+    incompleteWeeks() {
+      const weeks = new Set<string>();
+      for (const entry of Object.values(meta.sources)) {
+        for (const week of entry.incomplete) weeks.add(week);
+      }
+      return [...weeks].sort();
+    },
+
+    markIncomplete(source, weekId) {
+      const entry = sourceMeta(meta, source);
+      if (entry.incomplete.includes(weekId)) return;
+      entry.incomplete.push(weekId);
+      entry.incomplete.sort();
+      dirtyMeta = true;
+    },
+
+    clearIncomplete(source, weekId) {
+      const entry = sourceMeta(meta, source);
+      const next = entry.incomplete.filter((week) => week !== weekId);
+      if (next.length === entry.incomplete.length) return;
+      entry.incomplete = next;
+      dirtyMeta = true;
+    },
+
     problems() {
       return [...problems];
     },
@@ -546,8 +636,16 @@ export async function openLedger(root: string = ledgerRoot()): Promise<Ledger> {
         dirtySources.add(source);
       }
 
+      const refused = new Set<string>();
       for (const event of batch.events) {
         const weekId = weekIdForDate(new Date(event.at));
+        // The week's file cannot be rewritten, so an event filed into it would live only
+        // in memory — and the watermark would move on as if it had been saved, so the
+        // next run would never fetch it again. Dropping it now keeps it fetchable.
+        if (unreadable.has(weekId)) {
+          refused.add(weekId);
+          continue;
+        }
         const keys = keysFor(weekId);
         const key = eventKey(event);
         if (keys.has(key)) continue;
@@ -559,6 +657,10 @@ export async function openLedger(root: string = ledgerRoot()): Promise<Ledger> {
         dirtyWeeks.add(weekId);
         addedEvents++;
         perWeek.set(weekId, (perWeek.get(weekId) ?? 0) + 1);
+      }
+
+      for (const weekId of refused) {
+        problems.push(`Events for ${weekId} were fetched and thrown away, because ${join(eventsDir, `${weekId}.json`)} cannot be read and so cannot be added to. They will be fetched again once it is repaired or deleted.`);
       }
 
       return { addedEvents, addedSnapshots, perWeek };
@@ -788,6 +890,10 @@ export async function collectIntoLedger(
       warnings.push(...batch.warnings);
     };
 
+    // A week whose stored events cannot be rewritten is one whose newly fetched events
+    // were just dropped. Recording coverage over it would mean never fetching them again.
+    const damaged = new Set(ledger.unreadableWeeks());
+
     const windowed: string[] = [];
     for (const week of weeks) {
       if (ledger.hasWindow(source.name, week.weekId)) continue;
@@ -797,15 +903,19 @@ export async function collectIntoLedger(
       // Whatever came back is kept either way; what an incomplete answer must not buy is
       // the right to stop asking. A window left unmarked costs one repeated first fetch
       // next time, and marking it would cost the part that did not load, for ever.
-      if (batch.incomplete) {
-        warnings.push(`${source.name} did not finish reading ${week.weekId}, so it will be asked again from the start next time.`);
+      if (batch.incomplete || damaged.has(week.weekId)) {
+        warnings.push(batch.incomplete
+          ? `${source.name} did not finish reading ${week.weekId}, so it will be asked again from the start next time.`
+          : `${week.weekId} was fetched but could not be stored, so it will be asked again from the start next time.`);
         incompleteWeeks.add(week.weekId);
+        ledger.markIncomplete(source.name, week.weekId);
         continue;
       }
 
       ledger.markWindow(source.name, week.weekId);
       // A whole window came back, so this week is read up to the moment it was asked.
       ledger.setWatermark(source.name, week.weekId, now);
+      ledger.clearIncomplete(source.name, week.weekId);
       windowed.push(week.weekId);
     }
 
@@ -827,16 +937,29 @@ export async function collectIntoLedger(
         warnings.push(`${source.name} did not finish answering, so the weeks it was asked about keep their reading position and will be asked again.`);
         // Which of them the missing part belonged to is exactly what we do not know, so
         // all of them are held back rather than one guessed at.
-        for (const week of delta) incompleteWeeks.add(week.weekId);
+        for (const week of delta) {
+          incompleteWeeks.add(week.weekId);
+          ledger.markIncomplete(source.name, week.weekId);
+        }
       } else {
         const read = clamp(since, newest, now);
-        for (const week of delta) ledger.setWatermark(source.name, week.weekId, read);
+        for (const week of delta) {
+          if (damaged.has(week.weekId)) {
+            incompleteWeeks.add(week.weekId);
+            ledger.markIncomplete(source.name, week.weekId);
+            continue;
+          }
+          ledger.setWatermark(source.name, week.weekId, read);
+          ledger.clearIncomplete(source.name, week.weekId);
+        }
       }
     }
 
     outcome.tookMs = Math.round(performance.now() - startedAt);
     perSource.set(source.name, outcome);
   }
+
+  for (const week of ledger.incompleteWeeks()) incompleteWeeks.add(week);
 
   return { perSource, weeksChanged, perWeek, incompleteWeeks, warnings };
 }

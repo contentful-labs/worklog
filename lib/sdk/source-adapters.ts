@@ -860,26 +860,16 @@ export function confluenceSource(now: Clock = () => new Date()): Source {
           });
         }
 
+        // Nothing of this user's, so nothing to say about this page this week. That
+        // holds whether the history answered in full — in which case the page was merely
+        // alive while the week went by — or did not, in which case we do not know who
+        // made the last edit and must not guess. Guessing wrote the page's `lastUpdated`
+        // down as the user's own work, and a later complete read proving it was a
+        // colleague's could not take it back: the ledger is append-only. The batch is
+        // already marked incomplete, so the week is asked about again.
         if (batch.events.length === eventsBefore) {
-          // The history answered *in full* and none of it was this user's work this week,
-          // so the page was merely alive while the week went by. A half-read history is
-          // not that answer: the edit we are looking for may be on the page that failed.
-          const updated = instant(page.history?.lastUpdated?.when);
-          if (history.complete || (updated && !inWindow(updated, window))) {
-            batch.snapshots.pop();
-            seen.delete(page.id);
-            continue;
-          }
-          // The history could not be read at all. Fall back to what the search knows: an
-          // edit landed in this week, or there is no usable date and the only honest
-          // answer is when we found it.
-          batch.events.push({
-            source: "confluence",
-            kind: EVENT_KINDS.version,
-            itemId: page.id,
-            at: updated ? updated.iso : spottedAt,
-            payload: updated ? {} : { [PAYLOAD_SPOTTED]: true },
-          });
+          batch.snapshots.pop();
+          seen.delete(page.id);
         }
       }
 
@@ -935,21 +925,9 @@ export function confluenceSource(now: Clock = () => new Date()): Source {
           });
         }
 
-        // The version history could not be read at all, so fall back to what the search
-        // itself knows: one edit, at the page's own last-updated time.
-        if (versions.length === 0) {
-          const updated = instant(page.history?.lastUpdated?.when);
-          if (updated && after(updated, since)) {
-            batch.events.push({
-              source: "confluence",
-              kind: EVENT_KINDS.version,
-              itemId: page.id,
-              at: updated.iso,
-              id: page.version?.number ? `${page.id}:v${page.version.number}` : undefined,
-              payload: {},
-            });
-          }
-        }
+        // No fallback to the page's own `lastUpdated` here either. It says when the page
+        // last moved and nothing about who moved it, and an event recorded under this
+        // user's name cannot be withdrawn once the history says otherwise.
       }
 
       const commentCql = `type = comment AND creator = "${accountId}" AND created > "${sinceDate}"`;
