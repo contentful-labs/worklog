@@ -503,13 +503,13 @@ export async function runWorklog(opts: {
   week?: string;
   since?: string;
   noPrompt: boolean;
-  noSlack: boolean;
+  noSlack?: boolean;
   force: boolean;
   verbose: boolean;
   prompt?: string;
   contextFile?: string;
 }): Promise<void> {
-  const { weeks: weeksBack, week: specificWeek, since: sinceDate, noPrompt, noSlack, force, verbose, prompt: sharedPrompt, contextFile } = opts;
+  const { weeks: weeksBack, week: specificWeek, since: sinceDate, noPrompt, noSlack = false, force, verbose, prompt: sharedPrompt, contextFile } = opts;
   const log = createLogger(verbose);
 
   p.intro("worklog");

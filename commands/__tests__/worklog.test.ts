@@ -21,6 +21,18 @@ vi.mock("../../lib/sdk/vault-updates", async (importOriginal) => {
   return { ...actual, writeFileAtomic: vi.fn(actual.writeFileAtomic) };
 });
 
+// The Slack source spawns the Claude Code CLI. No test may start a process, so it is stood in
+// for as permanently unavailable, which is also what most machines running these tests look like.
+vi.mock("../../lib/sdk/sources/slack", () => ({
+  slackSource: {
+    name: "slack",
+    isAvailable: async () => ({ ok: false, reason: "not configured in tests" }),
+    fetchWindow: async () => ({ snapshots: [], events: [], warnings: [] }),
+    fetchSince: async () => ({ snapshots: [], events: [], warnings: [] }),
+  },
+  slackMessagesFrom: () => [],
+}));
+
 vi.mock("@clack/prompts", () => ({
   intro: vi.fn(),
   outro: vi.fn(),
