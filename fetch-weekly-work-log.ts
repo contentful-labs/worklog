@@ -5,6 +5,7 @@ import { runInit } from "./commands/init";
 import { runConfigure } from "./commands/configure";
 import { makePrepCommand } from "./commands/prep";
 import { makeWorklogCommand } from "./commands/worklog";
+import { makeRefreshCommand } from "./commands/refresh";
 
 const program = new Command("worklog")
   .description("A weekly 5-minute habit that turns your Jira/GitHub/Confluence activity into a brag book with career coaching.")
@@ -13,6 +14,9 @@ const program = new Command("worklog")
 // Default action: run worklog (gap-fill)
 const worklogCmd = makeWorklogCommand();
 program.addCommand(worklogCmd, { isDefault: true });
+
+// worklog refresh
+program.addCommand(makeRefreshCommand());
 
 // worklog prep <type>
 program.addCommand(makePrepCommand());

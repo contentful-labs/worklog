@@ -352,6 +352,8 @@ export interface CollectionOutcome {
   perSource: Map<string, SourceOutcome>;
   /** Weeks whose event set is not what it was, and so need writing again. */
   weeksChanged: Set<string>;
+  /** Events added, by week and then by source: the table the user reads. */
+  perWeek: Map<string, Map<string, number>>;
   warnings: string[];
 }
 
@@ -378,6 +380,7 @@ export async function collectIntoLedger(
 ): Promise<CollectionOutcome> {
   const perSource = new Map<string, SourceOutcome>();
   const weeksChanged = new Set<string>();
+  const perWeek = new Map<string, Map<string, number>>();
   const warnings: string[] = [];
 
   for (const source of sources) {
@@ -394,6 +397,11 @@ export async function collectIntoLedger(
       outcome.addedEvents += result.addedEvents;
       outcome.addedSnapshots += result.addedSnapshots;
       for (const week of result.weeksChanged) weeksChanged.add(week);
+      for (const [week, added] of result.perWeek) {
+        const bySource = perWeek.get(week) ?? new Map<string, number>();
+        bySource.set(source.name, (bySource.get(source.name) ?? 0) + added);
+        perWeek.set(week, bySource);
+      }
       warnings.push(...batch.warnings);
     };
 
@@ -413,7 +421,7 @@ export async function collectIntoLedger(
     perSource.set(source.name, outcome);
   }
 
-  return { perSource, weeksChanged, warnings };
+  return { perSource, weeksChanged, perWeek, warnings };
 }
 
 /**

@@ -2,7 +2,7 @@ import { readdir, unlink } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { Command } from "commander";
 import * as p from "@clack/prompts";
-import { requireConfig, STATS_PATH, TEAM_TIMELINE_PATH } from "../lib/config";
+import { requireConfig, STATS_PATH, TEAM_TIMELINE_PATH, type WorklogConfig } from "../lib/config";
 import { aiQueryStructured, type AIUsage } from "../lib/sdk/ai";
 import { estimateCostUsd, formatCostUsd, PRICING_AS_OF } from "../lib/sdk/pricing";
 import { fillTemplate, buildConfigContext } from "../lib/sdk/template";
@@ -34,6 +34,7 @@ import {
   summarizePreviousBragBooks,
   ticketPrefixesForWeek,
   type TeamTimeline,
+  type VaultPaths,
 } from "../lib/sdk/vault";
 import {
   getWeekNumber,
@@ -414,7 +415,7 @@ async function promptForContext(weekNumber: number, year: number, contextFilePat
 
 // --- Credential resolution ---
 
-function getEnvTokens(): { apiToken: string; githubToken: string } {
+export function getEnvTokens(): { apiToken: string; githubToken: string } {
   const apiToken = process.env.ATLASSIAN_API_TOKEN;
   if (!apiToken) {
     p.log.error("ATLASSIAN_API_TOKEN not set. Run `worklog init` to set up credentials.\nOr generate manually at: https://id.atlassian.com/manage-profile/security/api-tokens");
@@ -513,6 +514,7 @@ export async function buildBragBookPrompt(
   timeline: TeamTimeline,
   weekInfo: WeekInfo | undefined,
   config: Parameters<typeof buildConfigContext>[0],
+  amend?: { existingBragBook: string; newMaterial: string },
 ): Promise<BuiltPrompt> {
   const [rawPromptTemplate, writingStyle] = await Promise.all([
     Bun.file(PROMPT_TEMPLATE_PATH).text(),
@@ -568,6 +570,24 @@ export async function buildBragBookPrompt(
     : "";
   const condensedMemory = condenseMemoryNotes(memoryContent, memoryFullSince);
 
+  // Amending: the model is adding to an entry that already exists, so it needs the
+  // entry itself and a marker for which part of the work log it has not yet seen.
+  const amendSection = amend
+    ? `
+<existing_brag_book>
+This week already has a brag book entry, below. Add to it. Do not rewrite it, do not
+restate what it already says, and do not change its account of what happened.
+${amend.existingBragBook}
+</existing_brag_book>
+
+<new_material>
+Only the following is new since that entry was written. Everything else in the work log
+above is already accounted for.
+${amend.newMaterial}
+</new_material>
+`
+    : "";
+
   const generationContext = (() => {
     if (!weekInfo) return "";
     const teamEntry = getTeamForDate(timeline, weekInfo.startDate);
@@ -605,7 +625,11 @@ export async function buildBragBookPrompt(
     ["notes", vaultNotesSection],
     ["framing", `\n---\n${generationContext}\n<this_weeks_work_log>\n`],
     ["worklog", workLogContent],
-    ["framing", "\n</this_weeks_work_log>\n\n---\n\nReturn the object described by the schema. The brag book markdown goes in bragBookMarkdown."],
+    ["framing", "\n</this_weeks_work_log>\n"],
+    // Counted as prior brag books: it is one, and the size breakdown has to partition the
+    // prompt exactly rather than account for the inputs alone.
+    ["priorBrags", amendSection],
+    ["framing", "\n---\n\nReturn the object described by the schema. The brag book markdown goes in bragBookMarkdown."],
   ];
 
   const prompt = chunks.map(([, text]) => text).join("");
@@ -619,6 +643,189 @@ export async function buildBragBookPrompt(
 
   const { liveRows, olderRows, other } = condensedMemory.counts;
   return { prompt, sections, memoryInputs: { liveRows, olderRows, other } };
+}
+
+// --- Per-week generation ---
+
+export interface WeekGenerationInput {
+  /** The week being written. */
+  weekInfo: WeekInfo;
+  /** `2026-W35`. */
+  wid: string;
+  /**
+   * The work log markdown for this week, built but not yet written.
+   *
+   * Nothing lands until the week validates. Writing it before generation would mean a
+   * failed run had already destroyed the previous work log.
+   */
+  workLog: string;
+  /** Where the work log goes once the week validates. */
+  workLogPath: string;
+  config: WorklogConfig;
+  paths: VaultPaths;
+  timeline: TeamTimeline;
+  log: (message: string) => void;
+  /** Progress reporting; the caller owns the spinner so a multi-week run keeps one. */
+  spinner: ReturnType<typeof p.spinner>;
+  /**
+   * Present when amending a week that already has a brag book: the existing document,
+   * and only the material that is new since it was written. The generation adds to the
+   * existing entry rather than replacing it.
+   */
+  amend?: { existingBragBook: string; newMaterial: string };
+}
+
+export interface WeekGenerationResult {
+  bragBookPath: string;
+  workLogPath: string;
+  bragBookContent: string;
+  memoryAdded: number;
+  memoryRemoved: number;
+  impactLogged: boolean;
+  workContextUpdates: number;
+  profileUpdated: boolean;
+  focusItems: number;
+  focusUpdates: number;
+  bragBookMs: number;
+  contextUpdatesMs: number;
+  /** What the week's one AI call used, and what that is worth. */
+  cost: Pick<WeekTiming, "tokens" | "estimatedCostUsd" | "model">;
+}
+
+export async function generateWeek(input: WeekGenerationInput): Promise<WeekGenerationResult> {
+  const { weekInfo, wid, workLog: markdown, workLogPath, config, paths, timeline, log, spinner: s, amend } = input;
+  const provider = config.ai.provider ?? "openai";
+
+  // Load vault context
+  log("Loading vault context files...");
+  const [fullMemoryContent, profileContent, workContextContent, impactLogContent, coachPersona, rawFocusTrackingContent, focusDocContent, focusHistoryContent, careerContext, previousBragBooks] = await Promise.all([
+    readMemory(paths),
+    readProfile(paths),
+    readWorkContext(paths),
+    readImpactLog(paths),
+    readCoachPersona(paths),
+    readFocusTracking(paths),
+    readFocusDoc(paths),
+    readArchivedFocusDocs(paths),
+    readCareerContext(paths),
+    getBragBooks(paths, 2, `${wid} Brag Book.md`),
+  ]);
+  const memoryCutoff = weeksBefore(weekInfo.startDate, MEMORY_WINDOW_WEEKS).toISOString().split("T")[0];
+  const memoryContent = dropDatedRowsBefore(fullMemoryContent, memoryCutoff);
+  log(`Vault files loaded — memory: ${memoryContent.length} chars (of ${fullMemoryContent.length}, rows since ${memoryCutoff}), profile: ${profileContent.length} chars`);
+
+  const vaultNotes = await discoverWeeklyNotes(config, paths, weekInfo.startDate, weekInfo.endDate);
+  log(`Discovered ${vaultNotes.length} weekly vault notes`);
+
+  const openFocusItems = selectOpenFocusItems(rawFocusTrackingContent, DEFAULT_INJECT_CAP);
+  const focusHistorySummary = summarizeFocusHistory(
+    rawFocusTrackingContent,
+    weekIdForDate(weeksBefore(weekInfo.startDate, FOCUS_SUMMARY_WEEKS)),
+  );
+  const reviewInfo = parseReviewCycle(workContextContent);
+  log(`Open focus items injected: ${openFocusItems.length}${focusHistorySummary ? ` | ${focusHistorySummary}` : ""}`);
+  if (reviewInfo) log(`Review cycle: ${reviewInfo.urgency} — ${reviewInfo.nextReview} in ${reviewInfo.weeksRemaining} weeks`);
+
+  // Generate brag book
+  const bragStart = performance.now();
+  s.start("Generating brag book...");
+
+  const { prompt: fullPrompt, sections: promptSections, memoryInputs } = await buildBragBookPrompt(
+    markdown, previousBragBooks, workContextContent, memoryContent, profileContent,
+    impactLogContent, coachPersona, focusDocContent, focusHistoryContent,
+    careerContext, vaultNotes, openFocusItems, focusHistorySummary, reviewInfo, timeline, weekInfo, config,
+    amend
+  );
+  log(`AI query — provider: ${provider}, model: ${config.ai.model ?? "default"}, prompt: ${fullPrompt.length} chars`);
+  log(formatPromptBreakdown(promptSections));
+  log(formatMemoryBreakdown(memoryInputs));
+
+  let usage: AIUsage | null = null;
+  const output = await aiQueryStructured({
+    prompt: fullPrompt,
+    config,
+    schema: bragBookOutputSchema,
+    schemaName: "brag_book_update",
+    log,
+    onUsage: (reported) => {
+      usage = reported;
+    },
+  });
+  log(`AI response: ${output.bragBookMarkdown.length} chars of markdown plus the vault updates`);
+
+  const cost = costOf(usage);
+  log(
+    `Tokens: ${cost.tokens.input} in (${cost.tokens.cached} cached, ${cost.tokens.cacheWrite} cache write) / ` +
+    `${cost.tokens.output} out, est. ${formatCostUsd(cost.estimatedCostUsd)} on ${cost.model}`,
+  );
+
+  const parsed = toBragBookResult(output);
+  const { itemsToAdd, itemsToRemove, impactLogEntry, workContextUpdates, profileUpdate, focusItems, focusUpdates } = parsed;
+  const bragBookContent = ensureBragBookFrontmatter(parsed.bragBookContent);
+  const bragMs = Math.round(performance.now() - bragStart);
+  s.stop(`Brag book generated in ${formatDuration(bragMs)}`);
+
+  // The week is validated now, so both documents land. Each write is atomic, and the
+  // brag book goes first: it is the record that cannot be rebuilt without another
+  // generation, so a failure there must leave the previous week intact, while a failure
+  // on the work log leaves a brag book that is already correct.
+  const bragBookPath = `${paths.vault}/${wid} Brag Book.md`;
+  await writeFileAtomic(bragBookPath, bragBookContent);
+  log(`Brag book written: ${bragBookPath} (${bragBookContent.length} chars)`);
+  await writeFileAtomic(workLogPath, markdown);
+  log(`Work log written: ${workLogPath} (${markdown.length} chars)`);
+
+  // Context updates
+  const ctxStart = performance.now();
+  s.start("Updating context...");
+  log(`Context updates — memory: +${itemsToAdd.length}/-${itemsToRemove.length}, impact: ${impactLogEntry ? "yes" : "no"}, workContext: ${workContextUpdates.length}, profile: ${profileUpdate ? "yes" : "no"}, focus: ${focusItems.length}/${focusUpdates.length}`);
+
+  const memoryResult = await updateMemory(paths.memory, itemsToAdd, itemsToRemove);
+  if (memoryResult.status === "no-section") p.log.warn("memory.md has no live table above its archived sections; items not written");
+  for (const missed of memoryResult.unmatchedGraduations) {
+    const closest = missed.candidate ? `; closest memory row is "${missed.candidate}"` : "";
+    p.log.warn(`could not graduate "${missed.requested}"${closest}`);
+  }
+  const impactResult = await updateImpactLog(paths.impactLog, impactLogEntry);
+  if (impactResult.status === "no-section") p.log.warn("impact-log.md has no `## Impact Timeline` section; entry not written");
+  if (impactLogEntry && !isIsoDate(impactLogEntry.date)) p.log.warn(`impact entry is dated "${impactLogEntry.date}", which is not a date; entry not written`);
+  const workContextResult = await updateWorkContext(paths.workContext, workContextUpdates);
+  if (workContextResult.status === "no-section") p.log.warn("work-context.md has no `## Organizational Notes` section; notes not written");
+  const profileResult = await updateProfile(paths.profile, profileUpdate);
+  if (profileResult.status === "no-section") p.log.warn("my-profile.md has no `## Key Strengths` section; strength not written");
+  const skipped = memoryResult.skipped + impactResult.skipped + workContextResult.skipped + profileResult.skipped;
+  const merged = memoryResult.merged + impactResult.merged + workContextResult.merged + profileResult.merged;
+  if (merged > 0 || skipped > 0) log(`Vault records: ${merged} merged into existing records, ${skipped} already present or empty`);
+  if (focusItems.length > 0 || focusUpdates.length > 0 || openFocusItems.length > 0) {
+    const focusResult = await updateFocusTracking(paths.focusTracking, {
+      focusItems,
+      focusUpdates,
+      reviewedIds: openFocusItems.map((f) => f.id),
+      weekLabel: wid,
+      lapseAfter: DEFAULT_LAPSE_AFTER,
+    });
+    log(`Focus: ${focusResult.resolved} resolved, ${focusResult.lapsed} lapsed, ${focusResult.added} added, ${focusResult.restated} restated`);
+    for (const near of focusResult.nearDuplicates) p.log.warn(`added "${near.item}"; looks close to open item ${near.candidateId}`);
+  }
+
+  const ctxMs = Math.round(performance.now() - ctxStart);
+  s.stop(`Context updated in ${formatDuration(ctxMs)}`);
+
+  return {
+    cost,
+    bragBookPath,
+    workLogPath,
+    bragBookContent,
+    memoryAdded: memoryResult.added + memoryResult.merged,
+    memoryRemoved: memoryResult.removed,
+    impactLogged: impactResult.added + impactResult.merged > 0,
+    workContextUpdates: workContextResult.added + workContextResult.merged,
+    profileUpdated: profileResult.status === "written",
+    focusItems: focusItems.length,
+    focusUpdates: focusUpdates.length,
+    bragBookMs: bragMs,
+    contextUpdatesMs: ctxMs,
+  };
 }
 
 // --- Main worklog runner ---
@@ -734,7 +941,6 @@ export async function runWorklog(opts: {
   s.stop("Account IDs ready");
   log(`Atlassian accountId: ${accountId}, GitHub username: ${githubUsername}`);
 
-  const provider = config.ai.provider ?? "openai";
   const timings: WeekTiming[] = [];
   const results: WeekResult[] = [];
   let lastBragBookPath = "";
@@ -765,130 +971,15 @@ export async function runWorklog(opts: {
     // run destroyed the previous work log before the model had said anything usable.
     log(`Work log built: ${workLogPath} (${markdown.length} chars, not yet written)`);
 
-    // Load vault context
-    log("Loading vault context files...");
-    const [fullMemoryContent, profileContent, workContextContent, impactLogContent, coachPersona, rawFocusTrackingContent, focusDocContent, focusHistoryContent, careerContext, previousBragBooks] = await Promise.all([
-      readMemory(paths),
-      readProfile(paths),
-      readWorkContext(paths),
-      readImpactLog(paths),
-      readCoachPersona(paths),
-      readFocusTracking(paths),
-      readFocusDoc(paths),
-      readArchivedFocusDocs(paths),
-      readCareerContext(paths),
-      getBragBooks(paths, 2, `${wid} Brag Book.md`),
-    ]);
-    const memoryCutoff = weeksBefore(weekInfo.startDate, MEMORY_WINDOW_WEEKS).toISOString().split("T")[0];
-    const memoryContent = dropDatedRowsBefore(fullMemoryContent, memoryCutoff);
-    log(`Vault files loaded — memory: ${memoryContent.length} chars (of ${fullMemoryContent.length}, rows since ${memoryCutoff}), profile: ${profileContent.length} chars`);
-
-    // Discovery matches note filenames against ticket prefixes too, so it gets the same week's
-    // prefixes the ranking does.
-    const weekPrefixes = ticketPrefixesForWeek(config, getTeamForDate(timeline, weekInfo.startDate));
-    const vaultNotes = await discoverWeeklyNotes(config, paths, weekInfo.startDate, weekInfo.endDate, weekPrefixes);
-    log(`Discovered ${vaultNotes.length} weekly vault notes (prefixes: ${weekPrefixes.join(", ") || "none"})`);
-
-    const openFocusItems = selectOpenFocusItems(rawFocusTrackingContent, DEFAULT_INJECT_CAP);
-    const focusHistorySummary = summarizeFocusHistory(
-      rawFocusTrackingContent,
-      weekIdForDate(weeksBefore(weekInfo.startDate, FOCUS_SUMMARY_WEEKS)),
-    );
-    const reviewInfo = parseReviewCycle(workContextContent);
-    log(`Open focus items injected: ${openFocusItems.length}${focusHistorySummary ? ` | ${focusHistorySummary}` : ""}`);
-    if (reviewInfo) log(`Review cycle: ${reviewInfo.urgency} — ${reviewInfo.nextReview} in ${reviewInfo.weeksRemaining} weeks`);
-
-    // Generate brag book
-    const bragStart = performance.now();
-    s.start("Generating brag book...");
-
-    const { prompt: fullPrompt, sections: promptSections, memoryInputs } = await buildBragBookPrompt(
-      markdown, previousBragBooks, workContextContent, memoryContent, profileContent,
-      impactLogContent, coachPersona, focusDocContent, focusHistoryContent,
-      careerContext, vaultNotes, openFocusItems, focusHistorySummary, reviewInfo, timeline, weekInfo, config
-    );
-    log(`AI query — provider: ${provider}, model: ${config.ai.model ?? "default"}, prompt: ${fullPrompt.length} chars`);
-    log(formatPromptBreakdown(promptSections));
-    log(formatMemoryBreakdown(memoryInputs));
-
-    let usage: AIUsage | null = null;
-    const output = await aiQueryStructured({
-      prompt: fullPrompt,
-      config,
-      schema: bragBookOutputSchema,
-      schemaName: "brag_book_update",
-      log,
-      onUsage: (reported) => {
-        usage = reported;
-      },
-    });
-    log(`AI response: ${output.bragBookMarkdown.length} chars of markdown plus the vault updates`);
-
-    const weekCost = costOf(usage);
-    log(
-      `Tokens: ${weekCost.tokens.input} in (${weekCost.tokens.cached} cached, ${weekCost.tokens.cacheWrite} cache write) / ` +
-      `${weekCost.tokens.output} out, est. ${formatCostUsd(weekCost.estimatedCostUsd)} on ${weekCost.model}`,
-    );
-
-    const parsed = toBragBookResult(output);
-    const { itemsToAdd, itemsToRemove, impactLogEntry, workContextUpdates, profileUpdate, focusItems, focusUpdates } = parsed;
-    const bragBookContent = ensureBragBookFrontmatter(parsed.bragBookContent);
-    const bragMs = Math.round(performance.now() - bragStart);
-    s.stop(`Brag book generated in ${formatDuration(bragMs)}`);
-
-    // The week is validated now, so both documents land. Each write is atomic, and the
-    // brag book goes first: it is the record that cannot be rebuilt without another
-    // generation, so a failure there must leave the previous week intact, while a failure
-    // on the work log leaves a brag book that is already correct.
-    const bragBookPath = `${paths.vault}/${wid} Brag Book.md`;
-    await writeFileAtomic(bragBookPath, bragBookContent);
-    log(`Brag book written: ${bragBookPath} (${bragBookContent.length} chars)`);
-    await writeFileAtomic(workLogPath, markdown);
-    log(`Work log written: ${workLogPath} (${markdown.length} chars)`);
-    lastBragBookPath = bragBookPath;
-    lastBragBookContent = bragBookContent;
-
-    // Context updates
-    const ctxStart = performance.now();
-    s.start("Updating context...");
-    log(`Context updates — memory: +${itemsToAdd.length}/-${itemsToRemove.length}, impact: ${impactLogEntry ? "yes" : "no"}, workContext: ${workContextUpdates.length}, profile: ${profileUpdate ? "yes" : "no"}, focus: ${focusItems.length}/${focusUpdates.length}`);
-
-    const memoryResult = await updateMemory(paths.memory, itemsToAdd, itemsToRemove);
-    if (memoryResult.status === "no-section") p.log.warn("memory.md has no live table above its archived sections; items not written");
-    for (const missed of memoryResult.unmatchedGraduations) {
-      const closest = missed.candidate ? `; closest memory row is "${missed.candidate}"` : "";
-      p.log.warn(`could not graduate "${missed.requested}"${closest}`);
-    }
-    const impactResult = await updateImpactLog(paths.impactLog, impactLogEntry);
-    if (impactResult.status === "no-section") p.log.warn("impact-log.md has no `## Impact Timeline` section; entry not written");
-    if (impactLogEntry && !isIsoDate(impactLogEntry.date)) p.log.warn(`impact entry is dated "${impactLogEntry.date}", which is not a date; entry not written`);
-    const workContextResult = await updateWorkContext(paths.workContext, workContextUpdates);
-    if (workContextResult.status === "no-section") p.log.warn("work-context.md has no `## Organizational Notes` section; notes not written");
-    const profileResult = await updateProfile(paths.profile, profileUpdate);
-    if (profileResult.status === "no-section") p.log.warn("my-profile.md has no `## Key Strengths` section; strength not written");
-    const skipped = memoryResult.skipped + impactResult.skipped + workContextResult.skipped + profileResult.skipped;
-    const merged = memoryResult.merged + impactResult.merged + workContextResult.merged + profileResult.merged;
-    if (merged > 0 || skipped > 0) log(`Vault records: ${merged} merged into existing records, ${skipped} already present or empty`);
-    if (focusItems.length > 0 || focusUpdates.length > 0 || openFocusItems.length > 0) {
-      const focusResult = await updateFocusTracking(paths.focusTracking, {
-        focusItems,
-        focusUpdates,
-        reviewedIds: openFocusItems.map((f) => f.id),
-        weekLabel: wid,
-        lapseAfter: DEFAULT_LAPSE_AFTER,
-      });
-      log(`Focus: ${focusResult.resolved} resolved, ${focusResult.lapsed} lapsed, ${focusResult.added} added, ${focusResult.restated} restated`);
-      for (const near of focusResult.nearDuplicates) p.log.warn(`added "${near.item}"; looks close to open item ${near.candidateId}`);
-    }
-
-    const ctxMs = Math.round(performance.now() - ctxStart);
-    s.stop(`Context updated in ${formatDuration(ctxMs)}`);
+    const week = await generateWeek({ weekInfo, wid, workLog: markdown, workLogPath, config, paths, timeline, log, spinner: s });
+    lastBragBookPath = week.bragBookPath;
+    lastBragBookContent = week.bragBookContent;
 
     const weekTotal = Math.round(performance.now() - weekStart);
     p.log.success(`${wid} done in ${formatDuration(weekTotal)}`);
 
-    timings.push({ weekId: wid, fetch: fetchMs, bragBook: bragMs, contextUpdates: ctxMs, total: weekTotal, ...weekCost });
-    results.push({ weekId: wid, jira: issues.length, confluence: pages.length, prs: prs.length, reviews: reviews.length, memoryAdded: memoryResult.added + memoryResult.merged, memoryRemoved: memoryResult.removed, impactLog: impactResult.added + impactResult.merged > 0, workContextUpdates: workContextResult.added + workContextResult.merged, profileUpdated: profileResult.status === "written", focusItems: focusItems.length, focusUpdates: focusUpdates.length });
+    timings.push({ weekId: wid, fetch: fetchMs, bragBook: week.bragBookMs, contextUpdates: week.contextUpdatesMs, total: weekTotal, ...week.cost });
+    results.push({ weekId: wid, jira: issues.length, confluence: pages.length, prs: prs.length, reviews: reviews.length, memoryAdded: week.memoryAdded, memoryRemoved: week.memoryRemoved, impactLog: week.impactLogged, workContextUpdates: week.workContextUpdates, profileUpdated: week.profileUpdated, focusItems: week.focusItems, focusUpdates: week.focusUpdates });
 
     progress.completedWeeks.push(wid);
     await saveProgress(progress);
