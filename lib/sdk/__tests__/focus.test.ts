@@ -201,6 +201,142 @@ describe("applyFocusUpdates", () => {
     expect(result.content).toContain("| Review RFC | pending | 0 | restated 2026-W10 |");
   });
 
+  it("leaves the row this week already created alone when the week is regenerated", () => {
+    // Regenerating a week replays the same coaching. The row the first run inserted is
+    // the same commitment, not a repeat of an older one.
+    const first = applyFocusUpdates(base, {
+      reviewedIds: [], updates: [], newItems: ["Add regression coverage"], weekLabel: "2026-W10",
+    });
+    expect(first.added).toBe(1);
+    expect(first.restated).toBe(0);
+
+    const second = applyFocusUpdates(first.content, {
+      reviewedIds: [], updates: [], newItems: ["Add regression coverage"], weekLabel: "2026-W10",
+    });
+
+    expect(second.restated).toBe(0);
+    expect(second.added).toBe(0);
+    expect(second.content).toBe(first.content);
+    expect(second.content.match(/Add regression coverage/g)).toHaveLength(1);
+  });
+
+  it("does not recreate a same-week commitment that this run just completed", () => {
+    // The status update closes the row, which takes it out of the open set. Recreating it
+    // from the same newItems list left the week holding two contradictory copies.
+    const first = applyFocusUpdates(base, {
+      reviewedIds: [], updates: [], newItems: ["Ship fix"], weekLabel: "2026-W10",
+    });
+    expect(first.added).toBe(1);
+
+    const second = applyFocusUpdates(first.content, {
+      reviewedIds: ["2026-W10.1"],
+      updates: [{ id: "2026-W10.1", status: "completed", notes: "done" }],
+      newItems: ["Ship fix"],
+      weekLabel: "2026-W10",
+    });
+
+    expect(second.added).toBe(0);
+    expect(second.restated).toBe(0);
+    expect(second.content).not.toContain("2026-W10.2");
+    expect(second.content.match(/Ship fix/g)).toHaveLength(1);
+    expect(second.content).toContain("| 2026-W10.1 | 2026-W10 | Ship fix | completed | 0 | done |");
+  });
+
+  it("counts a restatement only when the row it matches is from an earlier week", () => {
+    const first = applyFocusUpdates(base, {
+      reviewedIds: [], updates: [], newItems: ["Add regression coverage"], weekLabel: "2026-W10",
+    });
+
+    const later = applyFocusUpdates(first.content, {
+      reviewedIds: [], updates: [], newItems: ["Add regression coverage"], weekLabel: "2026-W11",
+    });
+
+    expect(later.restated).toBe(1);
+    expect(later.added).toBe(0);
+    expect(later.content).toContain("restated 2026-W11");
+    expect(later.content.match(/Add regression coverage/g)).toHaveLength(1);
+  });
+
+  it("keeps one row when the coach names the same commitment twice in one batch", () => {
+    const result = applyFocusUpdates(base, {
+      reviewedIds: [],
+      updates: [],
+      newItems: ["Add regression coverage", "add   REGRESSION coverage"],
+      weekLabel: "2026-W10",
+    });
+
+    expect(result.added).toBe(1);
+    expect(result.restated).toBe(0);
+    expect(result.content.match(/regression coverage/gi)).toHaveLength(1);
+  });
+
+  it("does not append the same status note twice when a week is regenerated", () => {
+    const update = { id: "2026-W09.2", status: "ongoing", notes: "Paired once so far" };
+
+    const first = applyFocusUpdates(base, {
+      reviewedIds: ["2026-W09.2"], updates: [update], newItems: [], weekLabel: "2026-W10",
+    });
+    const second = applyFocusUpdates(first.content, {
+      reviewedIds: ["2026-W09.2"], updates: [update], newItems: [], weekLabel: "2026-W10",
+    });
+
+    expect(second.content).toContain("| Paired once so far |");
+    expect(second.content).not.toContain("Paired once so far; Paired once so far");
+    expect(second.content.match(/Paired once so far/g)).toHaveLength(1);
+  });
+
+  it("does not duplicate a note that contains a semicolon of its own", () => {
+    // Splitting the cell on every semicolon destroyed this note's boundary, so it could
+    // never match itself and grew on every rerun.
+    const update = { id: "2026-W09.2", status: "ongoing", notes: "Discussed API; waiting on review" };
+
+    const first = applyFocusUpdates(base, {
+      reviewedIds: ["2026-W09.2"], updates: [update], newItems: [], weekLabel: "2026-W10",
+    });
+    const second = applyFocusUpdates(first.content, {
+      reviewedIds: ["2026-W09.2"], updates: [update], newItems: [], weekLabel: "2026-W10",
+    });
+
+    expect(second.content).toContain("| Discussed API; waiting on review |");
+    expect(second.content.match(/Discussed API/g)).toHaveLength(1);
+  });
+
+  it("appends after a semicolon note, and still recognises it afterwards", () => {
+    const withSemicolon = { id: "2026-W09.2", status: "ongoing", notes: "Discussed API; waiting on review" };
+
+    const first = applyFocusUpdates(base, {
+      reviewedIds: ["2026-W09.2"], updates: [withSemicolon], newItems: [], weekLabel: "2026-W10",
+    });
+    const withSecond = applyFocusUpdates(first.content, {
+      reviewedIds: ["2026-W09.2"],
+      updates: [{ id: "2026-W09.2", status: "ongoing", notes: "Review landed" }],
+      newItems: [], weekLabel: "2026-W11",
+    });
+    // The first note is now in the middle of the cell, and must still match itself.
+    const replayed = applyFocusUpdates(withSecond.content, {
+      reviewedIds: ["2026-W09.2"], updates: [withSemicolon], newItems: [], weekLabel: "2026-W12",
+    });
+
+    expect(withSecond.content).toContain("Discussed API; waiting on review; Review landed");
+    expect(replayed.content.match(/Discussed API/g)).toHaveLength(1);
+  });
+
+  it("still adds a genuinely different note to a cell that already has one", () => {
+    const first = applyFocusUpdates(base, {
+      reviewedIds: ["2026-W09.2"],
+      updates: [{ id: "2026-W09.2", status: "ongoing", notes: "Paired once" }],
+      newItems: [], weekLabel: "2026-W10",
+    });
+    const second = applyFocusUpdates(first.content, {
+      reviewedIds: ["2026-W09.2"],
+      // A prefix of the existing note, so a substring check would wrongly swallow it.
+      updates: [{ id: "2026-W09.2", status: "ongoing", notes: "Paired once more" }],
+      newItems: [], weekLabel: "2026-W11",
+    });
+
+    expect(second.content).toContain("Paired once; Paired once more");
+  });
+
   it("adds a reworded suggestion and reports what it reads like", () => {
     const result = applyFocusUpdates(base, {
       reviewedIds: [], updates: [], newItems: ["Review the RFC thoroughly"], weekLabel: "2026-W10",
