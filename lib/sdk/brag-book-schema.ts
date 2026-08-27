@@ -272,17 +272,46 @@ function sectionHasContent(nodes: RootContent[], index: number, depth: number): 
 /**
  * Does this node put any of the week's words on the page?
  *
- * Only text, inline code and code blocks count, and only when they are not blank. An
- * `html` node is the template's own scaffolding, such as the COACHING_SESSION marker or
- * a `<!-- nothing to report -->` comment, and it is skipped at every depth: a list item
- * or blockquote wrapping nothing but a comment is still an empty section.
+ * Text, inline code and code blocks count when they are not blank. An `html` node counts
+ * only when it carries words of its own: `<div>Shipped auth</div>` is the week's work
+ * written in markup, while the COACHING_SESSION marker, a `<!-- nothing to report -->`
+ * comment and a lone `<br>` are scaffolding. That distinction holds at every depth, so a
+ * list item or blockquote wrapping nothing but a comment is still an empty section.
  */
 function hasVisibleText(node: RootContent): boolean {
-  if (node.type === "html") return false;
+  if (node.type === "html") return htmlHasText(node.value);
   if (node.type === "text" || node.type === "inlineCode" || node.type === "code") {
     return node.value.trim() !== "";
   }
   if ("children" in node) return node.children.some(hasVisibleText);
+  return false;
+}
+
+/**
+ * Is there anything but comments and tags in this raw HTML?
+ *
+ * Scanned rather than matched with a regex, in line with `isFocusItemId` and
+ * `isTableSeparator`: this reads model output, and the repo keeps those off regexes.
+ * An unterminated comment or tag swallows the rest of the value, which is the safe
+ * direction here, since the leftover `<` is markup rather than a word.
+ */
+function htmlHasText(value: string): boolean {
+  let i = 0;
+  while (i < value.length) {
+    // Checked before the plain `<` below, because a comment opens with one.
+    if (value.startsWith("<!--", i)) {
+      const end = value.indexOf("-->", i + 4);
+      if (end === -1) return false;
+      i = end + 3;
+    } else if (value[i] === "<") {
+      const end = value.indexOf(">", i + 1);
+      if (end === -1) return false;
+      i = end + 1;
+    } else {
+      if (value[i].trim() !== "") return true;
+      i++;
+    }
+  }
   return false;
 }
 

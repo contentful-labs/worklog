@@ -136,6 +136,9 @@ describe("validateBragBookMarkdown", () => {
     ["a comment inside a list item", "- <!-- nothing to report -->"],
     ["a comment inside a blockquote", "> <!-- nothing to report -->"],
     ["a comment nested two deep", "> - <!-- nothing to report -->"],
+    ["a void tag on its own", "<br>"],
+    ["an empty element", "<div></div>"],
+    ["a tag wrapping only a comment", "<div><!-- nothing to report --></div>"],
   ])("does not count %s as content", (_name, body) => {
     // html is scaffolding at every depth, not just at the top of the section.
     expect(() => validateBragBookMarkdown(`## Achievements\n\n${body}\n\n## Stats\n\n- 0`)).toThrow(
@@ -147,6 +150,10 @@ describe("validateBragBookMarkdown", () => {
     ["a list item", "- Shipped auth"],
     ["a blockquote", "> Shipped auth, see TEAM-1234"],
     ["a list item beside a comment", "- <!-- note -->\n- Shipped auth"],
+    // Markup carrying the week's own words is the work, not scaffolding.
+    ["an html element with words in it", "<div>Shipped auth</div>"],
+    ["words beside a comment in one html node", "<div><!-- note -->Shipped auth</div>"],
+    ["an html element nested in a list item", "- <span>Shipped auth</span>"],
   ])("counts %s as content", (_name, body) => {
     expect(() => validateBragBookMarkdown(`## Achievements\n\n${body}`)).not.toThrow();
   });
