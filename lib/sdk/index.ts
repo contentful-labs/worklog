@@ -154,10 +154,8 @@ export { emptyBatch, mergeBatches, EVENT_KINDS, PAYLOAD_TITLE, PAYLOAD_URL, PAYL
 export type {
   Ledger, LedgerSnapshot, RecordResult, CollectionWeek, CollectionOutcome, SourceOutcome,
 } from "./ledger";
-export {
-  openLedger, ledgerRoot, weekWindow, collectIntoLedger, eventsByItem,
-  payloadString, payloadNumber, payloadFlag,
-} from "./ledger";
+export type { RenderablePayload } from "./ledger";
+export { openLedger, ledgerRoot, weekWindow, collectIntoLedger, eventsByItem, renderable } from "./ledger";
 export { jiraSource, confluenceSource, githubSource } from "./source-adapters";
 
 // Doc generators

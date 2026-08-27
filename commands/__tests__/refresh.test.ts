@@ -22,6 +22,8 @@ afterEach(async () => {
   await rm(join(vault, ".."), { recursive: true, force: true });
 });
 
+// SAFETY: refresh hands config to the sources and reads nothing from it itself; the fake
+// sources in this file read only the Atlassian site address.
 const config = { atlassian: { url: "https://example.atlassian.net", email: "user@example.com" } } as WorklogConfig;
 
 const now = new Date("2026-09-07T10:00:00.000Z");

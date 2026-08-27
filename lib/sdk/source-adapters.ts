@@ -24,9 +24,7 @@ import {
   PAYLOAD_FROM,
   PAYLOAD_SPOTTED,
   PAYLOAD_TEXT,
-  PAYLOAD_TITLE,
   PAYLOAD_TO,
-  PAYLOAD_URL,
   emptyBatch,
   type Source,
   type SourceBatch,
@@ -192,6 +190,15 @@ function missingAtlassian(ctx: SourceContext): string | undefined {
 
 // --- Jira ---------------------------------------------------------------------------
 
+/** The POST body Jira's search endpoint takes, page token included once there is one. */
+interface JiraSearchBody {
+  jql: string;
+  fields: string[];
+  maxResults: number;
+  expand: string;
+  nextPageToken?: string;
+}
+
 /**
  * The same POST `fetchJiraIssues` sends, with `expand` added.
  *
@@ -210,7 +217,7 @@ async function fetchJiraIssuesExpanded(
   let nextPageToken: string | undefined;
 
   while (true) {
-    const body: Record<string, unknown> = { jql, fields, maxResults: 100, expand };
+    const body: JiraSearchBody = { jql, fields, maxResults: 100, expand };
     if (nextPageToken) body.nextPageToken = nextPageToken;
 
     const res = await fetch(`${config.atlassian.url}/rest/api/3/search/jql`, {
@@ -228,19 +235,53 @@ async function fetchJiraIssuesExpanded(
   return issues;
 }
 
-function jiraSnapshotPayload(issue: JiraIssue, config: WorklogConfig): Record<string, unknown> {
+/**
+ * What each source writes into a payload.
+ *
+ * `title`, `url` and `text` are the keys every source agreed to speak, and the work log
+ * renders items from those alone. The rest is what this particular system knows, kept
+ * because a later reader of the ledger may want it even though nothing reads it today.
+ */
+interface JiraPayload {
+  title: string;
+  url: string;
+  text: string;
+  key: string;
+  status: string;
+}
+
+interface ConfluencePayload {
+  title: string;
+  url: string;
+  id: string;
+  space: string;
+}
+
+interface GitHubPayload {
+  title: string;
+  url: string;
+  repo: string;
+  number: number;
+}
+
+function jiraSnapshotPayload(issue: JiraIssue, config: WorklogConfig): JiraPayload {
   return {
-    [PAYLOAD_TITLE]: issue.fields.summary,
-    [PAYLOAD_URL]: `${config.atlassian.url}/browse/${issue.key}`,
-    [PAYLOAD_TEXT]: extractText(issue.fields.description),
+    title: issue.fields.summary,
+    url: `${config.atlassian.url}/browse/${issue.key}`,
+    text: extractText(issue.fields.description),
     key: issue.key,
     status: issue.fields.status?.name ?? "",
   };
 }
 
-/** A Jira changelog item's `toString`/`fromString`, without picking up Object.prototype. */
+/**
+ * A changelog item's `fromString`/`toString`, as the domain value it stands for.
+ *
+ * Jira writes an absent side of a transition as null, and the type allows undefined, and
+ * both mean the same thing here: the field had nothing on that side.
+ */
 function transitionValue(value: string | null | undefined): string {
-  return typeof value === "string" ? value : "";
+  return value ?? "";
 }
 
 export function jiraSource(now: Clock = () => new Date()): Source {
@@ -275,6 +316,9 @@ export function jiraSource(now: Clock = () => new Date()): Source {
           batch.events.push({ source: "jira", kind: EVENT_KINDS.created, itemId: issue.key, at: created.iso, payload: {} });
         }
 
+        // SAFETY: JiraComment is the shared comment type plus an optional `id`, which
+        // the API sends and `JiraIssue` does not declare. Every field is read through a
+        // guard below, so a response without one costs that comment and nothing else.
         for (const comment of (issue.fields.comment?.comments ?? []) as JiraComment[]) {
           const at = instant(comment.created);
           if (!at || !inWindow(at, window)) continue;
@@ -355,6 +399,7 @@ export function jiraSource(now: Clock = () => new Date()): Source {
           }
         }
 
+        // SAFETY: as above, the shared type's comments plus the id the API sends.
         for (const comment of (issue.fields.comment?.comments ?? []) as JiraComment[]) {
           const at = instant(comment.created);
           if (!at || !after(at, since)) continue;
@@ -376,8 +421,8 @@ export function jiraSource(now: Clock = () => new Date()): Source {
 
 // --- Confluence -----------------------------------------------------------------------
 
-function confluencePayload(id: string, title: string, url: string, spaceName: string): Record<string, unknown> {
-  return { [PAYLOAD_TITLE]: title, [PAYLOAD_URL]: url, id, space: spaceName };
+function confluencePayload(id: string, title: string, url: string, spaceName: string): ConfluencePayload {
+  return { title, url, id, space: spaceName };
 }
 
 function confluenceUrl(config: WorklogConfig, links: { webui?: string } | undefined): string {
@@ -516,10 +561,10 @@ function repoPathOf(pr: GitHubPR): string {
   return pr.repository_url.replace("https://api.github.com/repos/", "");
 }
 
-function githubPayload(pr: GitHubPR): Record<string, unknown> {
+function githubPayload(pr: GitHubPR): GitHubPayload {
   return {
-    [PAYLOAD_TITLE]: pr.title,
-    [PAYLOAD_URL]: pr.html_url,
+    title: pr.title,
+    url: pr.html_url,
     repo: repoPathOf(pr),
     number: pr.number,
   };
@@ -549,8 +594,9 @@ async function conditionalGet(
   conditional: boolean,
 ): Promise<{ status: number; body?: unknown }> {
   const etag = conditional ? stateOf(ctx).get(url) : undefined;
-  const headers: Record<string, string> = { ...headersOf(ctx).github };
-  if (etag) headers["If-None-Match"] = etag;
+  const headers = new Headers(headersOf(ctx).github);
+  // A stored ETag makes this request free when nothing has changed since last time.
+  if (etag) headers.set("If-None-Match", etag);
 
   const res = await fetch(url, { headers });
   if (res.status === 304) return { status: 304 };
@@ -579,7 +625,10 @@ export function githubSource(now: Clock = () => new Date()): Source {
         warn(batch, ctx, `Could not read reviews for ${repo}#${number}, they will be missing: HTTP ${status}`);
         return;
       }
-      for (const review of (body as GitHubReview[]) ?? []) {
+      // SAFETY: the reviews endpoint returns an array of reviews; every field this
+      // reads is optional on GitHubReview and guarded, so a shape change drops reviews
+      // rather than throwing.
+      for (const review of (Array.isArray(body) ? body : []) as GitHubReview[]) {
         if (review.user?.login !== githubUserOf(ctx)) continue;
         const at = instant(review.submitted_at);
         if (!at || !opts.keep(at)) continue;

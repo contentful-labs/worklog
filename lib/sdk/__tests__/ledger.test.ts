@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import {
-  openLedger, ledgerRoot, eventsByItem, payloadString, collectIntoLedger, weekWindow,
+  openLedger, ledgerRoot, eventsByItem, renderable, collectIntoLedger, weekWindow,
 } from "../ledger";
 import type { Source, SourceBatch, SourceContext } from "../sources";
 
@@ -33,16 +33,16 @@ const ticket = {
 
 describe("ledgerRoot", () => {
   it("honours XDG_CACHE_HOME", () => {
-    expect(ledgerRoot({ XDG_CACHE_HOME: "/tmp/xdg" } as NodeJS.ProcessEnv)).toBe("/tmp/xdg/worklog/ledger");
+    expect(ledgerRoot({ XDG_CACHE_HOME: "/tmp/xdg" })).toBe("/tmp/xdg/worklog/ledger");
   });
 
   it("falls back to ~/.cache when it is unset or blank", () => {
-    expect(ledgerRoot({} as NodeJS.ProcessEnv)).toMatch(/\/\.cache\/worklog\/ledger$/);
-    expect(ledgerRoot({ XDG_CACHE_HOME: "  " } as NodeJS.ProcessEnv)).toMatch(/\/\.cache\/worklog\/ledger$/);
+    expect(ledgerRoot({})).toMatch(/\/\.cache\/worklog\/ledger$/);
+    expect(ledgerRoot({ XDG_CACHE_HOME: "  " })).toMatch(/\/\.cache\/worklog\/ledger$/);
   });
 
   it("is not inside the vault", () => {
-    expect(ledgerRoot({ XDG_CACHE_HOME: "/tmp/xdg" } as NodeJS.ProcessEnv)).not.toContain("Obsidian");
+    expect(ledgerRoot({ XDG_CACHE_HOME: "/tmp/xdg" })).not.toContain("Obsidian");
   });
 });
 
@@ -142,7 +142,7 @@ describe("recording the same thing twice", () => {
 
     const stored = ledger.snapshot("jira", "TEAM-1234");
     expect(stored?.firstSeenAt).toBe("2026-08-10T09:00:00.000Z");
-    expect(payloadString(stored?.payload ?? {}, "title")).toBe("Search Revamp indexer");
+    expect(renderable(stored?.payload).title).toBe("Search Revamp indexer");
   });
 });
 
@@ -261,6 +261,8 @@ describe("collecting into the ledger", () => {
   }
 
   const ctxFor = (): SourceContext => ({
+    // SAFETY: these fake sources read nothing from config; a real one is handed a real
+    // config by the command, and this test is about the ledger, not about them.
     config: {} as SourceContext["config"],
     headers: { atlassian: {}, github: {} },
     identity: { atlassianAccountId: "acc-1", githubUsername: "example-user" },

@@ -22,6 +22,7 @@
  */
 
 import { mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
+import { z } from "zod";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
@@ -42,7 +43,12 @@ const LEDGER_VERSION = 1;
  * syncs to iCloud and is indexed by Obsidian, and not a dotfile directory, which is for
  * things that cannot be fetched again.
  */
-export function ledgerRoot(env: NodeJS.ProcessEnv = process.env): string {
+/** The one environment variable the ledger's location depends on. */
+export interface CacheEnv {
+  XDG_CACHE_HOME?: string;
+}
+
+export function ledgerRoot(env: CacheEnv = { XDG_CACHE_HOME: process.env.XDG_CACHE_HOME }): string {
   const base = env.XDG_CACHE_HOME?.trim();
   return join(base && base.length > 0 ? base : join(homedir(), ".cache"), "worklog", "ledger");
 }
@@ -107,10 +113,70 @@ function compareEvents(a: SourceEvent, b: SourceEvent): number {
   return left === right ? 0 : left < right ? -1 : 1;
 }
 
-async function readJson<T>(path: string, fallback: T): Promise<T> {
+/**
+ * The shapes on disk.
+ *
+ * These files are JSON so a person can read them, which means a person can also edit
+ * them, and a half-written one survives a machine losing power mid-run. Everything is
+ * therefore parsed on the way in rather than trusted: a row that no longer matches is
+ * dropped and the rest of the ledger still opens, the same way a malformed row in a
+ * week's output costs that row and not the week.
+ */
+const eventSchema = z.object({
+  source: z.string().min(1),
+  kind: z.string().min(1),
+  itemId: z.string().min(1),
+  at: z.string().min(1),
+  payload: z.unknown(),
+  id: z.string().optional(),
+});
+
+const snapshotSchema = z.object({
+  id: z.string().min(1),
+  firstSeenAt: z.string().min(1),
+  payload: z.unknown(),
+});
+
+const sourceMetaSchema = z.object({
+  fetchedAt: z.string().optional(),
+  windows: z.array(z.string()).default([]),
+  state: z.record(z.string(), z.string()).default({}),
+});
+
+const metaSchema = z.object({
+  version: z.number().default(LEDGER_VERSION),
+  sources: z.record(z.string(), sourceMetaSchema).default({}),
+});
+
+/**
+ * Read a file through a schema, keeping the rows that still parse.
+ *
+ * A file that is missing, empty or not JSON at all reads as nothing there, which is the
+ * same thing as far as the run is concerned: the ledger refetches what it cannot read.
+ */
+async function readParsed<T>(path: string, schema: z.ZodType<T>, fallback: T): Promise<T> {
   if (!existsSync(path)) return fallback;
+
   const raw = await readFile(path, "utf-8");
-  return raw.trim().length === 0 ? fallback : (JSON.parse(raw) as T);
+  if (raw.trim().length === 0) return fallback;
+
+  try {
+    const parsed = schema.safeParse(JSON.parse(raw));
+    return parsed.success ? parsed.data : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+/** Rows that parse, in file order. One bad row costs itself and nothing else. */
+function keepParsable<T>(rows: unknown, schema: z.ZodType<T>): T[] {
+  if (!Array.isArray(rows)) return [];
+  const kept: T[] = [];
+  for (const row of rows) {
+    const parsed = schema.safeParse(row);
+    if (parsed.success) kept.push(parsed.data);
+  }
+  return kept;
 }
 
 /** Write through a temp file so an interrupted run cannot leave half a ledger behind. */
@@ -155,14 +221,14 @@ export async function openLedger(root: string = ledgerRoot()): Promise<Ledger> {
   const eventsDir = join(root, "events");
   const snapshotsDir = join(root, "snapshots");
 
-  const meta = await readJson<LedgerMeta>(join(root, "meta.json"), emptyMeta());
-  meta.sources ??= {};
+  const meta = await readParsed(join(root, "meta.json"), metaSchema, emptyMeta());
 
   const weekFiles = existsSync(eventsDir) ? await readdir(eventsDir) : [];
   const events = new Map<string, SourceEvent[]>();
   for (const file of weekFiles) {
     if (!file.endsWith(".json")) continue;
-    events.set(file.slice(0, -".json".length), await readJson<SourceEvent[]>(join(eventsDir, file), []));
+    const rows = await readParsed<unknown>(join(eventsDir, file), z.unknown(), []);
+    events.set(file.slice(0, -".json".length), keepParsable(rows, eventSchema));
   }
 
   const snapshotFiles = existsSync(snapshotsDir) ? await readdir(snapshotsDir) : [];
@@ -170,7 +236,14 @@ export async function openLedger(root: string = ledgerRoot()): Promise<Ledger> {
   for (const file of snapshotFiles) {
     if (!file.endsWith(".json")) continue;
     const source = file.slice(0, -".json".length);
-    snapshots.set(source, await readJson<Record<string, SourceSnapshot>>(join(snapshotsDir, file), {}));
+    const stored = await readParsed(join(snapshotsDir, file), z.record(z.string(), z.unknown()), {});
+
+    const kept: Record<string, SourceSnapshot> = {};
+    for (const [id, row] of Object.entries(stored)) {
+      const parsed = snapshotSchema.safeParse(row);
+      if (parsed.success) kept[id] = parsed.data;
+    }
+    snapshots.set(source, kept);
   }
 
   const dirtyWeeks = new Set<string>();
@@ -317,33 +390,29 @@ export function eventsByItem(events: readonly SourceEvent[]): Map<string, Source
 }
 
 /**
- * Narrowing a payload back down.
+ * The fields the work log renders, recovered from a payload.
  *
- * A payload is `unknown` because it went through JSON on the way to disk and comes back
- * a stranger: only the source that wrote it can read all of it, and a reader that wants
- * one field should say which field and what type, and cope with it being neither.
+ * A payload is whatever its source knows and reaches this side as `unknown`, having
+ * been through JSON. Rather than reach into it a field at a time, the few keys every
+ * source agreed to speak are parsed once, here, and anything else in there is left for
+ * that source's own reader. A payload that carries none of them parses to an empty
+ * view, which renders as a bare item and is exactly right for one that had nothing to
+ * add.
  */
-function payloadRecord(payload: unknown): Record<string, unknown> {
-  return typeof payload === "object" && payload !== null && !Array.isArray(payload)
-    ? (payload as Record<string, unknown>)
-    : {};
-}
+const renderableSchema = z.object({
+  title: z.string().optional(),
+  url: z.string().optional(),
+  text: z.string().optional(),
+  from: z.string().optional(),
+  to: z.string().optional(),
+  spotted: z.boolean().optional(),
+});
 
-/** Read a string field out of a payload, or "" when it is not one. */
-export function payloadString(payload: unknown, key: string): string {
-  const value = payloadRecord(payload)[key];
-  return typeof value === "string" ? value : "";
-}
+export type RenderablePayload = z.infer<typeof renderableSchema>;
 
-/** Read a number field out of a payload, or undefined when it is not one. */
-export function payloadNumber(payload: unknown, key: string): number | undefined {
-  const value = payloadRecord(payload)[key];
-  return typeof value === "number" ? value : undefined;
-}
-
-/** True when a payload carries this flag set. */
-export function payloadFlag(payload: unknown, key: string): boolean {
-  return payloadRecord(payload)[key] === true;
+export function renderable(payload: unknown): RenderablePayload {
+  const parsed = renderableSchema.safeParse(payload);
+  return parsed.success ? parsed.data : {};
 }
 
 /** One week to collect, with the window a source is asked about. */

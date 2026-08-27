@@ -1,7 +1,9 @@
 import { describe, it, expect, beforeAll, afterAll, afterEach } from "vitest";
 import { http, HttpResponse } from "msw";
 import { setupServer } from "msw/node";
+import { z } from "zod";
 import { confluenceSource, githubSource, jiraSource } from "../source-adapters";
+import { renderable } from "../ledger";
 import type { SourceContext, SourceEvent, SourceWindow } from "../sources";
 import { buildHeaders, type FetchCredentials } from "../data-fetch";
 import type { WorklogConfig } from "../types";
@@ -124,11 +126,6 @@ const jiraIssue = {
   },
 };
 
-/** Read one field of a payload the way a reader has to: by narrowing it. */
-function field(payload: unknown, key: string): unknown {
-  return typeof payload === "object" && payload !== null ? (payload as Record<string, unknown>)[key] : undefined;
-}
-
 describe("jiraSource", () => {
   it("is unavailable with an actionable reason when the site and identity are missing", async () => {
     const source = jiraSource(() => NOW);
@@ -154,8 +151,7 @@ describe("jiraSource", () => {
     const seenJql: string[] = [];
     server.use(
       http.post(`${BASE_URL}/rest/api/3/search/jql`, async ({ request }) => {
-        const body = (await request.json()) as { jql: string };
-        seenJql.push(body.jql);
+        seenJql.push(z.object({ jql: z.string() }).parse(await request.json()).jql);
         return HttpResponse.json({ issues: [jiraIssue] });
       }),
     );
@@ -185,7 +181,7 @@ describe("jiraSource", () => {
     const comment = findEvent(batch.events, "comment");
     expect(comment?.at).toBe("2026-03-04T11:30:00.000Z");
     expect(comment?.id).toBe("c-1");
-    expect(field(comment?.payload, "text")).toBe("Looks good.");
+    expect(renderable(comment?.payload).text).toBe("Looks good.");
     expect(batch.warnings).toHaveLength(0);
   });
 
@@ -232,7 +228,7 @@ describe("jiraSource", () => {
     expect(batch.events).toHaveLength(1);
     expect(batch.events[0].kind).toBe("active");
     expect(batch.events[0].at).toBe(NOW_ISO);
-    expect(field(batch.events[0].payload, "spotted")).toBe(true);
+    expect(renderable(batch.events[0].payload).spotted).toBe(true);
   });
 
   it("dates an active event at updated when that falls in the window", async () => {
@@ -251,7 +247,7 @@ describe("jiraSource", () => {
 
     expect(batch.events[0].kind).toBe("active");
     expect(batch.events[0].at).toBe("2026-03-05T14:00:00.000Z");
-    expect(field(batch.events[0].payload, "spotted")).toBeUndefined();
+    expect(renderable(batch.events[0].payload).spotted).toBeUndefined();
   });
 
   it("rejects when the primary query fails", async () => {
@@ -267,10 +263,11 @@ describe("jiraSource", () => {
 
   it("reports only changelog entries and comments newer than the watermark", async () => {
     const since = new Date("2026-03-06T00:00:00Z");
-    let seenBody: { jql?: string; expand?: string } = {};
+    const searchBody = z.object({ jql: z.string(), expand: z.string() });
+    let seenBody: z.infer<typeof searchBody> | undefined;
     server.use(
       http.post(`${BASE_URL}/rest/api/3/search/jql`, async ({ request }) => {
-        seenBody = (await request.json()) as { jql?: string; expand?: string };
+        seenBody = searchBody.parse(await request.json());
         return HttpResponse.json({
           issues: [
             {
@@ -309,8 +306,8 @@ describe("jiraSource", () => {
 
     const batch = await jiraSource(() => NOW).fetchSince(since, ["TEAM-1234"], makeContext());
 
-    expect(seenBody.jql).toBe('key in (TEAM-1234) AND updated > "2026-03-06 00:00"');
-    expect(seenBody.expand).toBe("changelog");
+    expect(seenBody?.jql).toBe('key in (TEAM-1234) AND updated > "2026-03-06 00:00"');
+    expect(seenBody?.expand).toBe("changelog");
 
     expect(kinds(batch.events).sort()).toEqual(["comment", "description", "status"]);
 
@@ -319,7 +316,7 @@ describe("jiraSource", () => {
     expect(status?.id).toBe("h-new:status");
     expect(status?.payload).toEqual({ from: "In Progress", to: "Done" });
 
-    expect(field(findEvent(batch.events, "description")?.payload, "text")).toBe("new text");
+    expect(renderable(findEvent(batch.events, "description")?.payload).text).toBe("new text");
     expect(findEvent(batch.events, "comment")?.id).toBe("c-new");
 
     // TEAM-1234 was already known, so no snapshot is re-sent.
@@ -337,7 +334,7 @@ describe("jiraSource", () => {
 
     expect(batch.snapshots).toHaveLength(1);
     expect(batch.snapshots[0].id).toBe("TEAM-4321");
-    expect(field(batch.snapshots[0].payload, "url")).toBe(`${BASE_URL}/browse/TEAM-4321`);
+    expect(renderable(batch.snapshots[0].payload).url).toBe(`${BASE_URL}/browse/TEAM-4321`);
   });
 });
 
@@ -424,7 +421,7 @@ describe("confluenceSource", () => {
     expect(batch.events).toHaveLength(1);
     expect(batch.events[0].kind).toBe("version");
     expect(batch.events[0].at).toBe(NOW_ISO);
-    expect(field(batch.events[0].payload, "spotted")).toBe(true);
+    expect(renderable(batch.events[0].payload).spotted).toBe(true);
   });
 
   it("records a comment against its container, snapshotting a page it only saw that way", async () => {

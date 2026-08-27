@@ -2,8 +2,8 @@ import type { WorklogConfig } from "./types";
 import type { JiraIssue, ConfluencePage, GitHubPR } from "../types";
 import type { PRReview, WeekInfo } from "./data-fetch";
 import { extractText, formatDate } from "../utils";
-import { eventsByItem, payloadFlag, payloadString, type LedgerSnapshot } from "./ledger";
-import { PAYLOAD_FROM, PAYLOAD_SPOTTED, PAYLOAD_TEXT, PAYLOAD_TITLE, PAYLOAD_TO, PAYLOAD_URL, type SourceEvent } from "./sources";
+import { eventsByItem, renderable, type LedgerSnapshot } from "./ledger";
+import type { SourceEvent } from "./sources";
 
 export function generateMarkdown(
   issues: JiraIssue[],
@@ -224,9 +224,11 @@ export function generateEventMarkdown(options: {
 
     for (const [itemId, itemEvents] of byItem) {
       const snapshot = snapshotFor(source, itemId);
-      const title = snapshot ? payloadString(snapshot.payload, PAYLOAD_TITLE) : "";
-      const url = (snapshot ? payloadString(snapshot.payload, PAYLOAD_URL) : "")
-        || (itemId.startsWith("https://") ? itemId : "");
+      const item = renderable(snapshot?.payload);
+      const title = item.title ?? "";
+      // An item whose id is itself a link needs no url of its own, which is how a Slack
+      // permalink arrives.
+      const url = item.url ?? (itemId.startsWith("https://") ? itemId : "");
 
       lines.push(`### ${itemId}${title ? ` - ${title}` : ""}`);
       if (url) lines.push(`**Link:** ${url}`);
@@ -237,7 +239,7 @@ export function generateEventMarkdown(options: {
     }
   }
 
-  const spotted = events.filter((event) => payloadFlag(event.payload, PAYLOAD_SPOTTED)).length;
+  const spotted = events.filter((event) => renderable(event.payload).spotted === true).length;
   if (spotted > 0) {
     lines.push("## Dating");
     lines.push("");
@@ -261,10 +263,11 @@ export function generateEventMarkdown(options: {
 /** One event as a line the model can read without knowing which system it came from. */
 function describeEvent(event: SourceEvent): string {
   const when = event.at.replace("T", " ").slice(0, 16);
-  const spotted = payloadFlag(event.payload, PAYLOAD_SPOTTED) ? " *(spotted, not dated by the source)*" : "";
-  const from = payloadString(event.payload, PAYLOAD_FROM);
-  const to = payloadString(event.payload, PAYLOAD_TO);
-  const text = payloadString(event.payload, PAYLOAD_TEXT).replace(/\s+/g, " ").trim();
+  const happened = renderable(event.payload);
+  const spotted = happened.spotted === true ? " *(spotted, not dated by the source)*" : "";
+  const from = happened.from ?? "";
+  const to = happened.to ?? "";
+  const text = (happened.text ?? "").replace(/\s+/g, " ").trim();
 
   const detail = from || to
     ? `${from || "?"} to ${to || "?"}`
