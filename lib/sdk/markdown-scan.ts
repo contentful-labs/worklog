@@ -83,3 +83,17 @@ export function isArchivedHeadingText(text: string): boolean {
   const words = canonicalText(text).split(" ");
   return words.includes("archived") || words.includes("historical");
 }
+
+/**
+ * Index of the line closing a leading YAML frontmatter block, or -1 when there is none.
+ * Delimiters sit at column 0; an indented `---` is content inside the block, not its end.
+ *
+ * Callers use this to find where a document's body starts, because nothing inside frontmatter
+ * is a heading, a table or a marker however much it looks like one.
+ */
+export function frontmatterEnd(lines: readonly string[]): number {
+  const isDelimiter = (line: string) => line === "---" || line === "---\r";
+  if (!isDelimiter(lines[0] ?? "")) return -1;
+  for (let i = 1; i < lines.length; i++) if (isDelimiter(lines[i])) return i;
+  return -1;
+}

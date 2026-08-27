@@ -12,6 +12,7 @@
  */
 
 import { isTableSeparator, splitRow, renderRow, appendToFirstTable } from "./markdown-table";
+import { frontmatterEnd } from "./markdown-scan";
 import { weekIdForDate } from "./week-utils";
 import { SIMILARITY_THRESHOLD, canonicalText, exactText, textSimilarity } from "./text-similarity";
 
@@ -301,17 +302,6 @@ function assertNotNewerFormat(content: string): void {
       `focus-tracking.md is format ${version}; this version of worklog understands up to ${FOCUS_FORMAT_VERSION}. Upgrade worklog.`,
     );
   }
-}
-
-/**
- * Index of the line closing a leading YAML frontmatter block, or -1 when there is none.
- * Delimiters sit at column 0; an indented `---` is content inside the block, not its end.
- */
-function frontmatterEnd(lines: string[]): number {
-  const isDelimiter = (line: string) => line === "---" || line === "---\r";
-  if (!isDelimiter(lines[0] ?? "")) return -1;
-  for (let i = 1; i < lines.length; i++) if (isDelimiter(lines[i])) return i;
-  return -1;
 }
 
 /**
