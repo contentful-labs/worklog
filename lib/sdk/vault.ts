@@ -127,6 +127,258 @@ export async function readCareerContext(paths: VaultPaths): Promise<string> {
   return parts.length > 0 ? parts.join("\n\n---\n\n") : "No career context available.";
 }
 
+// --- Prompt trimming ---
+//
+// The weekly prompt reached 254k characters, and most of it was material the coach reads past:
+// two prior brag books in full including their own coaching sessions, two archived focus docs in
+// full, and every organisational note ever recorded. These functions cut each input down to the
+// part that changes the coach's answer. They are pure so the trimming can be tested without a
+// vault, and they only ever remove: no input is rewritten or reordered.
+
+/** A heading line, or null. Level is the number of leading `#`. */
+function headingOf(line: string): { level: number; text: string } | null {
+  let level = 0;
+  while (level < line.length && line[level] === "#") level++;
+  if (level === 0 || level > 6) return null;
+  if (level < line.length && line[level] !== " ") return null;
+  return { level, text: line.slice(level).trim() };
+}
+
+/**
+ * True for the headings that open an archived era. Mirrors the rule the vault writers use to
+ * find the live region, kept separate because those helpers are private to `vault-updates.ts`.
+ */
+function isArchivedHeading(line: string): boolean {
+  const heading = headingOf(line);
+  if (!heading) return false;
+  const words = heading.text.toLowerCase().split(" ");
+  return words.includes("archived") || words.includes("historical");
+}
+
+/** Everything above the first archived-era heading. */
+function liveLines(lines: string[]): string[] {
+  const end = lines.findIndex(isArchivedHeading);
+  return end === -1 ? lines : lines.slice(0, end);
+}
+
+/** Trailing blank lines make the joins below look ragged. */
+function trimTrailingBlanks(lines: string[]): string[] {
+  let end = lines.length;
+  while (end > 0 && lines[end - 1].trim() === "") end--;
+  return lines.slice(0, end);
+}
+
+/**
+ * Split into sections at headings of `level` or higher, in document order. Anything above the
+ * first heading belongs to no section and is dropped: in these documents that is the title and
+ * the frontmatter, neither of which any caller here keeps.
+ */
+function sectionsOf(lines: string[], level: number): Array<{ text: string; lines: string[] }> {
+  const sections: Array<{ text: string; lines: string[] }> = [];
+  for (const line of lines) {
+    const heading = headingOf(line);
+    if (heading && heading.level <= level) {
+      sections.push({ text: heading.text, lines: [line] });
+    } else {
+      sections[sections.length - 1]?.lines.push(line);
+    }
+  }
+  return sections;
+}
+
+/** The brag book sections the coach reads for continuity. Its own coaching notes are not among them. */
+const BRAG_BOOK_SUMMARY_SECTIONS = new Set(["achievements", "week in review"]);
+
+/**
+ * Reduce a brag book to what next week's coach needs from it: what was achieved, and how the week
+ * went. The rest of the document is that week's coaching session, its memory bookkeeping and its
+ * vault updates, all of which have already been applied to the vault files the prompt also
+ * carries, so injecting them says the same thing twice.
+ */
+export function extractBragBookSummary(content: string): string {
+  const kept: string[] = [];
+  for (const section of sectionsOf(content.split("\n"), 2)) {
+    if (BRAG_BOOK_SUMMARY_SECTIONS.has(section.text.toLowerCase())) {
+      kept.push(trimTrailingBlanks(section.lines).join("\n"));
+    }
+  }
+  return kept.join("\n\n");
+}
+
+
+/** How `getBragBooks` joins the documents it returns. */
+const BRAG_BOOK_SEPARATOR = "\n\n---\n\n";
+
+/**
+ * Summarize the block of previous brag books the vault reader hands over, keeping the `### week`
+ * label that says which week each one is. A book that has neither section left contributes
+ * nothing rather than an empty heading.
+ *
+ * Input with no sections at all is passed through untouched: that is the reader's "no brag book
+ * entries found" line, not a document this could have summarized.
+ */
+export function summarizePreviousBragBooks(content: string): string {
+  const lines = content.split("\n");
+  if (!lines.some((line) => (headingOf(line)?.level ?? 0) >= 2)) return content;
+
+  const parts: string[] = [];
+  for (const book of content.split(BRAG_BOOK_SEPARATOR)) {
+    const bookLines = book.split("\n");
+    const labelAt = bookLines.findIndex((line) => headingOf(line)?.level === 3);
+    const label = labelAt === -1 ? "" : bookLines[labelAt];
+    const summary = extractBragBookSummary(bookLines.slice(labelAt + 1).join("\n"));
+    if (!summary.trim()) continue;
+    parts.push(label ? `${label}\n\n${summary}` : summary);
+  }
+
+  return parts.join(BRAG_BOOK_SEPARATOR);
+}
+
+/** Words a focus doc's author writes when an item is finished with, whatever the outcome. */
+const CLOSED_MARKERS = new Set(["done", "dropped", "shipped", "abandoned", "cancelled", "canceled"]);
+
+/** Leading emphasis and list punctuation, so `**DONE**` and `DONE:` read the same. */
+function firstWordOf(body: string): string {
+  let word = "";
+  for (const char of body) {
+    const lower = char.toLowerCase();
+    if (lower >= "a" && lower <= "z") word += lower;
+    else if (word.length > 0) break;
+    else if (char !== "*" && char !== "_" && char !== "~" && char !== "[" && char !== " ") break;
+  }
+  return word;
+}
+
+/** A bullet its author has closed off: `- [x] ...`, `- ~~...~~`, or one opening with a marker word. */
+function isClosedItem(line: string): boolean {
+  const text = line.trimStart();
+  if (!text.startsWith("- ") && !text.startsWith("* ")) return false;
+  const body = text.slice(2).trimStart();
+  if (body.startsWith("[x]") || body.startsWith("[X]")) return true;
+  if (body.startsWith("~~")) return true;
+  return CLOSED_MARKERS.has(firstWordOf(body));
+}
+
+/**
+ * Reduce archived focus docs to a record of what changed: their headings, and the items their
+ * author closed off. An archived doc's open items are either still open in the current doc, which
+ * the prompt carries in full, or they were quietly dropped, which the headings already show.
+ */
+export function summarizeArchivedFocusDocs(content: string): string {
+  const kept: string[] = [];
+  for (const line of content.split("\n")) {
+    if (headingOf(line) || isClosedItem(line)) kept.push(line);
+  }
+  return trimTrailingBlanks(kept).join("\n");
+}
+
+/** How many organisational notes the prompt carries before the rest are older than useful. */
+export const DEFAULT_ORG_NOTE_CAP = 40;
+
+const ORG_NOTES_HEADING = "organizational notes";
+
+function isBullet(line: string): boolean {
+  const text = line.trimStart();
+  return text.startsWith("- ") || text.startsWith("* ");
+}
+
+/**
+ * Trim work-context to its live region and cap the organisational notes. The vault writer inserts
+ * new notes at the top of that section, so the first N are the most recent. Everything else in the
+ * file, the core values and the review cycle, is carried whole: it is short and the coach uses all
+ * of it.
+ *
+ * The file on disk is untouched. This only decides what the prompt carries.
+ */
+export function capOrganizationalNotes(content: string, cap: number = DEFAULT_ORG_NOTE_CAP): string {
+  const out: string[] = [];
+  let bullets = 0;
+  let inNotes = false;
+
+  for (const line of liveLines(content.split("\n"))) {
+    const heading = headingOf(line);
+    if (heading) {
+      inNotes = heading.level <= 2 && heading.text.toLowerCase() === ORG_NOTES_HEADING;
+      out.push(line);
+    } else if (inNotes && isBullet(line)) {
+      bullets++;
+      if (bullets <= cap) out.push(line);
+    } else {
+      out.push(line);
+    }
+  }
+
+  const trimmed = trimTrailingBlanks(out);
+  if (bullets <= cap) return trimmed.join("\n");
+  return [...trimmed, "", `_${bullets - cap} older organisational note(s) omitted from this prompt._`].join("\n");
+}
+
+/** How many vault notes the prompt carries, and how much of each. */
+export const DEFAULT_VAULT_NOTE_CAP = 10;
+export const DEFAULT_VAULT_NOTE_LINES = 20;
+
+export interface VaultNote {
+  title: string;
+  excerpt: string;
+}
+
+/**
+ * Identifiers from this week's work log: ticket keys built from the configured prefixes, and the
+ * `#123` of a pull request. Scanned character by character rather than matched with a regex,
+ * because this reads a generated document and a regex over file content is what CodeQL flags.
+ */
+export function collectWorkTerms(workLogContent: string, ticketPrefixes: string[]): string[] {
+  const terms = new Set<string>();
+  const prefixes = ticketPrefixes.map((p) => p.toUpperCase()).filter(Boolean);
+  const upper = workLogContent.toUpperCase();
+
+  for (const prefix of prefixes) {
+    const needle = `${prefix}-`;
+    let from = upper.indexOf(needle);
+    while (from !== -1) {
+      let end = from + needle.length;
+      while (end < upper.length && upper[end] >= "0" && upper[end] <= "9") end++;
+      if (end > from + needle.length) terms.add(upper.slice(from, end));
+      from = upper.indexOf(needle, from + needle.length);
+    }
+  }
+
+  for (let i = 0; i < workLogContent.length; i++) {
+    if (workLogContent[i] !== "#") continue;
+    let end = i + 1;
+    while (end < workLogContent.length && workLogContent[end] >= "0" && workLogContent[end] <= "9") end++;
+    if (end > i + 1) terms.add(workLogContent.slice(i, end));
+  }
+
+  return [...terms];
+}
+
+/**
+ * Pick the vault notes most likely to be about this week. Modification time alone put whatever the
+ * engineer touched last at the top, which is often unrelated; a note that names one of the week's
+ * tickets or pull requests is about the week whenever it was saved. Ties keep the order they came
+ * in, which is still most-recently-modified first.
+ */
+export function rankVaultNotes(
+  notes: readonly VaultNote[],
+  terms: readonly string[],
+  cap: number = DEFAULT_VAULT_NOTE_CAP,
+): VaultNote[] {
+  const needles = terms.map((t) => t.toUpperCase()).filter(Boolean);
+
+  const scored = notes.map((note, index) => {
+    const haystack = `${note.title}\n${note.excerpt}`.toUpperCase();
+    let score = 0;
+    for (const needle of needles) {
+      if (haystack.includes(needle)) score++;
+    }
+    return { note, index, score };
+  });
+
+  scored.sort((a, b) => (b.score - a.score) || (a.index - b.index));
+  return scored.slice(0, cap).map((s) => s.note);
+}
+
 const FIXED_FILES = new Set([
   "memory.md", "my-profile.md", "work-context.md", "impact-log.md",
   "coach-persona.md", "focus-tracking.md", "My Focus.md",
@@ -147,7 +399,7 @@ export async function discoverWeeklyNotes(
   paths: VaultPaths,
   startDate: Date,
   endDate: Date,
-): Promise<Array<{ title: string; excerpt: string }>> {
+): Promise<VaultNote[]> {
   const prefixes = config.profile.ticketPrefixes.map(p => p.toLowerCase());
   const configTerms = [config.profile.company, config.profile.team, config.profile.teamDomain]
     .filter(Boolean)
@@ -180,13 +432,15 @@ export async function discoverWeeklyNotes(
     if (!isRelevant) continue;
 
     const content = await readFile(filePath, "utf-8");
-    const lines = content.split("\n").slice(0, 30);
+    const lines = content.split("\n").slice(0, DEFAULT_VAULT_NOTE_LINES);
     const excerpt = lines.join("\n").trim();
     const title = file.replace(/\.md$/, "");
 
     candidates.push({ title, excerpt, mtime });
   }
 
+  // Most-recently-modified first. The caller ranks these by relevance and keeps far fewer;
+  // this is the pool that ranking chooses from.
   candidates.sort((a, b) => b.mtime - a.mtime);
   return candidates.slice(0, 25).map(({ title, excerpt }) => ({ title, excerpt }));
 }

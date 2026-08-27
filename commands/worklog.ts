@@ -25,6 +25,11 @@ import {
   formatTeamTimelineForPrompt,
   getCurrentTeam,
   discoverWeeklyNotes,
+  capOrganizationalNotes,
+  collectWorkTerms,
+  rankVaultNotes,
+  summarizeArchivedFocusDocs,
+  summarizePreviousBragBooks,
   type TeamTimeline,
 } from "../lib/sdk/vault";
 import {
@@ -425,7 +430,38 @@ function getEnvTokens(): { apiToken: string; githubToken: string } {
 const PROMPT_TEMPLATE_PATH = new URL("../prompts/weekly-brag-prompt.md", import.meta.url).pathname;
 const WRITING_STYLE_PATH = new URL("../prompts/_writing-style.md", import.meta.url).pathname;
 
-async function buildBragBookPrompt(
+/**
+ * Characters each part of the prompt contributes. Reported under `--verbose` so the next person
+ * to look at prompt size can see where the bytes actually go instead of guessing.
+ */
+export interface PromptSectionSizes {
+  /** The prompt file and the writing style guide, both fixed. */
+  template: number;
+  persona: number;
+  profile: number;
+  context: number;
+  impact: number;
+  memory: number;
+  priorBrags: number;
+  focus: number;
+  career: number;
+  notes: number;
+  worklog: number;
+}
+
+export interface BuiltPrompt {
+  prompt: string;
+  sections: PromptSectionSizes;
+}
+
+export function formatPromptBreakdown(sections: PromptSectionSizes): string {
+  const parts = Object.entries(sections)
+    .sort(([, a], [, b]) => b - a)
+    .map(([name, chars]) => `${name} ${(chars / 1000).toFixed(1)}k`);
+  return `Prompt breakdown: ${parts.join(", ")}`;
+}
+
+export async function buildBragBookPrompt(
   workLogContent: string,
   previousBragBooks: string,
   workContextContent: string,
@@ -443,7 +479,7 @@ async function buildBragBookPrompt(
   timeline: TeamTimeline,
   weekInfo: WeekInfo | undefined,
   config: Parameters<typeof buildConfigContext>[0],
-): Promise<string> {
+): Promise<BuiltPrompt> {
   const [rawPromptTemplate, writingStyle] = await Promise.all([
     Bun.file(PROMPT_TEMPLATE_PATH).text(),
     Bun.file(WRITING_STYLE_PATH).text(),
@@ -459,8 +495,18 @@ async function buildBragBookPrompt(
     writing_style: writingStyle,
   });
 
-  const vaultNotesSection = vaultNotes.length > 0
-    ? `\n---\n\n<vault_research_notes>\nThese are work-related notes from the engineer's vault that were created or updated this week.\nThey provide additional context about research, meetings, and work that may not appear in Jira/GitHub/Confluence.\n\n${vaultNotes.map((n) => `### ${n.title}\n${n.excerpt}`).join("\n\n")}\n</vault_research_notes>`
+  // Trimming happens here rather than in the readers: the vault files are read whole by other
+  // callers, and what the prompt carries is a decision about the prompt.
+  const trimmedWorkContext = capOrganizationalNotes(workContextContent);
+  const trimmedBragBooks = summarizePreviousBragBooks(previousBragBooks);
+  const trimmedFocusHistory = summarizeArchivedFocusDocs(focusHistoryContent);
+  const rankedNotes = rankVaultNotes(
+    vaultNotes,
+    collectWorkTerms(workLogContent, config.profile.ticketPrefixes),
+  );
+
+  const vaultNotesSection = rankedNotes.length > 0
+    ? `\n---\n\n<vault_research_notes>\nThese are work-related notes from the engineer's vault that were created or updated this week.\nThey provide additional context about research, meetings, and work that may not appear in Jira/GitHub/Confluence.\n\n${rankedNotes.map((n) => `### ${n.title}\n${n.excerpt}`).join("\n\n")}\n</vault_research_notes>`
     : "";
 
   const reviewProximitySection = reviewInfo
@@ -478,7 +524,21 @@ async function buildBragBookPrompt(
     return `\n<generation_context>\nIMPORTANT: You are generating a brag book for **Week ${weekInfo.weekNumber}, ${weekInfo.year}** (${weekInfo.startDate.toISOString().split("T")[0]} to ${weekInfo.endDate.toISOString().split("T")[0]}).\n\nThis may be a historical regeneration. The work log data below is from that specific time period — it is NOT broken tooling. The tickets, PRs, and pages shown are the engineer's actual work from that week.\n\nTeam assignment at that time: ${teamLabel}${teamEntry?.notes ? `\nNote: ${teamEntry.notes}` : ""}\n\nFull team timeline:\n${formatTeamTimelineForPrompt(timeline)}\n\nDo NOT reference the current date, current team assignment, or any context files that reflect a different time period. Generate the brag book AS IF you are writing it during that week.\n</generation_context>\n`;
   })();
 
-  return `${promptTemplate}
+  const sections: PromptSectionSizes = {
+    template: promptTemplate.length,
+    persona: coachPersona.length,
+    profile: profileContent.length,
+    context: trimmedWorkContext.length,
+    impact: impactLogContent.length,
+    memory: memoryContent.length,
+    priorBrags: trimmedBragBooks.length,
+    focus: focusDocContent.length + trimmedFocusHistory.length + openFocusSection.length,
+    career: careerContext.length,
+    notes: vaultNotesSection.length,
+    worklog: workLogContent.length,
+  };
+
+  const prompt = `${promptTemplate}
 
 ---
 
@@ -495,7 +555,7 @@ ${profileContent}
 ---
 
 <work_context>
-${workContextContent}
+${trimmedWorkContext}
 </work_context>
 
 ---
@@ -513,7 +573,7 @@ ${memoryContent}
 ---
 
 <previous_brag_books>
-${previousBragBooks}
+${trimmedBragBooks}
 </previous_brag_books>
 
 ---
@@ -525,7 +585,7 @@ ${focusDocContent}
 ---
 
 <focus_history>
-${focusHistoryContent}
+${trimmedFocusHistory}
 </focus_history>
 
 ---
@@ -545,6 +605,8 @@ ${workLogContent}
 ---
 
 Return the object described by the schema. The brag book markdown goes in bragBookMarkdown.`;
+
+  return { prompt, sections };
 }
 
 // --- Main worklog runner ---
@@ -725,12 +787,13 @@ export async function runWorklog(opts: {
     const bragStart = performance.now();
     s.start("Generating brag book...");
 
-    const fullPrompt = await buildBragBookPrompt(
+    const { prompt: fullPrompt, sections: promptSections } = await buildBragBookPrompt(
       markdown, previousBragBooks, workContextContent, memoryContent, profileContent,
       impactLogContent, coachPersona, focusDocContent, focusHistoryContent,
       careerContext, vaultNotes, openFocusItems, focusHistorySummary, reviewInfo, timeline, weekInfo, config
     );
     log(`AI query — provider: ${provider}, model: ${config.ai.model ?? "default"}, prompt: ${fullPrompt.length} chars`);
+    log(formatPromptBreakdown(promptSections));
 
     let usage: AIUsage | null = null;
     const output = await aiQueryStructured({

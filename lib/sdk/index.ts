@@ -23,7 +23,7 @@ export {
 export { fillTemplate, buildConfigContext } from "./template";
 
 // Vault
-export type { VaultPaths, TeamTimelineEntry, TeamTimeline } from "./vault";
+export type { VaultPaths, TeamTimelineEntry, TeamTimeline, VaultNote } from "./vault";
 export {
   buildVaultPaths,
   readFileOrDefault,
@@ -46,6 +46,15 @@ export {
   getTeamForDate,
   getCurrentTeam,
   formatTeamTimelineForPrompt,
+  extractBragBookSummary,
+  summarizePreviousBragBooks,
+  summarizeArchivedFocusDocs,
+  capOrganizationalNotes,
+  collectWorkTerms,
+  rankVaultNotes,
+  DEFAULT_ORG_NOTE_CAP,
+  DEFAULT_VAULT_NOTE_CAP,
+  DEFAULT_VAULT_NOTE_LINES,
 } from "./vault";
 
 // AI
