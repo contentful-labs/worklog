@@ -1,5 +1,40 @@
 # Changelog
 
+## [3.1.0](https://github.com/contentful-labs/worklog/compare/v3.0.0...v3.1.0) (2026-08-27)
+
+
+### Features
+
+* add frontmatter to weekly documents written before it existed ([17cd94d](https://github.com/contentful-labs/worklog/commit/17cd94d9c66a79fcdd2824e28f3e4a57705ad928))
+* add frontmatter to weekly documents written before it existed ([f2ce9dc](https://github.com/contentful-labs/worklog/commit/f2ce9dc470f8f2c255dc02ff4cede453bc39dde2))
+* end-to-end pipeline test and per-week token cost ([732369a](https://github.com/contentful-labs/worklog/commit/732369a68d9542890166c1dde1f4b8ce0bbf12b6))
+* end-to-end pipeline test and per-week token cost ([61a84aa](https://github.com/contentful-labs/worklog/commit/61a84aa5b4ea6e95ff4ef8016270740ef307ffe3))
+* instrument the prompt's focus and memory inputs, and trim memory notes ([1c2309f](https://github.com/contentful-labs/worklog/commit/1c2309f3962e1e6499b48ad9240ae3b2ea934b99))
+* make focus suggestions cite an artifact and stop restating open items ([98c7c62](https://github.com/contentful-labs/worklog/commit/98c7c62abb697b4dd5b2ecc017126eaaad225bc2))
+* split the prompt breakdown into the inputs it is actually built from ([c744c86](https://github.com/contentful-labs/worklog/commit/c744c865fa078065ad2c102ee0f1211aae798806))
+* trim the brag-book prompt to what the coach needs ([6aa9c92](https://github.com/contentful-labs/worklog/commit/6aa9c924748b78a849c328d8fc32dd99382a4dc1))
+* trim the brag-book prompt to what the coach needs ([05732d4](https://github.com/contentful-labs/worklog/commit/05732d4004704dc52e8bee48fab1d85d6b48bcf5))
+
+
+### Bug Fixes
+
+* close a memory fence only on its own marker, per CommonMark ([79681ba](https://github.com/contentful-labs/worklog/commit/79681ba4278f11a8db1e2f1047cf210d8b242f3c))
+* count one review per week, however often that week is generated ([c712012](https://github.com/contentful-labs/worklog/commit/c71201268361e0c61e46f99e938b993fa4dc685a))
+* count one review per week, however often that week is generated ([eb5b762](https://github.com/contentful-labs/worklog/commit/eb5b762257da3aa5f284cd5617e99e75fe3f3a6f))
+* keep a completed same-week row, and notes that contain a semicolon ([3b8451f](https://github.com/contentful-labs/worklog/commit/3b8451f274a445b6776d72d17178cfe09d722b0e))
+* make regenerating a week a no-op for focus tracking ([d47229f](https://github.com/contentful-labs/worklog/commit/d47229fb0b81453607943ba6368bfddd47ea1907))
+* make regenerating a week a no-op for focus tracking ([ce47b9f](https://github.com/contentful-labs/worklog/commit/ce47b9f2416c0d0a8005317ec87b5cb907e7148a))
+* name the profile's team when there is no timeline file ([9912dc3](https://github.com/contentful-labs/worklog/commit/9912dc30d5e7331148ef6f336ec0f14b79a92edd))
+* parse the prompt inputs as markdown and keep the stale-item signal ([61f763f](https://github.com/contentful-labs/worklog/commit/61f763f63b0ca13e7aa641ddc62bf90546fdbafb))
+* price model aliases, and test that a reported cost wins ([4d1df4a](https://github.com/contentful-labs/worklog/commit/4d1df4a7b24f74ea56c5a258e44c3a0396216ecb))
+* price per request, count cache writes, and test what force can destroy ([4e554cc](https://github.com/contentful-labs/worklog/commit/4e554cc080bbef735d2c82f4427de253cdd0df20))
+* rank a past week's notes by that week's ticket prefixes ([7838ef5](https://github.com/contentful-labs/worklog/commit/7838ef514b458f0244009a0fc844b049a9fe8002))
+* recognise hidden frontmatter, and only the generated filenames ([fc96d1d](https://github.com/contentful-labs/worklog/commit/fc96d1d81964154ad19cce71ee86ab3b33e2c818))
+* say what is actually wrong with a config or a team timeline ([25ce3f2](https://github.com/contentful-labs/worklog/commit/25ce3f2330112e715f275bd59120c26b179e195d))
+* say what is actually wrong with a config or a team timeline ([bfe1cec](https://github.com/contentful-labs/worklog/commit/bfe1cec4b4a547d5e16e3315f76ecfdb241ea681))
+* the week that made a commitment is not a review of it ([69a79e8](https://github.com/contentful-labs/worklog/commit/69a79e88f5c60ac248270da2e9aa6fd30e459e4f))
+* the week that made a commitment is not a review of it ([279231b](https://github.com/contentful-labs/worklog/commit/279231b195519434b17a93ad3b457e06c4592d9a))
+
 ## [3.0.0](https://github.com/contentful-labs/worklog/compare/v2.0.2...v3.0.0) (2026-08-27)
 
 
