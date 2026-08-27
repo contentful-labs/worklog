@@ -62,6 +62,7 @@ It reads your brag book history and drafts a self-review. If there are weeks you
 
 ```
 worklog                    Generate weekly brag book(s)
+worklog refresh            Pick up what has changed since the last run
 worklog prep 1on1          1:1 meeting prep
 worklog prep self-review   Self-review draft
 worklog prep promotion     Promotion case
@@ -84,6 +85,26 @@ worklog --week 2026-W07    # specific week
 worklog --force            # regenerate even if exists
 worklog --since 2025-01-01 # from date to now
 ```
+
+### `worklog refresh`
+
+Go back over weeks you have already written and pick up what has happened since.
+
+```bash
+worklog refresh                    # every week since your current team started
+worklog refresh --since 2026-01-01 # from a date
+worklog refresh --week 2026-W07    # one week
+worklog refresh --source jira      # one source
+```
+
+Each change is filed in the week it happened, not the week you ran the command: a
+comment written this week lands in this week even when the ticket is from August. Only
+the weeks whose activity actually changed are written again, so a run that finds
+nothing makes no AI call and touches no file. When a week does need writing again, its
+existing brag book goes back to the model along with only the new material, and the
+instruction is to add to the entry rather than replace it.
+
+The table at the end shows what each source contributed per week and how long it took.
 
 ### `worklog prep <type>`
 
@@ -121,13 +142,24 @@ worklog configure coaching
 
 ## How it works
 
-1. Fetches your week's activity from Jira, Confluence, and GitHub
+1. Fetches your week's activity from Jira, Confluence, and GitHub into an event ledger
 2. Asks you what else happened — decisions, conversations, context the tools couldn't capture
 3. Writes a structured markdown work log from all of that
 4. Reads the work log + your context docs and generates a brag book with achievements and a coaching session
 5. Updates your running docs: memory (small contributions), impact log (big wins), and focus tracking (week-over-week accountability)
 
 All data stays local. Nothing leaves your machine except API calls to OpenAI to generate text, and API calls to Jira/GitHub/Confluence to fetch your own activity.
+
+### The event ledger
+
+Fetched activity is cached as timestamped events under `$XDG_CACHE_HOME/worklog/ledger`
+(`~/.cache/worklog/ledger` by default), not in your vault: it can always be fetched
+again, and the vault is for the writing.
+
+An item is snapshotted once, as it looked when first seen, and everything after that is
+an event with its own date. That is what keeps a past week honest — a ticket opened in
+August and closed in September reads as work in progress in August, because September
+is not in August's file. Deleting the cache costs you nothing but a refetch.
 
 ## Weekly workflow
 

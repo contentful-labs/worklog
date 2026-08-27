@@ -28,6 +28,7 @@ To test the full pipeline you'll need API tokens (Jira, GitHub) and an AI provid
 ├── package.json               # bin: worklog, wl; exports: lib/sdk/index.ts
 ├── commands/                  # CLI surface: prompts, spinners, process.exit
 │   ├── worklog.ts             # worklog [generate] -- weekly brag book pipeline
+│   ├── refresh.ts             # worklog refresh -- pick up changes and rewrite only affected weeks
 │   ├── prep.ts                # worklog prep <type> -- prep doc generation
 │   ├── init.ts                # worklog init -- guided setup, seeds vault docs
 │   └── configure.ts           # worklog configure -- update a config section
@@ -41,6 +42,9 @@ To test the full pipeline you'll need API tokens (Jira, GitHub) and an AI provid
 │   └── sdk/                   # Core logic, no CLI I/O. Re-exported from lib/sdk/index.ts
 │       ├── ai.ts              # aiQuery / aiQueryStructured: Anthropic (Claude Agent SDK) or OpenAI (Vercel AI SDK)
 │       ├── data-fetch.ts      # Jira/Confluence/GitHub fetchers, fetchDataForWeek
+│       ├── sources.ts         # The Source plugin contract every source implements
+│       ├── source-adapters.ts # Jira, Confluence and GitHub as Sources; allSources()
+│       ├── ledger.ts          # The event ledger: snapshots, timestamped events, collection
 │       ├── markdown.ts        # Work log markdown from fetched data
 │       ├── brag-book-schema.ts # Zod schema the weekly generation is constrained to
 │       ├── brag-book.ts       # Schema output -> brag book + memory/focus/context updates
@@ -124,6 +128,14 @@ broke. Two known exceptions are pinned in the test itself: the work log carries 
 
 **Vault docs**: The AI reads context from markdown files in the user's vault (profile, work context, coach persona). These are seeded at init but owned by the user -- they can edit them freely.
 
+**The event ledger**: Activity is cached as first-seen snapshots plus timestamped events
+under `$XDG_CACHE_HOME/worklog/ledger`, never in the vault. A week is exactly the events
+whose timestamps fall inside it, which is what makes a past week a closed record rather
+than a view of today: a ticket closed in September does not turn August's entry into a
+story about a finished ticket. Recording is idempotent, so re-fetching a week matches
+what is already there and writes nothing, and that is what lets `worklog refresh` know
+which weeks actually changed.
+
 **Research tools**: `lib/ai-tools.ts` defines six tools (Jira, Confluence, vault read/search) once, then adapts them to the Vercel AI SDK for OpenAI and to an in-process MCP server for the Claude Agent SDK. Both providers see the same tool names, which `prompts/weekly-brag-prompt.md` refers to directly.
 
 ## Making changes
@@ -157,12 +169,27 @@ Never put personal data (names, company-specific values, career levels) directly
 
 ### Adding a new data source
 
-Fetching lives in `lib/sdk/data-fetch.ts`, organized by source (Jira, Confluence, GitHub). To add a new source:
+A source is a plugin implementing the `Source` interface in `lib/sdk/sources.ts`. It
+answers two questions and nothing else: what happened in this window (`fetchWindow`, the
+expensive first look) and what has happened since this moment (`fetchSince`, the cheap
+one every later run asks). Everything downstream — which week an event belongs to, what
+gets rewritten, what the model is told — is the ledger's job.
 
-1. Add a fetch function next to `fetchJiraIssues()` / `fetchGitHubPRs()` / `searchConfluence()`, with an msw-backed test in `lib/sdk/__tests__/data-fetch.test.ts`
-2. Add the results to `fetchDataForWeek()` and the `FetchedWeekData` type
-3. Add a markdown section in `lib/sdk/markdown.ts`
-4. Update `prompts/weekly-brag-prompt.md` if the AI needs to understand the new data
+1. Write the source in `lib/sdk/source-adapters.ts`, returning snapshots for items and
+   events for the things that happened to them. Date each event by when it happened.
+   When the system gives you no date, date it now and mark the payload `spotted: true`
+   so the work log can say so.
+2. Give every event the system's own id when there is one. That is what makes a
+   re-fetch match instead of duplicate.
+3. Report soft failures through `ctx.onWarning` and the batch's `warnings`, and say why
+   in `isAvailable` when the source cannot run. An unavailable source is skipped, never
+   fatal.
+4. Add it to `allSources()`, which is the one list both `worklog` and `worklog refresh`
+   read.
+5. Test it with msw in `lib/sdk/__tests__/source-adapters.test.ts`. Note that
+   `vitest.config.ts` only includes `lib/__tests__`, `lib/sdk/__tests__` and
+   `commands/__tests__` — a test elsewhere is silently skipped.
+6. Update `prompts/weekly-brag-prompt.md` if the AI needs to understand the new data.
 
 ## Submitting changes
 
