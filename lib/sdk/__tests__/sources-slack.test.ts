@@ -183,6 +183,9 @@ describe("slack source child process isolation", () => {
     expect(schema.properties.messages.items.required).toEqual(
       expect.arrayContaining(["permalink", "channel", "author", "channelType", "at", "isReply"]),
     );
+
+    // The CLI rejects the schema outright when zod's `$schema` dialect ref is left in.
+    expect(schema).not.toHaveProperty("$schema");
   });
 
   it("names the configured person and the window in the prompt", async () => {

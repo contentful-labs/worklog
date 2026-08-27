@@ -171,7 +171,17 @@ const slackMessageSchema = z.object({
 /** Only used to derive the JSON Schema handed to the CLI, so there is one source of truth. */
 const slackResponseSchema = z.object({ messages: z.array(slackMessageSchema) });
 
-const RESPONSE_JSON_SCHEMA = JSON.stringify(z.toJSONSchema(slackResponseSchema, { io: "input" }));
+/**
+ * The CLI validates the schema it is handed and rejects the `$schema` dialect reference zod
+ * emits ("no schema with key or ref https://json-schema.org/draft/2020-12/schema"), so it goes.
+ */
+function buildResponseJsonSchema(): string {
+  const schema = z.toJSONSchema(slackResponseSchema, { io: "input" });
+  delete schema.$schema;
+  return JSON.stringify(schema);
+}
+
+const RESPONSE_JSON_SCHEMA = buildResponseJsonSchema();
 
 export type SlackMessage = z.infer<typeof slackMessageSchema>;
 
