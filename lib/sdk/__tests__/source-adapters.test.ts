@@ -124,6 +124,11 @@ const jiraIssue = {
   },
 };
 
+/** Read one field of a payload the way a reader has to: by narrowing it. */
+function field(payload: unknown, key: string): unknown {
+  return typeof payload === "object" && payload !== null ? (payload as Record<string, unknown>)[key] : undefined;
+}
+
 describe("jiraSource", () => {
   it("is unavailable with an actionable reason when the site and identity are missing", async () => {
     const source = jiraSource(() => NOW);
@@ -180,7 +185,7 @@ describe("jiraSource", () => {
     const comment = findEvent(batch.events, "comment");
     expect(comment?.at).toBe("2026-03-04T11:30:00.000Z");
     expect(comment?.id).toBe("c-1");
-    expect(comment?.payload.text).toBe("Looks good.");
+    expect(field(comment?.payload, "text")).toBe("Looks good.");
     expect(batch.warnings).toHaveLength(0);
   });
 
@@ -227,7 +232,7 @@ describe("jiraSource", () => {
     expect(batch.events).toHaveLength(1);
     expect(batch.events[0].kind).toBe("active");
     expect(batch.events[0].at).toBe(NOW_ISO);
-    expect(batch.events[0].payload.spotted).toBe(true);
+    expect(field(batch.events[0].payload, "spotted")).toBe(true);
   });
 
   it("dates an active event at updated when that falls in the window", async () => {
@@ -246,7 +251,7 @@ describe("jiraSource", () => {
 
     expect(batch.events[0].kind).toBe("active");
     expect(batch.events[0].at).toBe("2026-03-05T14:00:00.000Z");
-    expect(batch.events[0].payload.spotted).toBeUndefined();
+    expect(field(batch.events[0].payload, "spotted")).toBeUndefined();
   });
 
   it("rejects when the primary query fails", async () => {
@@ -314,7 +319,7 @@ describe("jiraSource", () => {
     expect(status?.id).toBe("h-new:status");
     expect(status?.payload).toEqual({ from: "In Progress", to: "Done" });
 
-    expect(findEvent(batch.events, "description")?.payload.text).toBe("new text");
+    expect(field(findEvent(batch.events, "description")?.payload, "text")).toBe("new text");
     expect(findEvent(batch.events, "comment")?.id).toBe("c-new");
 
     // TEAM-1234 was already known, so no snapshot is re-sent.
@@ -332,7 +337,7 @@ describe("jiraSource", () => {
 
     expect(batch.snapshots).toHaveLength(1);
     expect(batch.snapshots[0].id).toBe("TEAM-4321");
-    expect(batch.snapshots[0].payload.url).toBe(`${BASE_URL}/browse/TEAM-4321`);
+    expect(field(batch.snapshots[0].payload, "url")).toBe(`${BASE_URL}/browse/TEAM-4321`);
   });
 });
 
@@ -419,7 +424,7 @@ describe("confluenceSource", () => {
     expect(batch.events).toHaveLength(1);
     expect(batch.events[0].kind).toBe("version");
     expect(batch.events[0].at).toBe(NOW_ISO);
-    expect(batch.events[0].payload.spotted).toBe(true);
+    expect(field(batch.events[0].payload, "spotted")).toBe(true);
   });
 
   it("records a comment against its container, snapshotting a page it only saw that way", async () => {

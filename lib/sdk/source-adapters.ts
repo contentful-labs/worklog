@@ -28,10 +28,10 @@ import {
   PAYLOAD_TO,
   PAYLOAD_URL,
   emptyBatch,
-  type JsonObject,
   type Source,
   type SourceBatch,
   type SourceContext,
+  type SourceState,
   type SourceWindow,
 } from "./sources";
 import type { WorklogConfig } from "./types";
@@ -140,10 +140,43 @@ function jqlDateTime(date: Date): string {
 
 // --- shared plumbing ---------------------------------------------------------------
 
+/**
+ * The capabilities these three sources need, read off a context that promises none of
+ * them.
+ *
+ * Slack needs no auth and no state, so the context makes all of that optional. These
+ * three do need it, and say so from `isAvailable` when it is absent. Reading through
+ * these keeps the fetch paths honest about it rather than asserting it away.
+ */
+const noHeaders: FetchHeaders = { atlassian: {}, github: {} };
+
+function headersOf(ctx: SourceContext): FetchHeaders {
+  return ctx.headers ?? noHeaders;
+}
+
+function accountIdOf(ctx: SourceContext): string {
+  return ctx.identity?.atlassianAccountId?.trim() ?? "";
+}
+
+function githubUserOf(ctx: SourceContext): string {
+  return ctx.identity?.githubUsername?.trim() ?? "";
+}
+
+function logOf(ctx: SourceContext): (message: string) => void {
+  return ctx.log ?? (() => {});
+}
+
+/** A source with nowhere to keep an ETag simply pays for every request. */
+const noState: SourceState = { get: () => undefined, set: () => {} };
+
+function stateOf(ctx: SourceContext): SourceState {
+  return ctx.state ?? noState;
+}
+
 /** Record a soft failure in both places: the batch the ledger reads, and the live run. */
 function warn(batch: SourceBatch, ctx: SourceContext, message: string): void {
   batch.warnings.push(message);
-  ctx.onWarning(message);
+  ctx.onWarning?.(message);
 }
 
 function missingAtlassian(ctx: SourceContext): string | undefined {
@@ -151,7 +184,7 @@ function missingAtlassian(ctx: SourceContext): string | undefined {
   if (!ctx.config.atlassian.url?.trim()) {
     missing.push("your Atlassian site address is not set — run `worklog configure atlassian`");
   }
-  if (!ctx.identity.atlassianAccountId?.trim()) {
+  if (!accountIdOf(ctx)) {
     missing.push("we could not work out who you are in Atlassian — check your Atlassian email and API token");
   }
   return missing.length > 0 ? `${missing.join(", and ")}.` : undefined;
@@ -195,7 +228,7 @@ async function fetchJiraIssuesExpanded(
   return issues;
 }
 
-function jiraSnapshotPayload(issue: JiraIssue, config: WorklogConfig): JsonObject {
+function jiraSnapshotPayload(issue: JiraIssue, config: WorklogConfig): Record<string, unknown> {
   return {
     [PAYLOAD_TITLE]: issue.fields.summary,
     [PAYLOAD_URL]: `${config.atlassian.url}/browse/${issue.key}`,
@@ -225,8 +258,8 @@ export function jiraSource(now: Clock = () => new Date()): Source {
       const email = ctx.config.atlassian.email;
       const jql = `(assignee = "${email}" OR reporter = "${email}") AND updated >= "${isoDate(window.start)}" AND updated <= "${isoDate(window.end)}" ORDER BY updated DESC`;
 
-      const issues = await fetchJiraIssues(ctx.config, ctx.headers, jql);
-      ctx.log(`jira: ${issues.length} issue(s) updated in the window`);
+      const issues = await fetchJiraIssues(ctx.config, headersOf(ctx), jql);
+      logOf(ctx)(`jira: ${issues.length} issue(s) updated in the window`);
 
       for (const issue of issues) {
         batch.snapshots.push({
@@ -282,8 +315,8 @@ export function jiraSource(now: Clock = () => new Date()): Source {
       const known = new Set(itemIds);
       const jql = `key in (${itemIds.join(", ")}) AND updated > "${jqlDateTime(since)}"`;
 
-      const issues = await fetchJiraIssuesExpanded(ctx.config, ctx.headers, jql, JIRA_DELTA_FIELDS, JIRA_CHANGELOG_EXPAND);
-      ctx.log(`jira: ${issues.length} issue(s) changed since ${since.toISOString()}`);
+      const issues = await fetchJiraIssuesExpanded(ctx.config, headersOf(ctx), jql, JIRA_DELTA_FIELDS, JIRA_CHANGELOG_EXPAND);
+      logOf(ctx)(`jira: ${issues.length} issue(s) changed since ${since.toISOString()}`);
 
       for (const issue of issues) {
         // The ledger drops a snapshot it already holds, but an id it has never seen has no
@@ -343,7 +376,7 @@ export function jiraSource(now: Clock = () => new Date()): Source {
 
 // --- Confluence -----------------------------------------------------------------------
 
-function confluencePayload(id: string, title: string, url: string, spaceName: string): JsonObject {
+function confluencePayload(id: string, title: string, url: string, spaceName: string): Record<string, unknown> {
   return { [PAYLOAD_TITLE]: title, [PAYLOAD_URL]: url, id, space: spaceName };
 }
 
@@ -363,13 +396,13 @@ export function confluenceSource(now: Clock = () => new Date()): Source {
     async fetchWindow(window, ctx) {
       const batch = emptyBatch();
       const spottedAt = now().toISOString();
-      const accountId = ctx.identity.atlassianAccountId;
+      const accountId = accountIdOf(ctx);
       const startDate = isoDate(window.start);
       const endDate = isoDate(window.end);
 
       const contributorCql = `contributor = "${accountId}" AND type = page AND lastModified >= "${startDate}" AND lastModified <= "${endDate}"`;
-      const pages = await searchConfluence<ConfluencePageDetail>(ctx.config, ctx.headers, contributorCql, CONFLUENCE_PAGE_EXPAND, "any");
-      ctx.log(`confluence: ${pages.length} page(s) touched in the window`);
+      const pages = await searchConfluence<ConfluencePageDetail>(ctx.config, headersOf(ctx), contributorCql, CONFLUENCE_PAGE_EXPAND, "any");
+      logOf(ctx)(`confluence: ${pages.length} page(s) touched in the window`);
 
       const seen = new Set<string>();
       for (const page of pages) {
@@ -416,7 +449,7 @@ export function confluenceSource(now: Clock = () => new Date()): Source {
       // Comments are supplementary: a page's own history is still worth having without them.
       let comments: ConfluenceCommentDetail[] = [];
       try {
-        comments = await searchConfluence<ConfluenceCommentDetail>(ctx.config, ctx.headers, commentCql, CONFLUENCE_COMMENT_EXPAND);
+        comments = await searchConfluence<ConfluenceCommentDetail>(ctx.config, headersOf(ctx), commentCql, CONFLUENCE_COMMENT_EXPAND);
       } catch (err) {
         warn(batch, ctx, `Confluence comment search failed, comments will be missing from this window: ${String(err)}`);
       }
@@ -455,8 +488,8 @@ export function confluenceSource(now: Clock = () => new Date()): Source {
 
       const batch = emptyBatch();
       const cql = `id in (${itemIds.join(", ")}) AND lastModified > "${isoDate(since)}"`;
-      const pages = await searchConfluence<ConfluencePageDetail>(ctx.config, ctx.headers, cql, CONFLUENCE_PAGE_EXPAND, "any");
-      ctx.log(`confluence: ${pages.length} page(s) changed since ${since.toISOString()}`);
+      const pages = await searchConfluence<ConfluencePageDetail>(ctx.config, headersOf(ctx), cql, CONFLUENCE_PAGE_EXPAND, "any");
+      logOf(ctx)(`confluence: ${pages.length} page(s) changed since ${since.toISOString()}`);
 
       for (const page of pages) {
         const updated = instant(page.history?.lastUpdated?.when);
@@ -483,7 +516,7 @@ function repoPathOf(pr: GitHubPR): string {
   return pr.repository_url.replace("https://api.github.com/repos/", "");
 }
 
-function githubPayload(pr: GitHubPR): JsonObject {
+function githubPayload(pr: GitHubPR): Record<string, unknown> {
   return {
     [PAYLOAD_TITLE]: pr.title,
     [PAYLOAD_URL]: pr.html_url,
@@ -515,8 +548,8 @@ async function conditionalGet(
   ctx: SourceContext,
   conditional: boolean,
 ): Promise<{ status: number; body?: unknown }> {
-  const etag = conditional ? ctx.state.get(url) : undefined;
-  const headers: Record<string, string> = { ...ctx.headers.github };
+  const etag = conditional ? stateOf(ctx).get(url) : undefined;
+  const headers: Record<string, string> = { ...headersOf(ctx).github };
   if (etag) headers["If-None-Match"] = etag;
 
   const res = await fetch(url, { headers });
@@ -524,7 +557,7 @@ async function conditionalGet(
   if (!res.ok) return { status: res.status };
 
   const fresh = res.headers.get("etag");
-  if (fresh) ctx.state.set(url, fresh);
+  if (fresh) stateOf(ctx).set(url, fresh);
   return { status: res.status, body: await res.json() };
 }
 
@@ -547,7 +580,7 @@ export function githubSource(now: Clock = () => new Date()): Source {
         return;
       }
       for (const review of (body as GitHubReview[]) ?? []) {
-        if (review.user?.login !== ctx.identity.githubUsername) continue;
+        if (review.user?.login !== githubUserOf(ctx)) continue;
         const at = instant(review.submitted_at);
         if (!at || !opts.keep(at)) continue;
         batch.events.push({
@@ -569,7 +602,7 @@ export function githubSource(now: Clock = () => new Date()): Source {
 
     async isAvailable(ctx) {
       const missing: string[] = [];
-      if (!ctx.identity.githubUsername?.trim()) {
+      if (!githubUserOf(ctx)) {
         missing.push("we could not work out your GitHub username — check your GitHub token");
       }
       if (ctx.config.githubOrgs.length === 0) {
@@ -581,20 +614,20 @@ export function githubSource(now: Clock = () => new Date()): Source {
     async fetchWindow(window, ctx) {
       const batch = emptyBatch();
       const spottedAt = now().toISOString();
-      const username = ctx.identity.githubUsername;
+      const username = githubUserOf(ctx);
       const orgFilter = ctx.config.githubOrgs.map((org) => `org:${org}`).join(" ");
       const startDate = isoDate(window.start);
       const endDate = isoDate(window.end);
 
-      const authored = await fetchGitHubPRs(ctx.headers, `type:pr author:${username} ${orgFilter} created:${startDate}..${endDate}`, "created");
-      ctx.log(`github: ${authored.length} authored PR(s) in the window`);
+      const authored = await fetchGitHubPRs(headersOf(ctx), `type:pr author:${username} ${orgFilter} created:${startDate}..${endDate}`, "created");
+      logOf(ctx)(`github: ${authored.length} authored PR(s) in the window`);
 
       const authoredUrls = new Set(authored.map((pr) => pr.html_url));
 
       // Reviews are supplementary; a failed search must not lose the authored PRs with it.
       let reviewed: GitHubPR[] = [];
       try {
-        reviewed = await fetchGitHubPRs(ctx.headers, `type:pr reviewed-by:${username} ${orgFilter} updated:${startDate}..${endDate}`, "updated");
+        reviewed = await fetchGitHubPRs(headersOf(ctx), `type:pr reviewed-by:${username} ${orgFilter} updated:${startDate}..${endDate}`, "updated");
       } catch (err) {
         warn(batch, ctx, `GitHub reviewed-PR search failed, reviews will be missing from this window: ${String(err)}`);
       }
@@ -634,7 +667,7 @@ export function githubSource(now: Clock = () => new Date()): Source {
       if (itemIds.length === 0) return emptyBatch();
 
       const batch = emptyBatch();
-      ctx.log(`github: checking ${itemIds.length} PR(s) for changes since ${since.toISOString()}`);
+      logOf(ctx)(`github: checking ${itemIds.length} PR(s) for changes since ${since.toISOString()}`);
 
       for (const itemId of itemIds) {
         const parsed = parsePrUrl(itemId);

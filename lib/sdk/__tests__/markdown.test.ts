@@ -211,7 +211,7 @@ describe("generateEventMarkdown", () => {
     const renamed = generateEventMarkdown({
       weekInfo: weekInfo(36, "2026-08-31", "2026-09-06"),
       events: [laterComment],
-      snapshotFor: () => ({ ...ticket, payload: { ...ticket.payload, title: "Search Revamp indexer" } }),
+      snapshotFor: () => ({ ...ticket, payload: { title: "Search Revamp indexer", url: "https://example.atlassian.net/browse/TEAM-1234" } }),
       additionalContext: "",
       config: makeMarkdownConfig(),
       now,

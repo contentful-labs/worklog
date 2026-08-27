@@ -4,7 +4,9 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-import { openLedger, ledgerRoot, eventsByItem, payloadString, collectIntoLedger } from "../ledger";
+import {
+  openLedger, ledgerRoot, eventsByItem, payloadString, collectIntoLedger, weekWindow,
+} from "../ledger";
 import type { Source, SourceBatch, SourceContext } from "../sources";
 
 let root: string;
@@ -365,5 +367,22 @@ describe("collecting into the ledger", () => {
     const outcome = await collectIntoLedger(ledger, [noisy], [week("2026-W36", "2026-08-31", "2026-09-06")], ctxFor, now);
 
     expect(outcome.warnings).toEqual(["Could not read reviews for example-org/repo#1"]);
+  });
+});
+
+describe("the window a source is asked about", () => {
+  it("runs to the end of Sunday, not its first instant", () => {
+    // getWeekEnd gives Sunday at midnight, which is the start of the last day. A source
+    // comparing timestamps against that would drop everything that happened on Sunday.
+    const week = weekWindow("2026-W36", new Date("2026-08-31T00:00:00.000Z"), new Date("2026-09-06T00:00:00.000Z"));
+
+    expect(week.window.end.toISOString()).toBe("2026-09-06T23:59:59.999Z");
+    const sundayEvening = new Date("2026-09-06T18:00:00.000Z");
+    expect(sundayEvening >= week.window.start && sundayEvening <= week.window.end).toBe(true);
+  });
+
+  it("leaves the start of the week alone", () => {
+    const week = weekWindow("2026-W36", new Date("2026-08-31T00:00:00.000Z"), new Date("2026-09-06T00:00:00.000Z"));
+    expect(week.window.start.toISOString()).toBe("2026-08-31T00:00:00.000Z");
   });
 });

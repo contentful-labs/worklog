@@ -23,13 +23,13 @@ import {
   buildHeaders, getAccountId, getGitHubUsername, type FetchHeaders, type WeekInfo,
 } from "../lib/sdk/data-fetch";
 import {
-  collectIntoLedger, openLedger, type CollectionOutcome, type CollectionWeek, type Ledger,
+  collectIntoLedger, openLedger, weekWindow, type CollectionOutcome, type CollectionWeek, type Ledger,
 } from "../lib/sdk/ledger";
 import { generateEventMarkdown } from "../lib/sdk/markdown";
 import { githubSource, confluenceSource, jiraSource } from "../lib/sdk/source-adapters";
 import type { Source, SourceContext } from "../lib/sdk/sources";
 import { buildVaultPaths, getCurrentTeam, readTeamTimeline } from "../lib/sdk/vault";
-import { getWeekEnd, getWeekNumber, getWeekStart, weekId } from "../lib/sdk/week-utils";
+import { formatDuration, getWeekEnd, getWeekNumber, getWeekStart, weekId } from "../lib/sdk/week-utils";
 import { loadConfig, type WorklogConfig } from "../lib/config";
 import { createLogger } from "../lib/sdk/logger";
 import { generateWeek, getEnvTokens } from "./worklog";
@@ -68,7 +68,7 @@ export function weeksInRange(from: Date, to: Date): CollectionWeek[] {
     const year = cursor.getUTCFullYear();
     const id = weekId(week, year);
     if (!weeks.some((existing) => existing.weekId === id)) {
-      weeks.push({ weekId: id, window: { start: getWeekStart(week, year), end: getWeekEnd(week, year) } });
+      weeks.push(weekWindow(id, getWeekStart(week, year), getWeekEnd(week, year)));
     }
     cursor.setUTCDate(cursor.getUTCDate() + 7);
   }
@@ -175,7 +175,7 @@ export async function runRefresh(opts: RefreshOptions): Promise<void> {
   }
 
   const weeks = opts.week
-    ? [{ weekId: opts.week, window: { start: weekInfoFor(opts.week).startDate, end: weekInfoFor(opts.week).endDate } }]
+    ? [weekWindow(opts.week, weekInfoFor(opts.week).startDate, weekInfoFor(opts.week).endDate)]
     : weeksInRange(from, startedAt);
   log(`Refreshing ${weeks.length} week(s) from ${weeks[0]?.weekId} to ${weeks[weeks.length - 1]?.weekId}`);
 
@@ -307,6 +307,14 @@ function printTable(rows: readonly WeekRow[], outcome: CollectionOutcome): void 
   const format = (cells: readonly string[]) => cells.map((cell, i) => cell.padEnd(widths[i])).join("  ");
 
   p.log.message([format(header), format(widths.map((width) => "-".repeat(width))), ...body.map(format)].join("\n"));
+
+  // What each source cost. One of them talks to a model and takes minutes; that should
+  // not be a mystery to someone watching the run.
+  const timings = sources.map((source) => {
+    const result = outcome.perSource.get(source);
+    return `${source} ${formatDuration(result?.tookMs ?? 0)}${result?.unavailable ? " (skipped)" : ""}`;
+  });
+  p.log.message(`Time per source: ${timings.join(", ")}`);
 }
 
 export function makeRefreshCommand(): Command {

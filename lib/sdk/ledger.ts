@@ -28,7 +28,7 @@ import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 
 import type {
-  JsonObject, Source, SourceBatch, SourceContext, SourceEvent, SourceSnapshot, SourceState, SourceWindow,
+  Source, SourceBatch, SourceContext, SourceEvent, SourceSnapshot, SourceState, SourceWindow,
 } from "./sources";
 import { weekIdForDate } from "./week-utils";
 
@@ -316,22 +316,34 @@ export function eventsByItem(events: readonly SourceEvent[]): Map<string, Source
   return byItem;
 }
 
+/**
+ * Narrowing a payload back down.
+ *
+ * A payload is `unknown` because it went through JSON on the way to disk and comes back
+ * a stranger: only the source that wrote it can read all of it, and a reader that wants
+ * one field should say which field and what type, and cope with it being neither.
+ */
+function payloadRecord(payload: unknown): Record<string, unknown> {
+  return typeof payload === "object" && payload !== null && !Array.isArray(payload)
+    ? (payload as Record<string, unknown>)
+    : {};
+}
+
 /** Read a string field out of a payload, or "" when it is not one. */
-export function payloadString(payload: JsonObject, key: string): string {
-  const value = payload[key];
+export function payloadString(payload: unknown, key: string): string {
+  const value = payloadRecord(payload)[key];
   return typeof value === "string" ? value : "";
 }
 
 /** Read a number field out of a payload, or undefined when it is not one. */
-export function payloadNumber(payload: JsonObject, key: string): number | undefined {
-  const value = payload[key];
+export function payloadNumber(payload: unknown, key: string): number | undefined {
+  const value = payloadRecord(payload)[key];
   return typeof value === "number" ? value : undefined;
 }
 
-/** Read a nested object out of a payload, or undefined. */
-export function payloadObject(payload: JsonObject, key: string): JsonObject | undefined {
-  const value = payload[key];
-  return typeof value === "object" && value !== null && !Array.isArray(value) ? value : undefined;
+/** True when a payload carries this flag set. */
+export function payloadFlag(payload: unknown, key: string): boolean {
+  return payloadRecord(payload)[key] === true;
 }
 
 /** One week to collect, with the window a source is asked about. */
@@ -340,10 +352,33 @@ export interface CollectionWeek {
   window: SourceWindow;
 }
 
+/**
+ * The window a source should be asked about for a week.
+ *
+ * `getWeekEnd` returns the Sunday at midnight, which is the start of the last day
+ * rather than the end of it. The existing queries hide that by sending date-only
+ * strings, but a source that compares timestamps against the window would silently drop
+ * everything that happened on the Sunday. The end is pushed to the last instant of that
+ * day here, once, so no source has to know.
+ */
+export function weekWindow(weekId: string, start: Date, end: Date): CollectionWeek {
+  const inclusiveEnd = new Date(end);
+  inclusiveEnd.setUTCHours(23, 59, 59, 999);
+  return { weekId, window: { start, end: inclusiveEnd } };
+}
+
 /** What one source contributed, or why it contributed nothing. */
 export interface SourceOutcome {
   addedEvents: number;
   addedSnapshots: number;
+  /**
+   * How long this source took, in milliseconds.
+   *
+   * Worth showing: the HTTP sources answer in seconds and one that asks a model answers
+   * in minutes, and a user watching a long run deserves to know which of them they are
+   * waiting for.
+   */
+  tookMs: number;
   /** Present when the source could not run at all. */
   unavailable?: string;
 }
@@ -385,13 +420,19 @@ export async function collectIntoLedger(
 
   for (const source of sources) {
     const ctx = contextFor(source);
+    const startedAt = performance.now();
     const availability = await source.isAvailable(ctx);
     if (!availability.ok) {
-      perSource.set(source.name, { addedEvents: 0, addedSnapshots: 0, unavailable: availability.reason });
+      perSource.set(source.name, {
+        addedEvents: 0,
+        addedSnapshots: 0,
+        tookMs: Math.round(performance.now() - startedAt),
+        unavailable: availability.reason,
+      });
       continue;
     }
 
-    const outcome: SourceOutcome = { addedEvents: 0, addedSnapshots: 0 };
+    const outcome: SourceOutcome = { addedEvents: 0, addedSnapshots: 0, tookMs: 0 };
     const file = (batch: SourceBatch) => {
       const result = ledger.record(source.name, batch, now);
       outcome.addedEvents += result.addedEvents;
@@ -418,6 +459,7 @@ export async function collectIntoLedger(
     }
 
     ledger.setWatermark(source.name, now);
+    outcome.tookMs = Math.round(performance.now() - startedAt);
     perSource.set(source.name, outcome);
   }
 

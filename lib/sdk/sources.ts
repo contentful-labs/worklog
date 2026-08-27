@@ -17,13 +17,8 @@
  */
 
 import type { WorklogConfig } from "./types";
+import type { Logger } from "./logger";
 import type { FetchHeaders } from "./data-fetch";
-
-/** A JSON value, which is all a payload is ever allowed to be. */
-export type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
-
-/** A payload as stored: a JSON object, whose shape only the source that wrote it knows. */
-export type JsonObject = { [key: string]: JsonValue };
 
 /**
  * An item as it was the first time we saw it.
@@ -36,7 +31,14 @@ export interface SourceSnapshot {
   id: string;
   /** When this item first entered the ledger, as an ISO timestamp. */
   firstSeenAt: string;
-  payload: JsonObject;
+  /**
+   * Whatever the source knows about the item.
+   *
+   * `unknown` because only the source that wrote it can read all of it: it goes through
+   * JSON on the way to disk and comes back a stranger, so a reader narrows it, either
+   * with the payload helpers in the ledger or with the source's own parser.
+   */
+  payload: unknown;
 }
 
 /**
@@ -56,7 +58,7 @@ export interface SourceEvent {
   itemId: string;
   /** ISO timestamp of the event itself, not of the fetch. */
   at: string;
-  payload: JsonObject;
+  payload: unknown;
   /**
    * The system's own id for this event, when it has one.
    *
@@ -85,21 +87,28 @@ export interface SourceState {
   set(key: string, value: string): void;
 }
 
-/** What every source is handed. */
+/**
+ * What every source is handed.
+ *
+ * Only the config is common to all of them. The rest are capabilities a particular
+ * source may need and another may not: Slack wants none of them, Jira wants the shared
+ * auth and the account id, GitHub wants somewhere to keep an ETag. A source that needs
+ * one it has not been given says so from `isAvailable`, which is what that call is for.
+ */
 export interface SourceContext {
   config: WorklogConfig;
-  /** Shared auth for the HTTP sources that use it. A source may ignore it. */
-  headers: FetchHeaders;
+  log?: Logger;
+  /** Shared HTTP auth, for the sources that use it. */
+  headers?: FetchHeaders;
   /** Who the user is in each system, resolved once per run. */
-  identity: {
+  identity?: {
     atlassianAccountId: string;
     githubUsername: string;
   };
   /** Called when a supplementary fetch fails and the run continues without that data. */
-  onWarning: (message: string) => void;
-  /** This source's own persisted state. */
-  state: SourceState;
-  log: (message: string) => void;
+  onWarning?: (message: string) => void;
+  /** This source's own persisted state, kept with the ledger. */
+  state?: SourceState;
 }
 
 /** Whether a source can run at all, and if not, why not in words a user can act on. */
@@ -146,7 +155,8 @@ export function mergeBatches(batches: readonly SourceBatch[]): SourceBatch {
  * side by side, so these few keys are the common ground it renders from, and a source
  * that omits them renders as a bare id.
  *
- * Snapshots: `title` (what to call the item) and `url` (where to open it).
+ * Snapshots: `title` (what to call the item) and `url` (where to open it). An item whose
+ * id is itself a link, as a Slack permalink is, needs neither.
  * Events: `text` (what was said or changed, already plain text), `from` and `to` (a
  * transition), and `spotted` (true when the source could not learn when the change
  * happened and dated it at the moment it was found).

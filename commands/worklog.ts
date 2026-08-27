@@ -51,7 +51,7 @@ import {
   type WeekInfo,
 } from "../lib/sdk/data-fetch";
 import { generateEventMarkdown } from "../lib/sdk/markdown";
-import { collectIntoLedger, openLedger } from "../lib/sdk/ledger";
+import { collectIntoLedger, openLedger, weekWindow } from "../lib/sdk/ledger";
 import { confluenceSource, githubSource, jiraSource } from "../lib/sdk/source-adapters";
 import type { Source } from "../lib/sdk/sources";
 import {
@@ -979,7 +979,7 @@ export async function runWorklog(opts: {
     const collected = await collectIntoLedger(
       ledger,
       sources,
-      [{ weekId: wid, window: { start: weekInfo.startDate, end: weekInfo.endDate } }],
+      [weekWindow(wid, weekInfo.startDate, weekInfo.endDate)],
       (source) => ({
         config,
         headers,
