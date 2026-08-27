@@ -454,9 +454,23 @@ export function upgradeFocusFormat(content: string, keepSinceWeek: string = defa
   return { content: stampFormat(lapsedContent), lapsed };
 }
 
+/**
+ * Add a note to a Notes cell, unless it is already there.
+ *
+ * Regenerating a week replays the same statuses, and without this the same sentence
+ * accumulated on every run: `Paired once so far; Paired once so far`. The check is on
+ * whole `; `-separated segments rather than a substring, so "Paired once" does not
+ * suppress the later, different "Paired once more".
+ */
 function appendNote(notes: string, addition: string): string {
   const trimmed = notes.trim();
-  return trimmed ? `${trimmed}; ${addition}` : addition;
+  const incoming = addition.trim();
+  if (!trimmed) return incoming;
+  if (!incoming) return trimmed;
+
+  const segments = trimmed.split(";").map((segment) => segment.trim());
+  if (segments.includes(incoming)) return trimmed;
+  return `${trimmed}; ${incoming}`;
 }
 
 /**
@@ -596,7 +610,13 @@ export function applyFocusUpdates(content: string, options: ApplyFocusOptions): 
     const canonical = canonicalText(trimmed);
     const existing = open.find((item) => canonicalText(item.item) === canonical);
     if (existing) {
-      // Re-raised word for word: keep one row, reset its clock, and record the repeat.
+      // A row already carrying this week's label: either the run being repeated created
+      // it, or the coach named the same commitment twice in one batch. Neither is a
+      // repeat of an older commitment, so the row stands untouched and nothing counts.
+      if (existing.week === weekLabel) continue;
+
+      // Re-raised word for word from an earlier week: keep one row, reset its clock, and
+      // record the repeat.
       existing.reviews = 0;
       existing.notes = appendNote(existing.notes, `restated ${weekLabel}`);
       restated++;

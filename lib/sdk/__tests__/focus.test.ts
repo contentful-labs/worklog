@@ -201,6 +201,84 @@ describe("applyFocusUpdates", () => {
     expect(result.content).toContain("| Review RFC | pending | 0 | restated 2026-W10 |");
   });
 
+  it("leaves the row this week already created alone when the week is regenerated", () => {
+    // Regenerating a week replays the same coaching. The row the first run inserted is
+    // the same commitment, not a repeat of an older one.
+    const first = applyFocusUpdates(base, {
+      reviewedIds: [], updates: [], newItems: ["Add regression coverage"], weekLabel: "2026-W10",
+    });
+    expect(first.added).toBe(1);
+    expect(first.restated).toBe(0);
+
+    const second = applyFocusUpdates(first.content, {
+      reviewedIds: [], updates: [], newItems: ["Add regression coverage"], weekLabel: "2026-W10",
+    });
+
+    expect(second.restated).toBe(0);
+    expect(second.added).toBe(0);
+    expect(second.content).toBe(first.content);
+    expect(second.content.match(/Add regression coverage/g)).toHaveLength(1);
+  });
+
+  it("counts a restatement only when the row it matches is from an earlier week", () => {
+    const first = applyFocusUpdates(base, {
+      reviewedIds: [], updates: [], newItems: ["Add regression coverage"], weekLabel: "2026-W10",
+    });
+
+    const later = applyFocusUpdates(first.content, {
+      reviewedIds: [], updates: [], newItems: ["Add regression coverage"], weekLabel: "2026-W11",
+    });
+
+    expect(later.restated).toBe(1);
+    expect(later.added).toBe(0);
+    expect(later.content).toContain("restated 2026-W11");
+    expect(later.content.match(/Add regression coverage/g)).toHaveLength(1);
+  });
+
+  it("keeps one row when the coach names the same commitment twice in one batch", () => {
+    const result = applyFocusUpdates(base, {
+      reviewedIds: [],
+      updates: [],
+      newItems: ["Add regression coverage", "add   REGRESSION coverage"],
+      weekLabel: "2026-W10",
+    });
+
+    expect(result.added).toBe(1);
+    expect(result.restated).toBe(0);
+    expect(result.content.match(/regression coverage/gi)).toHaveLength(1);
+  });
+
+  it("does not append the same status note twice when a week is regenerated", () => {
+    const update = { id: "2026-W09.2", status: "ongoing", notes: "Paired once so far" };
+
+    const first = applyFocusUpdates(base, {
+      reviewedIds: ["2026-W09.2"], updates: [update], newItems: [], weekLabel: "2026-W10",
+    });
+    const second = applyFocusUpdates(first.content, {
+      reviewedIds: ["2026-W09.2"], updates: [update], newItems: [], weekLabel: "2026-W10",
+    });
+
+    expect(second.content).toContain("| Paired once so far |");
+    expect(second.content).not.toContain("Paired once so far; Paired once so far");
+    expect(second.content.match(/Paired once so far/g)).toHaveLength(1);
+  });
+
+  it("still adds a genuinely different note to a cell that already has one", () => {
+    const first = applyFocusUpdates(base, {
+      reviewedIds: ["2026-W09.2"],
+      updates: [{ id: "2026-W09.2", status: "ongoing", notes: "Paired once" }],
+      newItems: [], weekLabel: "2026-W10",
+    });
+    const second = applyFocusUpdates(first.content, {
+      reviewedIds: ["2026-W09.2"],
+      // A prefix of the existing note, so a substring check would wrongly swallow it.
+      updates: [{ id: "2026-W09.2", status: "ongoing", notes: "Paired once more" }],
+      newItems: [], weekLabel: "2026-W11",
+    });
+
+    expect(second.content).toContain("Paired once; Paired once more");
+  });
+
   it("adds a reworded suggestion and reports what it reads like", () => {
     const result = applyFocusUpdates(base, {
       reviewedIds: [], updates: [], newItems: ["Review the RFC thoroughly"], weekLabel: "2026-W10",
