@@ -27,7 +27,7 @@ import {
   discoverWeeklyNotes,
   capOrganizationalNotes,
   condenseMemoryNotes,
-  dropImpactRowsBefore,
+  windowImpactLog,
   omitLargeFocusTables,
   DEFAULT_IMPACT_WINDOW_WEEKS,
   DEFAULT_MEMORY_FULL_WEEKS,
@@ -590,10 +590,16 @@ export async function buildBragBookPrompt(
 
   // A year of impact rows answers the gap analysis the coach is asked for; older ones have
   // already been promoted into a brag book.
-  const impactSince = weekInfo
-    ? weeksBefore(weekInfo.startDate, DEFAULT_IMPACT_WINDOW_WEEKS).toISOString().split("T")[0]
-    : "";
-  const trimmedImpactLog = dropImpactRowsBefore(impactLogContent, impactSince);
+  // Both bounds come from the week being written up. The upper one is the history rule: a week
+  // may not be shown an achievement dated after it. `asOf` is the day the gap is measured from,
+  // which for the current week is today, so the current week reads exactly as it does now.
+  const now = new Date();
+  const weekEnd = weekInfo?.endDate ?? now;
+  const trimmedImpactLog = windowImpactLog(impactLogContent, {
+    since: weekInfo ? weeksBefore(weekInfo.startDate, DEFAULT_IMPACT_WINDOW_WEEKS).toISOString().split("T")[0] : "",
+    until: (weekInfo ? weekEnd : now).toISOString().split("T")[0],
+    asOf: weekEnd < now ? weekEnd : now,
+  });
 
   const generationContext = (() => {
     if (!weekInfo) return "";

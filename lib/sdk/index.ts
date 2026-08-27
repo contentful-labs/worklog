@@ -60,7 +60,7 @@ export {
   DEFAULT_ORG_NOTE_CAP,
   DEFAULT_SINGLE_ARCHIVE_CAP,
   condenseMemoryNotes,
-  dropImpactRowsBefore,
+  windowImpactLog,
   omitLargeFocusTables,
   DEFAULT_VAULT_NOTE_CAP,
   DEFAULT_VAULT_NOTE_LINES,

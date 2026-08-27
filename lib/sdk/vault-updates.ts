@@ -99,14 +99,14 @@ const IMPACT_IDENTITY_COLUMNS = [0, 1, 2, 3];
 const IMPACT_TIMELINE_HEADING = "## Impact Timeline";
 const ORG_NOTES_HEADING = "## Organizational Notes";
 const KEY_STRENGTHS_HEADING = "## Key Strengths";
-const LAST_IMPACT_PREFIX = "**Last significant impact:**";
-const CURRENT_GAP_PREFIX = "**Current gap:**";
+export const LAST_IMPACT_PREFIX = "**Last significant impact:**";
+export const CURRENT_GAP_PREFIX = "**Current gap:**";
 const LAST_UPDATED_PREFIX = "*Last updated:";
 /** What the gap line says when the latest impact is this week's. */
 const GAP_CLOSED = "None - recent entry added";
 /** What the two status lines say when the timeline holds nothing dated at all. */
-const NO_IMPACT_RECORDED = "none recorded";
-const NO_GAP_RECORDED = "no significant impact recorded";
+export const NO_IMPACT_RECORDED = "none recorded";
+export const NO_GAP_RECORDED = "no significant impact recorded";
 
 /** Bare words the model writes when it means "nothing to record". */
 const PLACEHOLDER_WORDS = new Set([
@@ -1022,7 +1022,7 @@ function localIsoDate(now: Date): string {
  * the answer a day out for anyone east of Greenwich, so a run at 00:30 on the seventh
  * day still called the gap closed.
  */
-function gapText(latest: string, now: Date): string {
+export function gapText(latest: string, now: Date): string {
   const today = localIsoDate(now);
   if (!isIsoDate(latest) || !isIsoDate(today)) return GAP_CLOSED;
 

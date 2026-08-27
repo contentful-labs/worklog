@@ -9,7 +9,7 @@ import {
   summarizePreviousBragBooks,
   ticketPrefixesForWeek,
   condenseMemoryNotes,
-  dropImpactRowsBefore,
+  windowImpactLog,
   omitLargeFocusTables,
   DEFAULT_FOCUS_TABLE_ROW_CAP,
   DEFAULT_SINGLE_ARCHIVE_CAP,
@@ -913,7 +913,12 @@ function impactLog(rows: Array<{ date: string; achievement: string }>, eol = "\n
   ].join(eol);
 }
 
-describe("dropImpactRowsBefore", () => {
+/** The current week: `until` is today and the gap is measured from today. */
+function windowTo(since: string, until = "2030-01-01", asOf = new Date(`${until}T00:00:00Z`)) {
+  return { since, until, asOf };
+}
+
+describe("windowImpactLog", () => {
   const log = impactLog([
     { date: "2026-03-10", achievement: "Recent one" },
     { date: "2025-06-01", achievement: "Within the year" },
@@ -922,14 +927,14 @@ describe("dropImpactRowsBefore", () => {
   ]);
 
   it("keeps rows inside the window", () => {
-    const { content } = dropImpactRowsBefore(log, "2025-03-17");
+    const { content } = windowImpactLog(log, windowTo("2025-03-17"));
 
     expect(content).toContain("Recent one");
     expect(content).toContain("Within the year");
   });
 
-  it("drops rows outside it and says how many", () => {
-    const { content, dropped } = dropImpactRowsBefore(log, "2025-03-17");
+  it("drops rows older than the window and says how many", () => {
+    const { content, dropped } = windowImpactLog(log, windowTo("2025-03-17"));
 
     expect(dropped).toBe(2);
     expect(content).not.toContain("Ancient one");
@@ -937,44 +942,107 @@ describe("dropImpactRowsBefore", () => {
     expect(content).toContain("_(2 older entries not shown)_");
   });
 
-  it("keeps the gap-analysis lines the schema depends on", () => {
-    const { content } = dropImpactRowsBefore(log, "2025-03-17");
+  it("removes rows dated after the week, without mentioning them", () => {
+    // A lower bound old enough that nothing is dropped for age, so only the upper bound acts.
+    const { content, future, dropped } = windowImpactLog(
+      log,
+      windowTo("2020-01-01", "2025-12-31", new Date("2025-12-31T00:00:00Z")),
+    );
 
-    expect(content).toContain("**Last significant impact:** 2026-03-10 - Recent one");
+    expect(future).toBe(1);
+    expect(dropped).toBe(0);
+    expect(content).not.toContain("Recent one");
+    expect(content).toContain("Within the year");
+    // Nothing hints that a later entry exists: to that week, it had not happened.
+    expect(content).not.toContain("not shown");
+  });
+
+  it("recomputes the gap lines from the rows that week could see", () => {
+    const { content } = windowImpactLog(
+      log,
+      windowTo("2024-01-01", "2025-12-31", new Date("2025-12-31T00:00:00Z")),
+    );
+
+    // Latest visible row is 2025-06-01, not the 2026 one the file's own line names.
+    expect(content).toContain("**Last significant impact:** 2025-06-01");
+    expect(content).toContain("**Current gap:** 30 weeks");
+    expect(content).not.toContain("2026-03-10 - Recent one");
+  });
+
+  it("measures the gap from rows too old to list, not from nothing", () => {
+    const onlyOld = impactLog([{ date: "2024-01-04", achievement: "Long ago" }]);
+    const { content, dropped } = windowImpactLog(
+      onlyOld,
+      windowTo("2025-03-17", "2026-03-22", new Date("2026-03-22T00:00:00Z")),
+    );
+
+    expect(dropped).toBe(1);
+    expect(content).toContain("**Last significant impact:** 2024-01-04");
+    expect(content).not.toContain("none recorded");
+  });
+
+  it("says nothing is recorded when no row is visible at all", () => {
+    const { content } = windowImpactLog(
+      log,
+      windowTo("2020-01-01", "2021-01-01", new Date("2021-01-01T00:00:00Z")),
+    );
+
+    expect(content).toContain("**Last significant impact:** none recorded");
+    expect(content).toContain("**Current gap:** no significant impact recorded");
+  });
+
+  it("reads the same as today for the current week", () => {
+    // Every row is in the past and inside the window, so nothing moves and the gap is measured
+    // from today, exactly as the writers compute it.
+    const today = new Date("2026-03-16T00:00:00Z");
+    const { content, dropped, future } = windowImpactLog(log, {
+      since: "2000-01-01",
+      until: "2026-03-16",
+      asOf: today,
+    });
+
+    expect(dropped).toBe(0);
+    expect(future).toBe(0);
+    expect(content).toContain("**Last significant impact:** 2026-03-10");
     expect(content).toContain("**Current gap:** None - recent entry added");
   });
 
   it("keeps the heading and the table header", () => {
-    const { content } = dropImpactRowsBefore(log, "2025-03-17");
+    const { content } = windowImpactLog(log, windowTo("2025-03-17"));
 
     expect(content).toContain("## Impact Timeline");
     expect(content).toContain("| Date | Achievement | Scope | Core Value | Evidence |");
   });
 
-  it("changes nothing when every row is inside the window", () => {
-    const { content, dropped } = dropImpactRowsBefore(log, "2020-01-01");
+  it("leaves rows alone when everything is inside the window", () => {
+    const { content, dropped } = windowImpactLog(log, windowTo("2020-01-01", "2026-03-16", new Date("2026-03-16T00:00:00Z")));
 
     expect(dropped).toBe(0);
-    expect(content).toBe(log);
-    expect(content).not.toContain("older entries not shown");
-  });
-
-  it("still reports the count when every row falls outside", () => {
-    const { content, dropped } = dropImpactRowsBefore(log, "2030-01-01");
-
-    expect(dropped).toBe(4);
-    expect(content).toContain("_(4 older entries not shown)_");
-    expect(content).toContain("**Current gap:**");
+    expect(content).toContain("Older still");
   });
 
   it("leaves a row with no parseable date alone", () => {
     // A value that sorts below the cutoff as a string, so only the date check can save it.
     const odd = impactLog([{ date: "1 Mar 2026", achievement: "Undated" }]);
-    const { content, dropped } = dropImpactRowsBefore(odd, "2030-01-01");
+    const { content, dropped } = windowImpactLog(odd, windowTo("2030-01-01"));
 
     expect("1 Mar 2026" < "2030-01-01").toBe(true);
     expect(dropped).toBe(0);
     expect(content).toContain("Undated");
+  });
+
+  it("treats an ISO-shaped date that is not a day as undated", () => {
+    // 2024-13-01 has no thirteenth month. Sorting it as a date dropped a real row and, worse,
+    // let it win the "latest impact" comparison.
+    const invalid = impactLog([
+      { date: "2024-13-01", achievement: "Not a real day" },
+      { date: "2026-03-10", achievement: "Recent one" },
+    ]);
+    const { content, dropped } = windowImpactLog(invalid, windowTo("2025-03-17"));
+
+    expect(dropped).toBe(0);
+    expect(content).toContain("Not a real day");
+    expect(content).toContain("**Last significant impact:** 2026-03-10");
   });
 
   it("does not touch a table inside a fenced block", () => {
@@ -986,7 +1054,7 @@ describe("dropImpactRowsBefore", () => {
       "```",
     ].join("\n");
 
-    expect(dropImpactRowsBefore(fenced, "2026-01-01").content).toBe(fenced);
+    expect(windowImpactLog(fenced, windowTo("2026-01-01")).content).toBe(fenced);
   });
 
   it("preserves CRLF line endings", () => {
@@ -997,7 +1065,7 @@ describe("dropImpactRowsBefore", () => {
       ],
       "\r\n",
     );
-    const { content } = dropImpactRowsBefore(crlf, "2025-03-17");
+    const { content } = windowImpactLog(crlf, windowTo("2025-03-17"));
 
     expect(content).toContain("_(1 older entries not shown)_\r\n");
     expect(content).not.toContain("Ancient one");
@@ -1006,8 +1074,115 @@ describe("dropImpactRowsBefore", () => {
 
   it("keeps a kept row byte for byte, escaping and all", () => {
     const exact = impactLog([{ date: "2026-03-10", achievement: "Shipped `search` \\| phase two" }]);
-    const { content } = dropImpactRowsBefore(exact, "2025-03-17");
+    const { content } = windowImpactLog(exact, windowTo("2025-03-17"));
 
     expect(content).toContain("Shipped `search` \\| phase two");
+  });
+
+  it("finds a table whose rows have no outer pipes", () => {
+    const bare = [
+      "## Impact Timeline",
+      "",
+      "Date | Achievement | Scope | Core Value | Evidence",
+      "--- | --- | --- | --- | ---",
+      "2026-03-10 | Recent one | Team | Craft | TEAM-1",
+      "2020-01-01 | Ancient one | Team | Craft | TEAM-2",
+    ].join("\n");
+    const { content, dropped } = windowImpactLog(bare, windowTo("2025-03-17"));
+
+    expect(dropped).toBe(1);
+    expect(content).toContain("Recent one");
+    expect(content).not.toContain("Ancient one");
+  });
+
+  it("finds a table indented by up to three spaces", () => {
+    const indented = [
+      "## Impact Timeline",
+      "",
+      "   | Date | Achievement | Scope | Core Value | Evidence |",
+      "   |---|---|---|---|---|",
+      "   | 2026-03-10 | Recent one | Team | Craft | TEAM-1 |",
+      "   | 2020-01-01 | Ancient one | Team | Craft | TEAM-2 |",
+    ].join("\n");
+    const { content, dropped } = windowImpactLog(indented, windowTo("2025-03-17"));
+
+    expect(dropped).toBe(1);
+    expect(content).toContain("Recent one");
+    expect(content).not.toContain("Ancient one");
+  });
+
+  it("leaves a four-space indented table alone, since that is a code block", () => {
+    const code = [
+      "## Impact Timeline",
+      "",
+      "    | Date | Achievement | Scope | Core Value | Evidence |",
+      "    |---|---|---|---|---|",
+      "    | 2020-01-01 | Ancient one | Team | Craft | TEAM-2 |",
+    ].join("\n");
+
+    expect(windowImpactLog(code, windowTo("2025-03-17")).content).toBe(code);
+  });
+});
+
+describe("findTables through the trims", () => {
+  it("does not swallow a small table that follows a large one", () => {
+    const two = [
+      "## Tracking",
+      "",
+      "| Item | Status |",
+      "|---|---|",
+      ...Array.from({ length: 21 }, (_, i) => `| Big ${i} | open |`),
+      "| Small header | Status |",
+      "|---|---|",
+      "| Small row | open |",
+    ].join("\n");
+    const { content, omitted } = omitLargeFocusTables(two, 20);
+
+    expect(omitted).toBe(1);
+    expect(content).toContain("table of 21 rows omitted");
+    expect(content).toContain("| Small header | Status |");
+    expect(content).toContain("| Small row | open |");
+    expect(content).not.toContain("Big 0");
+  });
+
+  it("omits both when a large table follows a large one", () => {
+    const two = [
+      "| A | B |",
+      "|---|---|",
+      ...Array.from({ length: 21 }, (_, i) => `| First ${i} | x |`),
+      "| C | D |",
+      "|---|---|",
+      ...Array.from({ length: 25 }, (_, i) => `| Second ${i} | x |`),
+    ].join("\n");
+    const { content, omitted } = omitLargeFocusTables(two, 20);
+
+    expect(omitted).toBe(2);
+    expect(content).toContain("table of 21 rows omitted");
+    expect(content).toContain("table of 25 rows omitted");
+  });
+
+  it("omits a table with no outer pipes", () => {
+    const bare = [
+      "Item | Status",
+      "--- | ---",
+      ...Array.from({ length: 25 }, (_, i) => `Tracked ${i} | open`),
+    ].join("\n");
+    const { content, omitted } = omitLargeFocusTables(bare, 20);
+
+    expect(omitted).toBe(1);
+    expect(content).toContain("table of 25 rows omitted");
+    expect(content).not.toContain("Tracked 0");
+  });
+
+  it("omits a table indented by up to three spaces", () => {
+    const indented = [
+      "   | Item | Status |",
+      "   |---|---|",
+      ...Array.from({ length: 25 }, (_, i) => `   | Tracked ${i} | open |`),
+    ].join("\n");
+    const { content, omitted } = omitLargeFocusTables(indented, 20);
+
+    expect(omitted).toBe(1);
+    expect(content).not.toContain("Tracked 0");
   });
 });
