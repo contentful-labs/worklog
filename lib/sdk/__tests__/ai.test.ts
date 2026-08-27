@@ -91,6 +91,11 @@ const NO_USAGE: FakeUsage = {
   inputTokenDetails: { noCacheTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
 };
 
+/** One recorded step, as streamText exposes it on `result.steps`. */
+function fakeStep(usage: FakeUsage) {
+  return { usage: { inputTokenDetails: {}, ...usage } };
+}
+
 /** streamText is mocked, so a stand-in only needs the fields the query functions await. */
 function fakeStreamResult(fields: Record<string, Promise<unknown>>) {
   // SAFETY: those fields are `text` or `output`, plus `totalUsage` and `steps` when the
@@ -102,21 +107,13 @@ function fakeStreamResult(fields: Record<string, Promise<unknown>>) {
 /** Whatever the provider handed back, before anything validated it. */
 type ProviderOutput = Record<string, unknown>;
 
-function streamTextResult(output: ProviderOutput, usage: FakeUsage = NO_USAGE, stepCount = 1) {
-  return fakeStreamResult({
-    output: Promise.resolve(output),
-    totalUsage: Promise.resolve(usage),
-    steps: Promise.resolve(Array.from({ length: stepCount })),
-  });
+function streamTextResult(output: ProviderOutput, steps: FakeUsage[] = [NO_USAGE]) {
+  return fakeStreamResult({ output: Promise.resolve(output), steps: Promise.resolve(steps.map(fakeStep)) });
 }
 
 /** The text-only counterpart, for the aiQuery path. */
-function streamTextText(text: string, usage: FakeUsage = NO_USAGE, stepCount = 1) {
-  return fakeStreamResult({
-    text: Promise.resolve(text),
-    totalUsage: Promise.resolve(usage),
-    steps: Promise.resolve(Array.from({ length: stepCount })),
-  });
+function streamTextText(text: string, steps: FakeUsage[] = [NO_USAGE]) {
+  return fakeStreamResult({ text: Promise.resolve(text), steps: Promise.resolve(steps.map(fakeStep)) });
 }
 
 /**
@@ -180,14 +177,19 @@ describe("aiQueryStructured on the OpenAI path", () => {
 });
 
 describe("usage reporting", () => {
-  const usage = {
+  const firstStep: FakeUsage = {
     inputTokens: 1200,
     outputTokens: 340,
     inputTokenDetails: { noCacheTokens: 200, cacheReadTokens: 1000, cacheWriteTokens: 0 },
   };
 
-  it("reports tokens, the model that ran, and the step count", async () => {
-    mockedStreamText.mockReturnValue(streamTextResult({ headline: "hi", items: [] }, usage, 3));
+  it("reports each request separately, and the totals across them", async () => {
+    const secondStep: FakeUsage = {
+      inputTokens: 800,
+      outputTokens: 60,
+      inputTokenDetails: { noCacheTokens: 800, cacheReadTokens: 0, cacheWriteTokens: 0 },
+    };
+    mockedStreamText.mockReturnValue(streamTextResult({ headline: "hi", items: [] }, [firstStep, secondStep]));
     const seen: AIUsage[] = [];
 
     await aiQueryStructured({
@@ -198,14 +200,54 @@ describe("usage reporting", () => {
       onUsage: (u) => seen.push(u),
     });
 
-    expect(seen).toEqual([
-      { model: "gpt-5", inputTokens: 1200, outputTokens: 340, cachedInputTokens: 1000, steps: 3 },
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toMatchObject({
+      model: "gpt-5",
+      inputTokens: 2000,
+      outputTokens: 400,
+      cachedInputTokens: 1000,
+      cacheWriteTokens: 0,
+    });
+    // Per request, because the long-context rate is decided per request.
+    expect(seen[0].steps).toEqual([
+      { inputTokens: 1200, outputTokens: 340, cachedInputTokens: 1000, cacheWriteTokens: 0 },
+      { inputTokens: 800, outputTokens: 60, cachedInputTokens: 0, cacheWriteTokens: 0 },
     ]);
+  });
+
+  it("carries an OpenAI cache-write count through when the adapter reports one", async () => {
+    const withWrite: FakeUsage = {
+      inputTokens: 1000,
+      outputTokens: 10,
+      inputTokenDetails: { noCacheTokens: 400, cacheReadTokens: 200, cacheWriteTokens: 400 },
+    };
+    mockedStreamText.mockReturnValue(streamTextResult({ headline: "hi", items: [] }, [withWrite]));
+    const seen: AIUsage[] = [];
+
+    await aiQueryStructured({ prompt: "go", config: configFor("openai"), schema, onUsage: (u) => seen.push(u) });
+
+    expect(seen[0].cacheWriteTokens).toBe(400);
+  });
+
+  it("counts an unreported cache write as ordinary input rather than dropping the week", async () => {
+    // What the installed adapter actually does: cacheWriteTokens is undefined, and those
+    // tokens stay inside inputTokens. pricing.ts documents the undercount that causes.
+    const noWriteField: FakeUsage = {
+      inputTokens: 1000,
+      outputTokens: 10,
+      inputTokenDetails: { cacheReadTokens: 200 },
+    };
+    mockedStreamText.mockReturnValue(streamTextResult({ headline: "hi", items: [] }, [noWriteField]));
+    const seen: AIUsage[] = [];
+
+    await aiQueryStructured({ prompt: "go", config: configFor("openai"), schema, onUsage: (u) => seen.push(u) });
+
+    expect(seen[0]).toMatchObject({ inputTokens: 1000, cachedInputTokens: 200, cacheWriteTokens: 0 });
   });
 
   it("reports the resolved default when no model was asked for", async () => {
     mockedResolveAuth.mockReturnValue({ apiKey: "tok", source: "codex-subscription", accountId: "acct" });
-    mockedStreamText.mockReturnValue(streamTextResult({ headline: "hi", items: [] }, usage, 1));
+    mockedStreamText.mockReturnValue(streamTextResult({ headline: "hi", items: [] }, [firstStep]));
     const seen: AIUsage[] = [];
 
     await aiQueryStructured({ prompt: "go", config: configFor("openai"), schema, onUsage: (u) => seen.push(u) });
@@ -214,17 +256,18 @@ describe("usage reporting", () => {
   });
 
   it("reports usage on the text path too", async () => {
-    mockedStreamText.mockReturnValue(streamTextText("# Done", usage, 2));
+    mockedStreamText.mockReturnValue(streamTextText("# Done", [firstStep, firstStep]));
     const seen: AIUsage[] = [];
 
     await aiQuery({ prompt: "go", config: configFor("openai"), onUsage: (u) => seen.push(u) });
 
-    expect(seen[0]).toMatchObject({ inputTokens: 1200, outputTokens: 340, steps: 2 });
+    expect(seen[0]).toMatchObject({ inputTokens: 2400, outputTokens: 680 });
+    expect(seen[0].steps).toHaveLength(2);
   });
 
   it("does not ask the provider for usage when nobody wants it", async () => {
-    // The mock would resolve them anyway; the point is that a provider result without
-    // usage fields still works for callers that never passed onUsage.
+    // The point is that a provider result without usage fields still works for callers
+    // that never passed onUsage.
     mockedStreamText.mockReturnValue(fakeStreamResult({ output: Promise.resolve({ headline: "hi", items: [] }) }));
 
     await expect(aiQueryStructured({ prompt: "go", config: configFor("openai"), schema })).resolves.toEqual({
@@ -234,13 +277,12 @@ describe("usage reporting", () => {
   });
 
   it("treats missing token counts as zero rather than failing the week", async () => {
-    const sparse = { inputTokens: undefined, outputTokens: undefined, inputTokenDetails: {} };
-    mockedStreamText.mockReturnValue(streamTextResult({ headline: "hi", items: [] }, sparse, 1));
+    mockedStreamText.mockReturnValue(streamTextResult({ headline: "hi", items: [] }, [{}]));
     const seen: AIUsage[] = [];
 
     await aiQueryStructured({ prompt: "go", config: configFor("openai"), schema, onUsage: (u) => seen.push(u) });
 
-    expect(seen[0]).toMatchObject({ inputTokens: 0, outputTokens: 0, cachedInputTokens: 0 });
+    expect(seen[0]).toMatchObject({ inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, cacheWriteTokens: 0 });
   });
 });
 
@@ -339,17 +381,41 @@ describe("aiQueryStructured on the Anthropic path", () => {
 
     await aiQueryStructured({ prompt: "go", config: configFor("anthropic"), schema, onUsage: (u) => seen.push(u) });
 
+    // Fresh, cache-write and cache-read tokens are all input the run paid for, and the
+    // cache-write share is kept apart because it is billed at its own rate.
+    const expected = {
+      inputTokens: 20005,
+      outputTokens: 900,
+      cachedInputTokens: 18000,
+      cacheWriteTokens: 2000,
+    };
     expect(seen).toEqual([
       {
         model: "claude-opus-5",
-        // Fresh, cache-write and cache-read tokens are all input the run paid for.
-        inputTokens: 20005,
-        outputTokens: 900,
-        cachedInputTokens: 18000,
-        steps: 4,
+        ...expected,
+        // The SDK reports run totals rather than per-turn usage, so the run is one entry.
+        steps: [expected],
         reportedCostUsd: 0.42,
       },
     ]);
+  });
+
+  it("prefers the SDK's own cost over the local price table", async () => {
+    mockedQuery.mockReturnValue(
+      messageStream([
+        anthropicResult({
+          structured_output: { headline: "hi", items: [] },
+          usage: { input_tokens: 5, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 10 },
+          total_cost_usd: 1.23,
+          modelUsage: { "claude-opus-5": {} },
+        }),
+      ]),
+    );
+    const seen: AIUsage[] = [];
+
+    await aiQueryStructured({ prompt: "go", config: configFor("anthropic"), schema, onUsage: (u) => seen.push(u) });
+
+    expect(seen[0].reportedCostUsd).toBe(1.23);
   });
 
   it("rejects a structured result that does not satisfy the schema", async () => {

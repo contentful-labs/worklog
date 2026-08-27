@@ -48,11 +48,11 @@ export {
 } from "./vault";
 
 // AI
-export type { AIQueryOptions, StructuredQueryOptions, AIUsage } from "./ai";
+export type { AIQueryOptions, StructuredQueryOptions, AIUsage, AIStepUsage } from "./ai";
 export { aiQuery, aiQueryStructured, postProcess, toAnthropicJsonSchema } from "./ai";
 
 // Model pricing
-export type { ModelPrice, TokenCounts } from "./pricing";
+export type { ModelPrice, LongContextTier, StepTokens } from "./pricing";
 export { PRICING_AS_OF, priceFor, pricedModels, estimateCostUsd, formatCostUsd } from "./pricing";
 
 // Markdown generation

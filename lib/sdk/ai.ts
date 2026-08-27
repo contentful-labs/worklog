@@ -13,21 +13,54 @@ import type { SDKResultMessage } from "@anthropic-ai/claude-agent-sdk";
  * Reported through a callback rather than the return value so existing callers keep
  * working: aiQuery still returns a string and aiQueryStructured still returns the object.
  */
-export interface AIUsage {
-  /** The model the provider actually ran, which is not always the one in config. */
-  model: string;
-  /** Total input tokens, cached ones included. */
+/** What one request to the provider spent. */
+export interface AIStepUsage {
+  /** Total input tokens, cached and cache-write ones included. */
   inputTokens: number;
   outputTokens: number;
   /** The part of inputTokens that was served from cache. */
   cachedInputTokens: number;
-  /** Tool rounds, plus the step that produced the object on a structured query. */
-  steps: number;
+  /**
+   * The part of inputTokens that was written to the cache. Zero when the provider does
+   * not report it, which the installed OpenAI adapter does not; those tokens then stay
+   * counted as ordinary input. See the note in pricing.ts.
+   */
+  cacheWriteTokens: number;
+}
+
+export interface AIUsage {
+  /** The model the provider actually ran, which is not always the one in config. */
+  model: string;
+  /** Total input tokens across every step, cached and cache-write ones included. */
+  inputTokens: number;
+  outputTokens: number;
+  cachedInputTokens: number;
+  cacheWriteTokens: number;
+  /**
+   * One entry per request, not a count.
+   *
+   * A tiered rate is decided per request, so a week's totals cannot say what it cost: a
+   * week that adds up to 300K input tokens has not necessarily made a request that did.
+   * The Agent SDK reports only run totals, so its list holds a single combined entry.
+   */
+  steps: AIStepUsage[];
   /**
    * What the provider itself says the call cost. Only the Agent SDK reports one, and it
    * beats any local price table: it knows the model mix and the rates in force.
    */
   reportedCostUsd?: number;
+}
+
+/** Add up per-request usage into the totals an AIUsage carries. */
+function totalsOf(steps: AIStepUsage[]): Omit<AIUsage, "model" | "steps" | "reportedCostUsd"> {
+  const totals = { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, cacheWriteTokens: 0 };
+  for (const step of steps) {
+    totals.inputTokens += step.inputTokens;
+    totals.outputTokens += step.outputTokens;
+    totals.cachedInputTokens += step.cachedInputTokens;
+    totals.cacheWriteTokens += step.cacheWriteTokens;
+  }
+  return totals;
 }
 
 export interface AIQueryOptions {
@@ -153,12 +186,18 @@ function reportAnthropicUsage(
   // The run's own model list is the truth; the requested model can be undefined because
   // the CLI has its own default.
   const models = Object.keys(message.modelUsage);
-  onUsage({
-    model: models[0] ?? requestedModel ?? "unknown",
+  // The SDK reports run totals rather than per-turn usage, so the whole run is one entry.
+  // Its own cost figure is what gets used anyway.
+  const step: AIStepUsage = {
     inputTokens: input_tokens + cache_creation_input_tokens + cache_read_input_tokens,
     outputTokens: output_tokens,
     cachedInputTokens: cache_read_input_tokens,
-    steps: message.num_turns,
+    cacheWriteTokens: cache_creation_input_tokens,
+  };
+  onUsage({
+    model: models[0] ?? requestedModel ?? "unknown",
+    ...totalsOf([step]),
+    steps: [step],
     reportedCostUsd: message.total_cost_usd,
   });
 }
@@ -307,18 +346,22 @@ type ResearchTools = ReturnType<typeof buildResearchTools>;
 async function reportOpenAIUsage(
   // Both callers fit: neither picked field depends on the output type, so `never` stands
   // in for it rather than making this generic over something it does not read.
-  result: Pick<StreamTextResult<ResearchTools, never>, "totalUsage" | "steps">,
+  result: Pick<StreamTextResult<ResearchTools, never>, "steps">,
   model: string,
   onUsage: (usage: AIUsage) => void,
 ): Promise<void> {
-  const [usage, steps] = await Promise.all([result.totalUsage, result.steps]);
-  onUsage({
-    model,
-    inputTokens: usage.inputTokens ?? 0,
-    outputTokens: usage.outputTokens ?? 0,
-    cachedInputTokens: usage.inputTokenDetails.cacheReadTokens ?? 0,
-    steps: steps.length,
-  });
+  // Per step rather than from totalUsage: the long-context rate is decided per request,
+  // and a sum cannot say which requests crossed the threshold.
+  const steps: AIStepUsage[] = (await result.steps).map((step) => ({
+    inputTokens: step.usage.inputTokens ?? 0,
+    outputTokens: step.usage.outputTokens ?? 0,
+    cachedInputTokens: step.usage.inputTokenDetails.cacheReadTokens ?? 0,
+    // The installed adapter leaves this undefined. Those tokens stay in inputTokens and
+    // are billed at the input rate, which pricing.ts documents as an undercount.
+    cacheWriteTokens: step.usage.inputTokenDetails.cacheWriteTokens ?? 0,
+  }));
+
+  onUsage({ model, ...totalsOf(steps), steps });
 }
 
 function logOpenAIStep(log: Logger) {

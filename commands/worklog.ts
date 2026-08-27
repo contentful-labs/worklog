@@ -4,7 +4,7 @@ import { Command } from "commander";
 import * as p from "@clack/prompts";
 import { requireConfig, STATS_PATH, TEAM_TIMELINE_PATH } from "../lib/config";
 import { aiQueryStructured, type AIUsage } from "../lib/sdk/ai";
-import { estimateCostUsd, formatCostUsd } from "../lib/sdk/pricing";
+import { estimateCostUsd, formatCostUsd, PRICING_AS_OF } from "../lib/sdk/pricing";
 import { fillTemplate, buildConfigContext } from "../lib/sdk/template";
 import {
   buildVaultPaths,
@@ -85,6 +85,8 @@ interface WeekTokens {
   input: number;
   output: number;
   cached: number;
+  /** Input tokens written to the cache. Zero where the provider does not report them. */
+  cacheWrite: number;
 }
 
 interface TimingRecord {
@@ -185,15 +187,18 @@ interface WeekResult {
  * priced from lib/sdk/pricing.ts, and an unpriced model costs null rather than zero.
  */
 function costOf(usage: AIUsage | null): Pick<WeekTiming, "tokens" | "estimatedCostUsd" | "model"> {
-  if (!usage) return { tokens: { input: 0, output: 0, cached: 0 }, estimatedCostUsd: null, model: "unknown" };
+  if (!usage) {
+    return { tokens: { input: 0, output: 0, cached: 0, cacheWrite: 0 }, estimatedCostUsd: null, model: "unknown" };
+  }
 
-  const tokens = { input: usage.inputTokens, output: usage.outputTokens, cached: usage.cachedInputTokens };
-  const estimatedCostUsd = usage.reportedCostUsd ?? estimateCostUsd({
-    model: usage.model,
-    inputTokens: usage.inputTokens,
-    outputTokens: usage.outputTokens,
-    cachedInputTokens: usage.cachedInputTokens,
-  });
+  const tokens = {
+    input: usage.inputTokens,
+    output: usage.outputTokens,
+    cached: usage.cachedInputTokens,
+    cacheWrite: usage.cacheWriteTokens,
+  };
+  // Per step, because a tiered rate is decided per request rather than per week.
+  const estimatedCostUsd = usage.reportedCostUsd ?? estimateCostUsd(usage.model, usage.steps);
 
   return { tokens, estimatedCostUsd, model: usage.model };
 }
@@ -259,6 +264,9 @@ async function printReport(timings: WeekTiming[], results: WeekResult[]): Promis
     `Total      | ${pad(totalJira, 4)} | ${pad(totalConf, 4)} | ${pad(totalPrs, 3)} | ${pad(totalRevs, 7)} | ${pad(formatDuration(totalTime), 7)} | ${pad(`${formatTokens(totalTokensIn)}/${formatTokens(totalTokensOut)}`, 13)} | ${pad(formatCostUsd(totalCost), 7)}`,
     ``,
     `Context updates: ${results.reduce((s, r) => s + r.memoryAdded + r.memoryRemoved, 0)} memory, ${results.filter((r) => r.impactLog).length} impact log, ${results.reduce((s, r) => s + r.workContextUpdates, 0)} work context, ${results.filter((r) => r.profileUpdated).length} profile, ${results.reduce((s, r) => s + r.focusItems + r.focusUpdates, 0)} focus`,
+    ``,
+    `Cost is estimated from published rates as of ${PRICING_AS_OF}; a dash means the model is not in the table.`,
+    `OpenAI does not report cache writes, so those are billed as ordinary input and can read low.`,
     ``,
     `Avg per week: ${formatDuration(Math.round(avg))}`,
     `Fastest: ${fastest.weekId} (${formatDuration(fastest.total)})`,
@@ -728,8 +736,8 @@ export async function runWorklog(opts: {
 
     const weekCost = costOf(usage);
     log(
-      `Tokens: ${weekCost.tokens.input} in (${weekCost.tokens.cached} cached) / ${weekCost.tokens.output} out, ` +
-      `est. ${formatCostUsd(weekCost.estimatedCostUsd)} on ${weekCost.model}`,
+      `Tokens: ${weekCost.tokens.input} in (${weekCost.tokens.cached} cached, ${weekCost.tokens.cacheWrite} cache write) / ` +
+      `${weekCost.tokens.output} out, est. ${formatCostUsd(weekCost.estimatedCostUsd)} on ${weekCost.model}`,
     );
 
     const parsed = toBragBookResult(output);

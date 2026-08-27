@@ -91,6 +91,11 @@ How it is wired, and why each piece has to be there:
   `schema.parse`, because that parse is the real function's last act; a fake that skipped it
   would be testing a contract the pipeline does not have.
 
+- **The vault is seeded with the week's own documents**, not just the five maintained
+  files. The run uses `--force`, so a regression that writes before validating would
+  destroy them; a test whose target files do not exist yet can only prove that new ones
+  were not created, which is a much weaker claim.
+
 To extend it: add a field to `FAKE_OUTPUT` and assert the file it should reach. Keep the
 second run, because "regenerating a week changes nothing" is the property most of those bugs
 broke. Two known exceptions are pinned in the test itself: the work log carries a

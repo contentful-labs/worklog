@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeAll, afterAll, afterEach } from "vitest
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import * as clack from "@clack/prompts";
 import { http, HttpResponse } from "msw";
 import { setupServer } from "msw/node";
 
@@ -76,6 +77,10 @@ const CONFIG: WorklogConfig = {
   coaching: { tone: "direct", focusAreas: ["Visibility"] },
 };
 
+/** Existing week documents, so a forced run has real content it could overwrite. */
+const SENTINEL_BRAG_BOOK = "---\ntags:\n  - areas/work\n---\n\n# Brag Book - Week 10, 2026\n\n## Achievements\n\n- The previous run's work\n";
+const SENTINEL_WORK_LOG = "# Work Log 2026-W10\n\nThe previous run's fetched activity.\n";
+
 /** A memory row the fake graduates, so the wording has to match its Item cell exactly. */
 const GRADUATED_ITEM = "Fixed a flaky pagination test";
 
@@ -141,7 +146,10 @@ const FAKE_OUTPUT: BragBookOutput = {
   workContextUpdates: [
     { category: "process", info: "Sprint planning moved to Tuesdays", source: "team meeting" },
   ],
-  profileUpdate: null,
+  profileUpdate: {
+    achievement: "Led the search pagination work",
+    bulletPoint: "Shipped cursor pagination across the search service",
+  },
   focusStatuses: [
     { id: "2026-W09.1", status: "completed", notes: "Design doc published" },
     { id: "2026-W09.2", status: "ongoing", notes: "Paired once so far" },
@@ -208,6 +216,11 @@ function setUp(): Harness {
     }),
   );
 
+  // Seeded so a forced regeneration has something to destroy. Without these the negative
+  // test could only prove that new files were not created, which is a weaker claim.
+  writeFileSync(join(vault, `${WEEK} Brag Book.md`), SENTINEL_BRAG_BOOK);
+  writeFileSync(join(vault, `${WEEK} Work Log.md`), SENTINEL_WORK_LOG);
+
   writeFileSync(join(vault, "memory.md"), MEMORY);
   writeFileSync(join(vault, "impact-log.md"), IMPACT_LOG);
   writeFileSync(join(vault, "focus-tracking.md"), FOCUS_TRACKING);
@@ -254,17 +267,12 @@ function setUp(): Harness {
 }
 
 /** Import runWorklog under the temp config home, with the fake wired up. */
-async function loadPipeline(output: Partial<BragBookOutput>) {
+async function loadPipeline(output: Partial<BragBookOutput>, usageModel = "gpt-5") {
   vi.resetModules();
   const { aiQueryStructured } = await import("../../lib/sdk/ai");
   vi.mocked(aiQueryStructured).mockImplementation(async (options) => {
-    options.onUsage?.({
-      model: "gpt-5",
-      inputTokens: 56_000,
-      outputTokens: 1_200,
-      cachedInputTokens: 40_000,
-      steps: 2,
-    });
+    const step = { inputTokens: 56_000, outputTokens: 1_200, cachedInputTokens: 40_000, cacheWriteTokens: 0 };
+    options.onUsage?.({ model: usageModel, ...step, steps: [step] });
     return options.schema.parse(output);
   });
   return await import("../worklog");
@@ -302,6 +310,10 @@ describe("one week end to end", () => {
       expect(records.impactLog).toContain("**Last significant impact:** 2026-03-05");
 
       expect(records.workContext).toContain("- **process:** Sprint planning moved to Tuesdays _(team meeting)_");
+
+      // The bullet has to land under Key Strengths, not merely be somewhere in the file.
+      const keyStrengths = records.profile.slice(records.profile.indexOf("## Key Strengths"));
+      expect(keyStrengths).toContain("Shipped cursor pagination across the search service");
 
       // The completed id closes, the ongoing one stays open, and the new commitment gets
       // this week's id.
@@ -369,11 +381,11 @@ describe("one week end to end", () => {
     }
   });
 
-  it("writes nothing when the model leaves a required field out", async () => {
+  it("leaves every vault document intact when the model leaves a required field out", async () => {
     const harness = setUp();
 
     try {
-      const before = readRecords(harness.vault);
+      const before = { records: readRecords(harness.vault), generated: readGenerated(harness.vault) };
       // Same object, minus a field the schema requires.
       const { focusStatuses, ...incomplete } = FAKE_OUTPUT;
       expect(focusStatuses).toHaveLength(2);
@@ -381,8 +393,52 @@ describe("one week end to end", () => {
       const { runWorklog } = await loadPipeline(incomplete);
       await expect(runWorklog({ ...RUN })).rejects.toThrow();
 
-      expect(readRecords(harness.vault)).toEqual(before);
-      expect(() => readGenerated(harness.vault)).toThrow();
+      // The week already had both documents and --force would have replaced them, so this
+      // is the overwrite case rather than merely "no new files appeared".
+      expect(readGenerated(harness.vault)).toEqual(before.generated);
+      expect(readRecords(harness.vault)).toEqual(before.records);
+
+      // .worklog-progress.json is the one thing a failed run does leave behind: it is
+      // written before the model is called, so the run can resume. It never names the
+      // week that failed, which is what makes the week regenerable.
+      const progress = JSON.parse(readFileSync(join(harness.vault, ".worklog-progress.json"), "utf8"));
+      expect(progress.completedWeeks).not.toContain(WEEK);
+    } finally {
+      harness.cleanup();
+    }
+  });
+
+  it("keeps an older stats record that predates cost tracking, and prices an unknown model as unknown", async () => {
+    const harness = setUp();
+
+    try {
+      const statsPath = join(harness.configHome, "worklog", "worklog-stats.json");
+      // What stats.json looked like before tokens and cost existed.
+      const legacy = {
+        weekId: "2026-W01",
+        date: "2026-01-05T00:00:00.000Z",
+        fetch: 100,
+        bragBook: 200,
+        contextUpdates: 300,
+        total: 600,
+        counts: { jira: 1, confluence: 0, prs: 2, reviews: 0 },
+      };
+      writeFileSync(statsPath, JSON.stringify([legacy]));
+
+      const { runWorklog } = await loadPipeline(FAKE_OUTPUT, "some-model-nobody-priced");
+      await runWorklog({ ...RUN });
+
+      const stats = JSON.parse(readFileSync(statsPath, "utf8"));
+      expect(stats).toHaveLength(2);
+      // The old record survives untouched, fields it never had still absent.
+      expect(stats[0]).toEqual(legacy);
+      expect(stats[1].model).toBe("some-model-nobody-priced");
+      expect(stats[1].estimatedCostUsd).toBeNull();
+
+      // An unpriced week reads as unknown in the summary rather than as free.
+      const summary = vi.mocked(clack.note).mock.calls.map(([body]) => body).join("\n");
+      expect(summary).toContain("—");
+      expect(summary).not.toContain("$0.00");
     } finally {
       harness.cleanup();
     }
