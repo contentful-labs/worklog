@@ -26,6 +26,8 @@ import {
   getCurrentTeam,
   discoverWeeklyNotes,
   capOrganizationalNotes,
+  condenseMemoryNotes,
+  DEFAULT_MEMORY_FULL_WEEKS,
   collectWorkTerms,
   rankVaultNotes,
   summarizeArchivedFocusDocs,
@@ -446,22 +448,51 @@ export interface PromptSectionSizes {
   impact: number;
   memory: number;
   priorBrags: number;
-  focus: number;
+  /** The engineer's current `My Focus.md`, carried whole. */
+  focusDoc: number;
+  /** Archived focus docs, already reduced to changes plus carried-open items. */
+  focusArchives: number;
+  /** The open commitments from `focus-tracking.md`, capped at ten. */
+  focusOpenItems: number;
+  /** The one-line status tally from `focus-tracking.md`. */
+  focusHistorySummary: number;
   career: number;
   notes: number;
   worklog: number;
 }
 
+/**
+ * Memory's rows interleave, so its parts cannot be chunks of the prompt the way the focus inputs
+ * can. These are counted separately and must add up to `sections.memory`.
+ */
+export interface MemoryInputSizes {
+  /** Rows inside the graduation window, carried whole. */
+  liveRows: number;
+  /** Rows older than that, carried without their Notes cell. */
+  olderRows: number;
+  /** Headings, table scaffolding and blank lines. */
+  other: number;
+}
+
 export interface BuiltPrompt {
   prompt: string;
   sections: PromptSectionSizes;
+  memoryInputs: MemoryInputSizes;
+}
+
+function formatSizes(label: string, sizes: Readonly<Record<string, number>>): string {
+  const parts = Object.entries(sizes)
+    .sort(([, a], [, b]) => b - a)
+    .map(([name, chars]) => `${name} ${(chars / 1000).toFixed(1)}k`);
+  return `${label}: ${parts.join(", ")}`;
 }
 
 export function formatPromptBreakdown(sections: PromptSectionSizes): string {
-  const parts = Object.entries(sections)
-    .sort(([, a], [, b]) => b - a)
-    .map(([name, chars]) => `${name} ${(chars / 1000).toFixed(1)}k`);
-  return `Prompt breakdown: ${parts.join(", ")}`;
+  return formatSizes("Prompt breakdown", { ...sections });
+}
+
+export function formatMemoryBreakdown(memoryInputs: MemoryInputSizes): string {
+  return formatSizes("Memory breakdown", { ...memoryInputs });
 }
 
 export async function buildBragBookPrompt(
@@ -518,9 +549,24 @@ export async function buildBragBookPrompt(
     ? `\n---\n\n<review_proximity>\n  <next_review>${reviewInfo.nextReview}</next_review>\n  <date>${reviewInfo.date}</date>\n  <weeks_remaining>${reviewInfo.weeksRemaining}</weeks_remaining>\n  <urgency>${reviewInfo.urgency}</urgency>\n</review_proximity>`
     : "";
 
-  const openFocusSection = openFocusItems.length > 0
-    ? `\n---\n\n<open_focus_items>\nCommitments from previous coaching sessions that are still open. Check each against this week's work\nand return a focusStatuses entry for EVERY id below.\n\n${openFocusItems.map((f) => `  - ${f.id} (week ${f.week}, reviewed ${f.reviews}x): ${f.item}`).join("\n")}\n${focusHistorySummary ? `\n${focusHistorySummary}\n` : ""}</open_focus_items>`
+  // Split into its own chunks so the breakdown can say which part of `focus` costs what: the
+  // commitments themselves, the one-line tally, and the wrapper around them.
+  const hasOpenFocus = openFocusItems.length > 0;
+  const openFocusOpening = hasOpenFocus
+    ? "\n---\n\n<open_focus_items>\nCommitments from previous coaching sessions that are still open. Check each against this week's work\nand return a focusStatuses entry for EVERY id below.\n\n"
     : "";
+  const openFocusList = hasOpenFocus
+    ? openFocusItems.map((f) => `  - ${f.id} (week ${f.week}, reviewed ${f.reviews}x): ${f.item}`).join("\n")
+    : "";
+  const openFocusTally = hasOpenFocus && focusHistorySummary ? `\n\n${focusHistorySummary}\n` : "";
+  const openFocusClosing = hasOpenFocus ? `${focusHistorySummary ? "" : "\n"}</open_focus_items>` : "";
+
+  // Memory keeps every row so the coach can still graduate any of them, but a row older than the
+  // graduation window loses its Notes cell.
+  const memoryFullSince = weekInfo
+    ? weeksBefore(weekInfo.startDate, DEFAULT_MEMORY_FULL_WEEKS).toISOString().split("T")[0]
+    : "";
+  const condensedMemory = condenseMemoryNotes(memoryContent, memoryFullSince);
 
   const generationContext = (() => {
     if (!weekInfo) return "";
@@ -543,18 +589,19 @@ export async function buildBragBookPrompt(
     ["framing", "\n</work_context>\n\n---\n\n<impact_log>\n"],
     ["impact", impactLogContent],
     ["framing", "\n</impact_log>\n\n---\n\n<current_memory>\n"],
-    ["memory", memoryContent],
+    ["memory", condensedMemory.content],
     ["framing", "\n</current_memory>\n\n---\n\n<previous_brag_books>\n"],
     ["priorBrags", trimmedBragBooks],
     ["framing", "\n</previous_brag_books>\n\n---\n\n<focus_doc>\n"],
-    ["focus", focusDocContent],
+    ["focusDoc", focusDocContent],
     ["framing", "\n</focus_doc>\n\n---\n\n<focus_history>\n"],
-    ["focus", trimmedFocusHistory],
+    ["focusArchives", trimmedFocusHistory],
     ["framing", "\n</focus_history>\n\n---\n\n<career_context>\n"],
     ["career", careerContext],
-    ["framing", `\n</career_context>\n${reviewProximitySection}\n`],
-    ["focus", openFocusSection],
-    ["framing", "\n"],
+    ["framing", `\n</career_context>\n${reviewProximitySection}\n${openFocusOpening}`],
+    ["focusOpenItems", openFocusList],
+    ["focusHistorySummary", openFocusTally],
+    ["framing", `${openFocusClosing}\n`],
     ["notes", vaultNotesSection],
     ["framing", `\n---\n${generationContext}\n<this_weeks_work_log>\n`],
     ["worklog", workLogContent],
@@ -565,11 +612,13 @@ export async function buildBragBookPrompt(
 
   const sections: PromptSectionSizes = {
     template: 0, framing: 0, persona: 0, profile: 0, context: 0, impact: 0,
-    memory: 0, priorBrags: 0, focus: 0, career: 0, notes: 0, worklog: 0,
+    memory: 0, priorBrags: 0, focusDoc: 0, focusArchives: 0, focusOpenItems: 0,
+    focusHistorySummary: 0, career: 0, notes: 0, worklog: 0,
   };
   for (const [name, text] of chunks) sections[name] += text.length;
 
-  return { prompt, sections };
+  const { liveRows, olderRows, other } = condensedMemory.counts;
+  return { prompt, sections, memoryInputs: { liveRows, olderRows, other } };
 }
 
 // --- Main worklog runner ---
@@ -753,13 +802,14 @@ export async function runWorklog(opts: {
     const bragStart = performance.now();
     s.start("Generating brag book...");
 
-    const { prompt: fullPrompt, sections: promptSections } = await buildBragBookPrompt(
+    const { prompt: fullPrompt, sections: promptSections, memoryInputs } = await buildBragBookPrompt(
       markdown, previousBragBooks, workContextContent, memoryContent, profileContent,
       impactLogContent, coachPersona, focusDocContent, focusHistoryContent,
       careerContext, vaultNotes, openFocusItems, focusHistorySummary, reviewInfo, timeline, weekInfo, config
     );
     log(`AI query — provider: ${provider}, model: ${config.ai.model ?? "default"}, prompt: ${fullPrompt.length} chars`);
     log(formatPromptBreakdown(promptSections));
+    log(formatMemoryBreakdown(memoryInputs));
 
     let usage: AIUsage | null = null;
     const output = await aiQueryStructured({

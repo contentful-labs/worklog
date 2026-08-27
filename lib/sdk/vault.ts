@@ -7,6 +7,7 @@ import type { Root, RootContent } from "mdast";
 import type { WorklogConfig } from "./types";
 import { weekIdForDate } from "./week-utils";
 import { canonicalText } from "./text-similarity";
+import { isTableSeparator, renderScannedRow, scanRow } from "./markdown-table";
 import { contractHome } from "../config";
 
 export interface VaultPaths {
@@ -130,6 +131,144 @@ export async function readCareerContext(paths: VaultPaths): Promise<string> {
     }
   }
   return parts.length > 0 ? parts.join("\n\n---\n\n") : "No career context available.";
+}
+
+// --- Memory window ---
+
+/**
+ * How far back every memory row keeps its Notes cell.
+ *
+ * The coach graduates memory items into brag-book achievements, and to do that it has to quote
+ * the Item text exactly, so no row inside the 26-week window may be dropped. What it does not
+ * need is the Notes cell of a row from five months ago: those are the original week's asides,
+ * already spent. Twelve weeks is a quarter, which is the horizon a graduation actually spans.
+ */
+export const DEFAULT_MEMORY_FULL_WEEKS = 12;
+
+/** Which cell of `| Date | Item | Category | Notes |` holds the notes. */
+const MEMORY_NOTES_COLUMN = 3;
+
+interface Fence {
+  marker: string;
+  length: number;
+  info: string;
+}
+
+/**
+ * Read a fence line: up to three leading spaces, then three or more backticks or tildes.
+ *
+ * The same shape as `maskFenced`'s reader in `vault-updates.ts`, which is private to that file.
+ * Duplicated rather than shared because that file is not this change's to touch.
+ */
+function readFence(line: string): Fence | null {
+  let i = 0;
+  while (i < 3 && line[i] === " ") i++;
+
+  const marker = line[i];
+  if (marker !== "`" && marker !== "~") return null;
+
+  let length = 0;
+  while (line[i + length] === marker) length++;
+  if (length < 3) return null;
+
+  const info = line.slice(i + length).trim();
+  // A backtick fence's info string may not itself contain a backtick.
+  if (marker === "`" && info.includes("`")) return null;
+  return { marker, length, info };
+}
+
+function isIsoDate(value: string): boolean {
+  if (value.length !== 10) return false;
+  for (let i = 0; i < 10; i++) {
+    const char = value[i];
+    if (i === 4 || i === 7) {
+      if (char !== "-") return false;
+    } else if (char < "0" || char > "9") {
+      return false;
+    }
+  }
+  return true;
+}
+
+/** A memory row and what the prompt should do with it. */
+export interface MemoryRowCounts {
+  /** Rows dated on or after the cutoff, carried whole. */
+  liveRows: number;
+  /** Rows older than that, carried without their Notes cell. */
+  olderRows: number;
+  /** Everything else: headings, separators, blank lines, rows with no date. */
+  other: number;
+}
+
+interface CondensedMemory {
+  content: string;
+  counts: MemoryRowCounts;
+}
+
+/**
+ * Keep every memory row, and drop the Notes cell from the older ones.
+ *
+ * `dropDatedRowsBefore` already limits memory to 26 weeks, but a real table still runs to a few
+ * hundred rows and the Notes column is most of its bytes. Removing whole rows is not an option:
+ * the coach graduates an item by quoting its Item text back, so a row it cannot see is a
+ * contribution that can never be promoted. Every Date, Item and Category therefore survives
+ * untouched; only Notes on rows outside the graduation window go.
+ *
+ * The row is rebuilt from its own raw cells, so an untouched cell keeps the exact escaping it
+ * was written with.
+ */
+export function condenseMemoryNotes(content: string, fullSinceDate: string): CondensedMemory {
+  const counts: MemoryRowCounts = { liveRows: 0, olderRows: 0, other: 0 };
+  // The open fence, not a boolean: a `~~~` line inside a ```` ```md ```` block is content, and
+  // toggling on either marker ended the block early and condensed the example table inside it.
+  let open: Fence | null = null;
+
+  const lines = content.split("\n").map((line) => {
+    const fence = readFence(line);
+    if (fence) {
+      if (!open) {
+        open = fence;
+        counts.other += line.length;
+        return line;
+      }
+      // A closing fence matches the character, is at least as long, and carries no info.
+      if (fence.marker === open.marker && fence.length >= open.length && fence.info.length === 0) {
+        open = null;
+        counts.other += line.length;
+        return line;
+      }
+    }
+
+    const trimmed = line.trimStart();
+    if (open || !trimmed.startsWith("|") || isTableSeparator(line)) {
+      counts.other += line.length;
+      return line;
+    }
+
+    const row = scanRow(line);
+    const date = row.values[0] ?? "";
+    if (row.values.length <= MEMORY_NOTES_COLUMN || !isIsoDate(date)) {
+      counts.other += line.length;
+      return line;
+    }
+
+    if (date >= fullSinceDate) {
+      counts.liveRows += line.length;
+      return line;
+    }
+
+    // An empty cell rather than a missing one: the row keeps its column count, so the table
+    // still parses for anything that reads it back.
+    row.raw[MEMORY_NOTES_COLUMN] = " ";
+    const condensed = renderScannedRow(row);
+    counts.olderRows += condensed.length;
+    return condensed;
+  });
+
+  // The newlines between rows belong to no row.
+  counts.other += Math.max(0, lines.length - 1);
+
+  return { content: lines.join("\n"), counts };
 }
 
 // --- Prompt trimming ---
@@ -294,6 +433,9 @@ interface CarriedItem {
 
 const CARRIED_ITEMS_HEADING = "## Open items carried across archived focus docs";
 
+/** How many one-off carried items to list before the rest become a count. */
+export const DEFAULT_SINGLE_ARCHIVE_CAP = 20;
+
 /**
  * Reduce archived focus docs to a record of what changed. Their headings and closed-off items are
  * kept as written. Their open items are collapsed into one deduplicated list of item text with the
@@ -303,7 +445,11 @@ const CARRIED_ITEMS_HEADING = "## Open items carried across archived focus docs"
  *
  * Deduplication is by `canonicalText`, so a reworded bullet counts as the same item.
  */
-export function summarizeArchivedFocusDocs(content: string): string {
+export function summarizeArchivedFocusDocs(
+  content: string,
+  /** How many items seen in a single archived version to list. Optional: existing callers keep theirs. */
+  singleArchiveCap: number = DEFAULT_SINGLE_ARCHIVE_CAP,
+): string {
   const lines = content.split("\n");
   const tree = parseMarkdown(content);
 
@@ -344,19 +490,56 @@ export function summarizeArchivedFocusDocs(content: string): string {
     }
   }
 
-  const openLines = [...carried.values()].map((item) => {
+  const { lines: openLines, omitted } = renderCarriedItems([...carried.values()], singleArchiveCap);
+
+  const out = trimTrailingBlanks(kept);
+  if (openLines.length > 0) {
+    out.push("", CARRIED_ITEMS_HEADING, "", ...openLines);
+    if (omitted > 0) {
+      out.push("", `_${omitted} item(s) that appeared in only one archived version are not listed._`);
+    }
+  }
+  return out.join("\n");
+}
+
+interface CarriedRender {
+  lines: string[];
+  /** One-off items left out, reported as a count so the coach knows the list is partial. */
+  omitted: number;
+}
+
+/**
+ * Render the carried list, keeping every item that survived more than one archived version and
+ * capping the rest.
+ *
+ * An item present in two or more versions is the stale-item signal the coach is asked to spot, so
+ * those are never dropped however many there are. An item seen once is a one-off: it was added and
+ * then went away, which the archive headings already show. Real focus docs run to hundreds of
+ * bullets, and the one-off half of that is the part that grows without telling the coach anything.
+ */
+function renderCarriedItems(items: CarriedItem[], cap: number): CarriedRender {
+  const lines: string[] = [];
+  let singles = 0;
+  let omitted = 0;
+
+  for (const item of items) {
     const labels = [...item.labels].filter(Boolean).sort();
+    if (labels.length <= 1) {
+      singles++;
+      if (singles > cap) {
+        omitted++;
+        continue;
+      }
+    }
     const seen = labels.length === 0
       ? ""
       : labels.length === 1
         ? ` _(seen in ${labels[0]})_`
         : ` _(first seen ${labels[0]}, last seen ${labels[labels.length - 1]})_`;
-    return `- ${item.text}${seen}`;
-  });
+    lines.push(`- ${item.text}${seen}`);
+  }
 
-  const out = trimTrailingBlanks(kept);
-  if (openLines.length > 0) out.push("", CARRIED_ITEMS_HEADING, "", ...openLines);
-  return out.join("\n");
+  return { lines, omitted };
 }
 
 /**

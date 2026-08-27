@@ -8,6 +8,8 @@ import {
   summarizeArchivedFocusDocs,
   summarizePreviousBragBooks,
   ticketPrefixesForWeek,
+  condenseMemoryNotes,
+  DEFAULT_SINGLE_ARCHIVE_CAP,
   DEFAULT_ORG_NOTE_CAP,
   DEFAULT_VAULT_NOTE_CAP,
   type TeamTimelineEntry,
@@ -587,5 +589,214 @@ describe("containsIdentifier", () => {
     ["TEAM-123", "", false],
   ])("%s contains %s: %s", (haystack, needle, expected) => {
     expect(containsIdentifier(haystack, needle)).toBe(expected);
+  });
+});
+
+function memoryTable(rows: Array<{ date: string; item: string; notes: string }>): string {
+  return [
+    "# Memory",
+    "",
+    "## Core Team",
+    "",
+    "| Date | Item | Category | Notes |",
+    "|---|---|---|---|",
+    ...rows.map((r) => `| ${r.date} | ${r.item} | Category | ${r.notes} |`),
+  ].join("\n");
+}
+
+describe("condenseMemoryNotes", () => {
+  const table = memoryTable([
+    { date: "2026-03-10", item: "Recent contribution", notes: "Long notes about the recent one" },
+    { date: "2025-11-02", item: "Older contribution", notes: "Long notes about the older one" },
+  ]);
+
+  it("keeps every row, because the coach graduates items by quoting them", () => {
+    const { content } = condenseMemoryNotes(table, "2026-01-01");
+    const rows = content.split("\n").filter((line) => line.startsWith("| 20"));
+
+    expect(rows).toHaveLength(2);
+    expect(content).toContain("Recent contribution");
+    expect(content).toContain("Older contribution");
+  });
+
+  it("keeps the Item text of an older row byte for byte", () => {
+    const exact = memoryTable([
+      { date: "2025-11-02", item: "Shipped the `search` revamp \\| phase two", notes: "notes" },
+    ]);
+    const { content } = condenseMemoryNotes(exact, "2026-01-01");
+
+    expect(content).toContain("Shipped the `search` revamp \\| phase two");
+  });
+
+  it("drops the Notes cell of a row older than the window", () => {
+    const { content } = condenseMemoryNotes(table, "2026-01-01");
+
+    expect(content).toContain("Long notes about the recent one");
+    expect(content).not.toContain("Long notes about the older one");
+  });
+
+  it("keeps the column count so the table still parses", () => {
+    const { content } = condenseMemoryNotes(table, "2026-01-01");
+    const older = content.split("\n").find((line) => line.includes("Older contribution")) ?? "";
+
+    expect(older.split("|")).toHaveLength(6);
+  });
+
+  it("counts what it did, so the breakdown can report it", () => {
+    const { counts } = condenseMemoryNotes(table, "2026-01-01");
+
+    expect(counts.liveRows).toBeGreaterThan(0);
+    expect(counts.olderRows).toBeGreaterThan(0);
+  });
+
+  it("leaves rows alone when nothing is older than the window", () => {
+    const { content, counts } = condenseMemoryNotes(table, "2020-01-01");
+
+    expect(content).toBe(table);
+    expect(counts.olderRows).toBe(0);
+  });
+
+  it("ignores the header, the separator and a row with no date", () => {
+    const odd = memoryTable([{ date: "not-a-date", item: "No date", notes: "kept" }]);
+    const { content } = condenseMemoryNotes(odd, "2026-01-01");
+
+    expect(content).toContain("| Date | Item | Category | Notes |");
+    expect(content).toContain("kept");
+  });
+
+  it("does not touch a table inside a fenced block", () => {
+    const fenced = ["```md", "| 2020-01-01 | Example | Category | example notes |", "```"].join("\n");
+    const { content } = condenseMemoryNotes(fenced, "2026-01-01");
+
+    expect(content).toBe(fenced);
+  });
+
+  // A fence closes only on its own marker character, at least as long, with nothing after it.
+  // Toggling on either marker let a documentation example end its own block early.
+  it("does not let a tilde line close a backtick fence", () => {
+    const fenced = [
+      "```md",
+      "~~~",
+      "| 2020-01-01 | Example | Category | example notes |",
+      "~~~",
+      "```",
+    ].join("\n");
+
+    expect(condenseMemoryNotes(fenced, "2026-01-01").content).toBe(fenced);
+  });
+
+  it("does not let a backtick line close a tilde fence", () => {
+    const fenced = [
+      "~~~md",
+      "```",
+      "| 2020-01-01 | Example | Category | example notes |",
+      "```",
+      "~~~",
+    ].join("\n");
+
+    expect(condenseMemoryNotes(fenced, "2026-01-01").content).toBe(fenced);
+  });
+
+  it("does not let a shorter run close a longer fence", () => {
+    const fenced = [
+      "````md",
+      "```",
+      "| 2020-01-01 | Example | Category | example notes |",
+      "```",
+      "````",
+    ].join("\n");
+
+    expect(condenseMemoryNotes(fenced, "2026-01-01").content).toBe(fenced);
+  });
+
+  it("does not let a fence carrying an info string close a block", () => {
+    const fenced = [
+      "```md",
+      "```js",
+      "| 2020-01-01 | Example | Category | example notes |",
+      "```",
+      "```",
+    ].join("\n");
+
+    expect(condenseMemoryNotes(fenced, "2026-01-01").content).toBe(fenced);
+  });
+
+  it("does not open a fence on a run of fewer than three markers", () => {
+    // Two backticks is inline-code punctuation, not a fence. Reading it as one swallowed the
+    // rest of the file and left every row after it uncondensed.
+    const notAFence = [
+      "``",
+      "| 2020-01-01 | Older row | Category | older notes |",
+    ].join("\n");
+    const { content } = condenseMemoryNotes(notAFence, "2026-01-01");
+
+    expect(content).not.toContain("older notes");
+    expect(content).toContain("Older row");
+  });
+
+  it("treats an unclosed fence as running to the end of the file", () => {
+    const fenced = ["```md", "| 2020-01-01 | Example | Category | example notes |"].join("\n");
+
+    expect(condenseMemoryNotes(fenced, "2026-01-01").content).toBe(fenced);
+  });
+
+  it("still condenses rows after a fence that did close", () => {
+    const mixed = [
+      "```md",
+      "| 2020-01-01 | Example | Category | example notes |",
+      "```",
+      "",
+      "| 2020-02-02 | Real row | Category | real notes |",
+    ].join("\n");
+    const { content } = condenseMemoryNotes(mixed, "2026-01-01");
+
+    expect(content).toContain("example notes");
+    expect(content).not.toContain("real notes");
+    expect(content).toContain("Real row");
+  });
+});
+
+describe("summarizeArchivedFocusDocs one-off cap", () => {
+  function archives(repeated: number, oneOffs: number): string {
+    const shared = Array.from({ length: repeated }, (_, i) => `- Repeated item ${i}`);
+    const singles = Array.from({ length: oneOffs }, (_, i) => `- One-off item ${i}`);
+    return [
+      "### Focus Doc archived 2026-03-01",
+      "",
+      ...shared,
+      ...singles,
+      "",
+      "---",
+      "",
+      "### Focus Doc archived 2026-02-01",
+      "",
+      ...shared,
+    ].join("\n");
+  }
+
+  it("never drops an item that survived more than one version", () => {
+    const summary = summarizeArchivedFocusDocs(archives(40, 0), 5);
+
+    for (let i = 0; i < 40; i++) {
+      expect(summary).toContain(`- Repeated item ${i} _(first seen 2026-02-01, last seen 2026-03-01)_`);
+    }
+  });
+
+  it("caps the one-offs and says how many it left out", () => {
+    const summary = summarizeArchivedFocusDocs(archives(2, 30), 5);
+
+    expect(summary).toContain("- One-off item 0 _(seen in 2026-03-01)_");
+    expect(summary).not.toContain("- One-off item 29");
+    expect(summary).toContain("25 item(s) that appeared in only one archived version are not listed.");
+  });
+
+  it("keeps the stale signal even when the one-offs are capped", () => {
+    const summary = summarizeArchivedFocusDocs(archives(3, 30), 5);
+
+    expect(summary).toContain("- Repeated item 2 _(first seen 2026-02-01, last seen 2026-03-01)_");
+  });
+
+  it("says nothing about omissions when everything fits", () => {
+    expect(summarizeArchivedFocusDocs(archives(2, 3), DEFAULT_SINGLE_ARCHIVE_CAP)).not.toContain("not listed");
   });
 });

@@ -123,6 +123,27 @@ export const workContextContent = [
   lines(60, (i) => `- **Category ${i % 5}:** Archived note ${i} from a team era that has ended _(2023-W${10 + (i % 40)})_`),
 ].join("\n");
 
+/**
+ * `focus-tracking.md` at its real size: 410 coaching commitments. The prompt never carries this
+ * table; `selectOpenFocusItems` takes ten open ones and `summarizeFocusHistory` reduces the rest
+ * to a single line. The fixture exists so the breakdown proves that.
+ */
+const FOCUS_TRACKING_ROWS = 410;
+
+export const focusTrackingContent = [
+  "# Focus Tracking",
+  "<!-- worklog-focus-format: 2 -->",
+  "",
+  "| ID | Week | Focus Item | Status | Reviews | Notes |",
+  "|------|------|------|------|------|------|",
+  lines(FOCUS_TRACKING_ROWS, (i) => {
+    const week = `2026-W${String(2 + Math.floor(i / 8)).padStart(2, "0")}`;
+    // The last handful stay open; everything older has been resolved or lapsed.
+    const status = i >= FOCUS_TRACKING_ROWS - 14 ? "pending" : i % 3 === 0 ? "lapsed" : "resolved";
+    return `| ${week}.${(i % 8) + 1} | ${week} | Focus commitment ${i}, written after that week's coaching session | ${status} | ${i % 3} | Notes on commitment ${i} |`;
+  }),
+].join("\n");
+
 export const focusDocContent = [
   "# My Focus",
   "",
@@ -170,8 +191,33 @@ export const focusHistoryContent = [
   carriedItems("P1"),
 ].join("\n");
 
-export const memoryContent = ["# Memory", "", "## Core Team", "", "| Date | Item | Category | Notes |", "|---|---|---|---|",
-  lines(280, (i) => `| 2026-03-0${i % 9} | Memory row ${i} about a small contribution | Category | Some notes |`)].join("\n");
+/**
+ * A memory table the size of the real one: 320 rows across the 26-week window the reader keeps,
+ * with the Notes cell carrying most of the bytes. Dates run backwards from the fixture week.
+ */
+const MEMORY_ROWS = 320;
+
+function memoryRowDate(i: number): string {
+  // Six months back, spread evenly, so roughly half the rows fall outside the 12-week window.
+  const day = new Date("2026-03-16T00:00:00Z");
+  day.setUTCDate(day.getUTCDate() - Math.floor((i / MEMORY_ROWS) * 182));
+  return day.toISOString().split("T")[0];
+}
+
+export const memoryContent = [
+  "# Memory",
+  "",
+  "## Core Team",
+  "",
+  "| Date | Item | Category | Notes |",
+  "|---|---|---|---|",
+  lines(
+    MEMORY_ROWS,
+    (i) =>
+      `| ${memoryRowDate(i)} | Memory item ${i}, a small contribution recorded for later | Category ${i % 5} | ` +
+      `Notes on memory item ${i}: what happened that week, who was involved and why it was worth writing down at all. |`,
+  ),
+].join("\n");
 
 export const profileContent = ["# Profile", "", "## Key Strengths", "", lines(60, (i) => `- Strength ${i}, observed over several weeks of work`)].join("\n");
 export const impactLogContent = ["# Impact Log", "", "## Impact Timeline", "", "| Date | Achievement | Scope | Core Value | Evidence |", "|---|---|---|---|---|",
