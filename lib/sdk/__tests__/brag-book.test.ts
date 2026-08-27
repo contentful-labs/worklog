@@ -2,7 +2,10 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtemp, writeFile, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { toBragBookResult, validateBragBookMarkdown, parseReviewCycle, ensureBragBookFrontmatter } from "../brag-book";
+import {
+  toBragBookResult, validateBragBookMarkdown, parseReviewCycle, ensureBragBookFrontmatter,
+  firstDroppedLine, validatePreserved,
+} from "../brag-book";
 import { updateMemory } from "../vault-updates";
 import { escapeCell, renderRow } from "../markdown-table";
 import { bragBookOutputSchema, isFocusItemId, type BragBookOutput } from "../brag-book-schema";
@@ -597,5 +600,80 @@ describe("parseReviewCycle", () => {
     const result = parseReviewCycle(ctx, today);
     expect(result!.nextReview).toBe("Q1 Check-in");
     expect(result!.urgency).toBe("normal");
+  });
+});
+
+describe("regenerating a week that already has an entry", () => {
+  const existing = [
+    "---",
+    "tags:",
+    "  - areas/work",
+    "---",
+    "",
+    "# Brag Book - Week 36, 2026",
+    "",
+    "## Achievements",
+    "",
+    "- Cut search indexing from 40 minutes to 6.",
+    "- Took the on-call rota through a bad week without a page going unanswered.",
+    "",
+    "<!-- COACHING_SESSION -->",
+    "### What went well",
+    "",
+    "You said no to the extra scope.",
+    "<!-- /COACHING_SESSION -->",
+  ].join("\n");
+
+  it("accepts a document that keeps everything and adds to it", () => {
+    const next = existing.replace(
+      "- Took the on-call rota through a bad week without a page going unanswered.",
+      "- Took the on-call rota through a bad week without a page going unanswered.\n- Shipped the query parser rewrite.",
+    );
+
+    expect(firstDroppedLine(existing, next)).toBeUndefined();
+    expect(() => validatePreserved(existing, next)).not.toThrow();
+  });
+
+  it("refuses a document that drops an achievement, and names the one it dropped", () => {
+    // The trigger: the entry records A, the refresh finds B, and the model answers with
+    // a structurally perfect document containing only B. Writing it would delete A.
+    const onlyNew = [
+      "---",
+      "tags:",
+      "  - areas/work",
+      "---",
+      "",
+      "# Brag Book - Week 36, 2026",
+      "",
+      "## Achievements",
+      "",
+      "- Shipped the query parser rewrite.",
+      "",
+      "<!-- COACHING_SESSION -->",
+      "### What went well",
+      "",
+      "You said no to the extra scope.",
+      "<!-- /COACHING_SESSION -->",
+    ].join("\n");
+
+    expect(firstDroppedLine(existing, onlyNew)).toBe("- Cut search indexing from 40 minutes to 6.");
+    expect(() => validatePreserved(existing, onlyNew)).toThrow(/Refusing to write the brag book/);
+    expect(() => validatePreserved(existing, onlyNew)).toThrow(/Cut search indexing from 40 minutes to 6/);
+  });
+
+  it("refuses a document that drops a coaching heading", () => {
+    const withoutHeading = existing.replace("### What went well", "### Something else entirely");
+    expect(firstDroppedLine(existing, withoutHeading)).toBe("### What went well");
+  });
+
+  it("ignores lines outside the achievements and coaching sections", () => {
+    // Only what someone wrote down about the week is protected. The framing around it is
+    // the model's to rewrite, or a cosmetic change would fail an otherwise good week.
+    const rewordedIntro = existing.replace("# Brag Book - Week 36, 2026", "# Week 36, 2026");
+    expect(firstDroppedLine(existing, rewordedIntro)).toBeUndefined();
+  });
+
+  it("says nothing is dropped when there was nothing there to drop", () => {
+    expect(firstDroppedLine("", "# Brag Book\n\n## Achievements\n\n- Something new.")).toBeUndefined();
   });
 });

@@ -578,8 +578,11 @@ export async function buildBragBookPrompt(
   const amendSection = amend
     ? `
 <existing_brag_book>
-This week already has a brag book entry, below. Add to it. Do not rewrite it, do not
-restate what it already says, and do not change its account of what happened.
+This week already has a brag book entry, below. Return the whole document again with the
+new material worked into it. Every achievement bullet and every coaching heading below
+must appear again word for word: the run refuses to write a document that drops one, and
+the week keeps its old entry instead. Add to it, do not rewrite it, do not restate what
+it already says, and do not change its account of what happened.
 ${amend.existingBragBook}
 </existing_brag_book>
 

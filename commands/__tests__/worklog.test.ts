@@ -331,3 +331,74 @@ describe("team attribution without a timeline file", () => {
     }
   });
 });
+
+describe("amending a week that already has an entry", () => {
+  it("writes nothing when a valid document drops an achievement the week already has", async () => {
+    // The trigger: the entry records A, the refresh finds B, and the model answers with
+    // a document that passes every structural check and contains only B. Writing it
+    // would delete A from the only place it exists.
+    const tmp = mkdtempSync(join(tmpdir(), "worklog-amend-"));
+    const configHome = join(tmp, "config");
+    const vault = join(tmp, "vault");
+    const previousConfigHome = process.env.XDG_CONFIG_HOME;
+    const previousCacheHome = process.env.XDG_CACHE_HOME;
+
+    seedVault(vault);
+    writeConfig(configHome, vault);
+    process.env.XDG_CONFIG_HOME = configHome;
+    process.env.XDG_CACHE_HOME = join(tmp, "cache");
+
+    vi.stubGlobal("Bun", {
+      write: async (path: string, content: string) => writeFileSync(path, content),
+      file: (path: string) => ({ text: async () => readFileSync(path, "utf8") }),
+    });
+
+    try {
+      vi.resetModules();
+      const { aiQueryStructured } = await import("../../lib/sdk/ai");
+      vi.mocked(aiQueryStructured).mockResolvedValue({
+        ...BAD_OUTPUT,
+        bragBookMarkdown: "# Brag Book - Week 09, 2026\n\n## Achievements\n\n- Only the new thing",
+      });
+
+      const { generateWeek } = await import("../worklog");
+      const { buildVaultPaths, readTeamTimeline } = await import("../../lib/sdk/vault");
+      const { loadConfig, TEAM_TIMELINE_PATH } = await import("../../lib/config");
+      const { getWeekStart, getWeekEnd } = await import("../../lib/sdk/week-utils");
+
+      const config = loadConfig();
+      if (!config) throw new Error("test config did not load");
+      const paths = buildVaultPaths(config, TEAM_TIMELINE_PATH);
+      const workLogPath = join(vault, `${WEEK} Work Log.md`);
+
+      await expect(generateWeek({
+        weekInfo: {
+          weekNumber: 9,
+          year: 2026,
+          startDate: getWeekStart(9, 2026),
+          endDate: getWeekEnd(9, 2026),
+          filename: `${WEEK} Work Log.md`,
+        },
+        wid: WEEK,
+        workLog: "# Work Log\n\nSomething new happened.\n",
+        workLogPath,
+        config,
+        paths,
+        timeline: readTeamTimeline(paths),
+        log: () => {},
+        spinner: { start: vi.fn(), stop: vi.fn(), message: vi.fn() } as never,
+        amend: { existingBragBook: EXISTING_BRAG_BOOK, newMaterial: "- a comment" },
+      })).rejects.toThrow(/Refusing to write the brag book/);
+
+      // Both documents are exactly as they were.
+      expect(readFileSync(join(vault, `${WEEK} Brag Book.md`), "utf8")).toBe(EXISTING_BRAG_BOOK);
+      expect(readFileSync(workLogPath, "utf8")).toBe(EXISTING_WORK_LOG);
+    } finally {
+      if (previousConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
+      else process.env.XDG_CONFIG_HOME = previousConfigHome;
+      if (previousCacheHome === undefined) delete process.env.XDG_CACHE_HOME;
+      else process.env.XDG_CACHE_HOME = previousCacheHome;
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});

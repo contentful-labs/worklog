@@ -4,7 +4,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-import { refreshWeeks, weeksInRange, type WeekToWrite } from "../refresh";
+import { parseSince, parseWeek, refreshWeeks, weeksInRange, type WeekToWrite } from "../refresh";
 import { openLedger } from "../../lib/sdk/ledger";
 import type { Source, SourceBatch, SourceContext } from "../../lib/sdk/sources";
 import type { WorklogConfig } from "../../lib/config";
@@ -212,5 +212,86 @@ describe("the range refresh covers", () => {
   it("gives one week when the range is inside one", () => {
     const weeks = weeksInRange(new Date("2026-08-11T00:00:00.000Z"), new Date("2026-08-13T00:00:00.000Z"));
     expect(weeks.map((week) => week.weekId)).toEqual(["2026-W33"]);
+  });
+});
+
+describe("a week whose events changed while nobody was looking at it", () => {
+  const olderComment: SourceBatch = {
+    snapshots: [{
+      id: "TEAM-1234", firstSeenAt: "2026-08-11T09:00:00.000Z",
+      payload: { title: "Search Revamp indexer", url: "https://example.atlassian.net/browse/TEAM-1234" },
+    }],
+    events: [{
+      source: "jira", kind: "comment", itemId: "TEAM-1234",
+      at: "2026-08-11T09:00:00.000Z", payload: { text: "an older comment nobody had fetched" }, id: "c-old",
+    }],
+    warnings: [],
+  };
+
+  beforeEach(async () => {
+    await mkdir(vault, { recursive: true });
+  });
+
+  it("is still owed a write on the next run, and says so in the meantime", async () => {
+    // The trigger: refreshing September turns up an August comment. It is filed where it
+    // belongs, but September's run does not write August. On the next run the event is
+    // no longer new, so without a record of the debt August stays stale for ever.
+    const first = await runOnce(stubSource("jira", olderComment));
+    expect(first.written).toEqual([]);
+    expect(first.waiting).toEqual(["2026-W33"]);
+
+    const augustWeek = week("2026-W33", "2026-08-10", "2026-08-16");
+    const second = await runOnce(stubSource("jira", { snapshots: [], events: [], warnings: [] }), [augustWeek]);
+
+    expect(second.written.map((w) => w.weekId)).toEqual(["2026-W33"]);
+    expect(second.written[0].workLog).toContain("an older comment nobody had fetched");
+    expect(second.waiting).toEqual([]);
+  });
+
+  it("stops being owed a write once it has had one", async () => {
+    const augustWeek = week("2026-W33", "2026-08-10", "2026-08-16");
+    await runOnce(stubSource("jira", olderComment), [augustWeek]);
+
+    const again = await runOnce(stubSource("jira", olderComment), [augustWeek]);
+    expect(again.written).toEqual([]);
+    expect(again.waiting).toEqual([]);
+  });
+});
+
+describe("weeks at the turn of the year", () => {
+  it("puts the last days of December in the next year's first week", () => {
+    // The trigger: pairing an ISO week number with a calendar year gives 2025-W01 for
+    // 29 December 2025, a week whose range starts in December 2024.
+    const weeks = weeksInRange(new Date("2025-12-29T00:00:00.000Z"), new Date("2025-12-31T00:00:00.000Z"));
+
+    expect(weeks.map((w) => w.weekId)).toEqual(["2026-W01"]);
+    expect(weeks[0].window.start.toISOString()).toBe("2025-12-29T00:00:00.000Z");
+    expect(weeks[0].window.end.toISOString()).toBe("2026-01-04T23:59:59.999Z");
+  });
+
+  it("walks across a year boundary without repeating or skipping a week", () => {
+    const weeks = weeksInRange(new Date("2025-12-22T00:00:00.000Z"), new Date("2026-01-12T00:00:00.000Z"));
+    expect(weeks.map((w) => w.weekId)).toEqual(["2025-W52", "2026-W01", "2026-W02", "2026-W03"]);
+  });
+});
+
+describe("what the command accepts on the command line", () => {
+  it("takes a real date and refuses one that never happened", () => {
+    expect(parseSince("2026-01-31")).toBe("2026-01-31");
+    // The trigger: 31 February matches the format, and `new Date` rolls it to 3 March.
+    expect(() => parseSince("2026-02-31")).toThrow(/real date/);
+    expect(() => parseSince("2026-13-01")).toThrow(/real date/);
+    expect(() => parseSince("last tuesday")).toThrow(/real date/);
+  });
+
+  it("takes a week of that year and refuses one that is not", () => {
+    expect(parseWeek("2026-W06")).toBe("2026-W06");
+    expect(parseWeek("2026-W6")).toBe("2026-W06");
+    // 2026 is a 53-week year; 2027 is not.
+    expect(parseWeek("2026-W53")).toBe("2026-W53");
+    expect(() => parseWeek("2027-W53")).toThrow(/not a week of 2027/);
+    expect(() => parseWeek("2026-W99")).toThrow(/not a week of 2026/);
+    expect(() => parseWeek("2026-W00")).toThrow(/not a week of 2026/);
+    expect(() => parseWeek("nonsense")).toThrow(/YYYY-WNN/);
   });
 });
