@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   capOrganizationalNotes,
   collectWorkTerms,
+  containsIdentifier,
   extractBragBookSummary,
   rankVaultNotes,
   summarizeArchivedFocusDocs,
@@ -140,17 +141,184 @@ describe("summarizeArchivedFocusDocs", () => {
     expect(summary).toContain("**Dropped** the second spike");
   });
 
-  it("drops items that are still open, which the current focus doc already carries", () => {
+  it("carries open items into one compact list instead of repeating them", () => {
     const summary = summarizeArchivedFocusDocs(ARCHIVED_FOCUS);
 
-    expect(summary).not.toContain("Keep the migration moving");
-    expect(summary).not.toContain("Pair with the new joiner");
-    expect(summary).not.toContain("Someone on the platform team");
+    expect(summary).toContain("## Open items carried across archived focus docs");
+    expect(summary).toContain("- Keep the migration moving _(seen in 2026-03-01)_");
+    expect(summary).toContain("- Pair with the new joiner _(seen in 2026-03-01)_");
+  });
+
+  it("keeps an item that survived two archives once, naming both", () => {
+    const twoArchives = [
+      "### Focus Doc archived 2026-03-01",
+      "",
+      "## P0 - Own & Deliver",
+      "",
+      "- Ship migration",
+      "",
+      "---",
+      "",
+      "### Focus Doc archived 2026-02-01",
+      "",
+      "## P0 - Own & Deliver",
+      "",
+      "- Ship migration",
+    ].join("\n");
+
+    const summary = summarizeArchivedFocusDocs(twoArchives);
+    const occurrences = summary.split("Ship migration").length - 1;
+
+    expect(occurrences).toBe(1);
+    expect(summary).toContain("- Ship migration _(first seen 2026-02-01, last seen 2026-03-01)_");
+  });
+
+  it("folds case and spacing when deciding two items are the same", () => {
+    const restyled = [
+      "### Focus Doc archived 2026-03-01",
+      "- Ship  the   Migration",
+      "",
+      "---",
+      "",
+      "### Focus Doc archived 2026-02-01",
+      "- ship the migration",
+    ].join("\n");
+
+    const summary = summarizeArchivedFocusDocs(restyled);
+
+    expect(summary.split("igration").length - 1).toBe(1);
+    expect(summary).toContain("first seen 2026-02-01, last seen 2026-03-01");
+  });
+
+  it("keeps genuinely different wording apart, since a rewrite may be a new commitment", () => {
+    // canonicalText folds case and whitespace, not punctuation. Being wrong here costs one
+    // extra carried line, which is the right way round for a de-duplication.
+    const punctuated = [
+      "### Focus Doc archived 2026-03-01",
+      "- Ship the migration.",
+      "",
+      "---",
+      "",
+      "### Focus Doc archived 2026-02-01",
+      "- Ship the migration",
+    ].join("\n");
+
+    expect(summarizeArchivedFocusDocs(punctuated).split("igration").length - 1).toBe(2);
   });
 
   it("does not mistake a word merely starting with a marker for a closed item", () => {
     const summary = summarizeArchivedFocusDocs("- Donation flow needs a spike\n");
-    expect(summary).toBe("");
+
+    // Not closed, so it is carried rather than kept verbatim under a heading.
+    expect(summary).toContain("## Open items carried across archived focus docs");
+    expect(summary).toContain("- Donation flow needs a spike");
+    expect(summary).not.toContain("- [x]");
+  });
+});
+
+describe("markdown structure, not lines", () => {
+  it("does not treat a heading inside a fenced block as a real one", () => {
+    const content = [
+      "# Work Context",
+      "",
+      "## Organizational Notes",
+      "",
+      "- **Process:** A real note _(2026-W10)_",
+      "",
+      "```md",
+      "## ARCHIVED - an example of what an era heading looks like",
+      "```",
+      "",
+      "## Review Cycle",
+      "",
+      "| Type | Date |",
+    ].join("\n");
+
+    const trimmed = capOrganizationalNotes(content, 40);
+
+    expect(trimmed).toContain("A real note");
+    expect(trimmed).toContain("## Review Cycle");
+    expect(trimmed).toContain("| Type | Date |");
+  });
+
+  it("does not let a fenced section heading truncate a brag book section", () => {
+    const content = [
+      "## Achievements",
+      "",
+      "- Shipped the thing",
+      "",
+      "```md",
+      "## Stats",
+      "```",
+      "",
+      "- And another thing",
+      "",
+      "## Mentor Notes",
+      "",
+      "coaching",
+    ].join("\n");
+
+    const summary = extractBragBookSummary(content);
+
+    expect(summary).toContain("- Shipped the thing");
+    expect(summary).toContain("- And another thing");
+    expect(summary).not.toContain("coaching");
+  });
+
+  it("sees a setext heading", () => {
+    const content = [
+      "Work Context",
+      "============",
+      "",
+      "Organizational Notes",
+      "--------------------",
+      "",
+      "- Note one",
+      "- Note two",
+      "- Note three",
+      "",
+      "ARCHIVED - Old Era",
+      "------------------",
+      "",
+      "- Old note",
+    ].join("\n");
+
+    const trimmed = capOrganizationalNotes(content, 2);
+
+    expect(trimmed).toContain("- Note one");
+    expect(trimmed).toContain("- Note two");
+    expect(trimmed).not.toContain("- Note three");
+    expect(trimmed).not.toContain("- Old note");
+  });
+
+  it("sees a closing-hash heading", () => {
+    const summary = extractBragBookSummary("## Achievements ##\n\n- Shipped it\n\n## Stats ##\n\n| a |\n");
+
+    expect(summary).toContain("## Achievements ##");
+    expect(summary).toContain("- Shipped it");
+    expect(summary).not.toContain("| a |");
+  });
+
+  it("sees an indented heading", () => {
+    const summary = extractBragBookSummary("   ## Achievements\n\n- Shipped it\n\n## Stats\n\n| a |\n");
+
+    expect(summary).toContain("- Shipped it");
+    expect(summary).not.toContain("| a |");
+  });
+
+  it("handles CRLF line endings", () => {
+    const summary = extractBragBookSummary("## Achievements\r\n\r\n- Shipped it\r\n\r\n## Stats\r\n\r\n| a |\r\n");
+
+    expect(summary).toContain("- Shipped it");
+    expect(summary).not.toContain("| a |");
+  });
+
+  it("does not treat a blockquoted heading as a section boundary", () => {
+    const summary = extractBragBookSummary("## Achievements\n\n- Shipped it\n\n> ## Stats\n\n- Still ours\n\n## Mentor Notes\n\ncoaching\n");
+
+    expect(summary).toContain("- Shipped it");
+    expect(summary).toContain("- Still ours");
+    expect(summary).not.toContain("coaching");
   });
 });
 
@@ -255,6 +423,17 @@ describe("collectWorkTerms", () => {
     expect(collectWorkTerms("TEAM- was renamed", ["TEAM"])).toEqual([]);
   });
 
+  it("requires an identifier boundary before the prefix", () => {
+    expect(collectWorkTerms("STEAM-123 is a different system", ["TEAM"])).toEqual([]);
+    expect(collectWorkTerms("see TEAM-123 today", ["TEAM"])).toEqual(["TEAM-123"]);
+    expect(collectWorkTerms("(TEAM-123)", ["TEAM"])).toEqual(["TEAM-123"]);
+  });
+
+  it("requires an identifier boundary after the number", () => {
+    expect(collectWorkTerms("TEAM-123abc", ["TEAM"])).toEqual([]);
+    expect(collectWorkTerms("#4321x", ["TEAM"])).toEqual([]);
+  });
+
   it("returns nothing when there are no prefixes configured and no PR numbers", () => {
     expect(collectWorkTerms("plain prose", [])).toEqual([]);
   });
@@ -293,5 +472,45 @@ describe("rankVaultNotes", () => {
     const ranked = rankVaultNotes([{ title: "a", excerpt: "team-1234" }], ["TEAM-1234"], 1);
 
     expect(ranked).toHaveLength(1);
+  });
+
+  it("does not let a shorter key match a longer identifier", () => {
+    const decoys: VaultNote[] = Array.from({ length: 10 }, (_, i) => ({
+      title: `Decoy ${i}`,
+      excerpt: "mentions TEAM-123 only",
+    }));
+    const real: VaultNote = { title: "Real", excerpt: "about TEAM-12" };
+
+    const ranked = rankVaultNotes([...decoys, real], ["TEAM-12"], 10);
+
+    // The decoys score nothing, so the one real match sorts above all ten of them.
+    expect(ranked[0].title).toBe("Real");
+  });
+
+  it("scores every candidate before capping, so an older relevant note survives the noise", () => {
+    const noisy: VaultNote[] = Array.from({ length: 25 }, (_, i) => ({
+      title: `Recent unrelated ${i}`,
+      excerpt: "nothing to do with this week",
+    }));
+    const oldest: VaultNote = { title: "Oldest but relevant", excerpt: "closes TEAM-123" };
+
+    const ranked = rankVaultNotes([...noisy, oldest], ["TEAM-123"], 10);
+
+    expect(ranked[0].title).toBe("Oldest but relevant");
+  });
+});
+
+describe("containsIdentifier", () => {
+  it.each([
+    ["TEAM-123", "TEAM-123", true],
+    ["STEAM-123", "TEAM-123", false],
+    ["TEAM-1234", "TEAM-123", false],
+    ["SEE TEAM-123.", "TEAM-123", true],
+    ["(TEAM-123)", "TEAM-123", true],
+    ["TEAM-123X", "TEAM-123", false],
+    ["", "TEAM-123", false],
+    ["TEAM-123", "", false],
+  ])("%s contains %s: %s", (haystack, needle, expected) => {
+    expect(containsIdentifier(haystack, needle)).toBe(expected);
   });
 });

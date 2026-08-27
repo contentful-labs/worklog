@@ -242,7 +242,7 @@ tags:
 
 1-2 concrete, actionable suggestions based on THIS week's context.
 
-Every suggestion must name one artifact from this week's work log: a ticket key, a pull request, a Confluence page, or a Slack thread. A suggestion with nothing to point at is generic advice, and generic advice is useless.
+Every suggestion must name something concrete. Normally that is an artifact from this week's work log: a ticket key, a pull request, a Confluence page, or a Slack thread. When the point you are making is that a Focus Doc item is missing from this week's work, name that item instead and say it is absent — its absence is the evidence. A suggestion with nothing to point at is generic advice, and generic advice is useless.
 
 Do not restate something already listed in `open_focus_items`. The engineer wrote those down and can read them. If the best thing to say next week is an item that is already open, say nothing new here and return its status in `focusStatuses` instead.
 

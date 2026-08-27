@@ -437,6 +437,8 @@ const WRITING_STYLE_PATH = new URL("../prompts/_writing-style.md", import.meta.u
 export interface PromptSectionSizes {
   /** The prompt file and the writing style guide, both fixed. */
   template: number;
+  /** XML wrappers, the review-proximity block and the generation context. */
+  framing: number;
   persona: number;
   profile: number;
   context: number;
@@ -524,87 +526,45 @@ export async function buildBragBookPrompt(
     return `\n<generation_context>\nIMPORTANT: You are generating a brag book for **Week ${weekInfo.weekNumber}, ${weekInfo.year}** (${weekInfo.startDate.toISOString().split("T")[0]} to ${weekInfo.endDate.toISOString().split("T")[0]}).\n\nThis may be a historical regeneration. The work log data below is from that specific time period — it is NOT broken tooling. The tickets, PRs, and pages shown are the engineer's actual work from that week.\n\nTeam assignment at that time: ${teamLabel}${teamEntry?.notes ? `\nNote: ${teamEntry.notes}` : ""}\n\nFull team timeline:\n${formatTeamTimelineForPrompt(timeline)}\n\nDo NOT reference the current date, current team assignment, or any context files that reflect a different time period. Generate the brag book AS IF you are writing it during that week.\n</generation_context>\n`;
   })();
 
+  // The prompt is assembled as labelled chunks that partition it exactly, so the breakdown
+  // accounts for every character rather than for the inputs alone. `framing` is the XML wrappers,
+  // rules and generation context that hold the rest together.
+  const chunks: Array<[keyof PromptSectionSizes, string]> = [
+    ["template", promptTemplate],
+    ["framing", "\n\n---\n\n<coach_persona>\n"],
+    ["persona", coachPersona],
+    ["framing", "\n</coach_persona>\n\n---\n\n<engineer_profile>\n"],
+    ["profile", profileContent],
+    ["framing", "\n</engineer_profile>\n\n---\n\n<work_context>\n"],
+    ["context", trimmedWorkContext],
+    ["framing", "\n</work_context>\n\n---\n\n<impact_log>\n"],
+    ["impact", impactLogContent],
+    ["framing", "\n</impact_log>\n\n---\n\n<current_memory>\n"],
+    ["memory", memoryContent],
+    ["framing", "\n</current_memory>\n\n---\n\n<previous_brag_books>\n"],
+    ["priorBrags", trimmedBragBooks],
+    ["framing", "\n</previous_brag_books>\n\n---\n\n<focus_doc>\n"],
+    ["focus", focusDocContent],
+    ["framing", "\n</focus_doc>\n\n---\n\n<focus_history>\n"],
+    ["focus", trimmedFocusHistory],
+    ["framing", "\n</focus_history>\n\n---\n\n<career_context>\n"],
+    ["career", careerContext],
+    ["framing", `\n</career_context>\n${reviewProximitySection}\n`],
+    ["focus", openFocusSection],
+    ["framing", "\n"],
+    ["notes", vaultNotesSection],
+    ["framing", `\n---\n${generationContext}\n<this_weeks_work_log>\n`],
+    ["worklog", workLogContent],
+    ["framing", "\n</this_weeks_work_log>\n\n---\n\nReturn the object described by the schema. The brag book markdown goes in bragBookMarkdown."],
+  ];
+
+  const prompt = chunks.map(([, text]) => text).join("");
+
   const sections: PromptSectionSizes = {
-    template: promptTemplate.length,
-    persona: coachPersona.length,
-    profile: profileContent.length,
-    context: trimmedWorkContext.length,
-    impact: impactLogContent.length,
-    memory: memoryContent.length,
-    priorBrags: trimmedBragBooks.length,
-    focus: focusDocContent.length + trimmedFocusHistory.length + openFocusSection.length,
-    career: careerContext.length,
-    notes: vaultNotesSection.length,
-    worklog: workLogContent.length,
+    template: 0, framing: 0, persona: 0, profile: 0, context: 0, impact: 0,
+    memory: 0, priorBrags: 0, focus: 0, career: 0, notes: 0, worklog: 0,
   };
-
-  const prompt = `${promptTemplate}
-
----
-
-<coach_persona>
-${coachPersona}
-</coach_persona>
-
----
-
-<engineer_profile>
-${profileContent}
-</engineer_profile>
-
----
-
-<work_context>
-${trimmedWorkContext}
-</work_context>
-
----
-
-<impact_log>
-${impactLogContent}
-</impact_log>
-
----
-
-<current_memory>
-${memoryContent}
-</current_memory>
-
----
-
-<previous_brag_books>
-${trimmedBragBooks}
-</previous_brag_books>
-
----
-
-<focus_doc>
-${focusDocContent}
-</focus_doc>
-
----
-
-<focus_history>
-${trimmedFocusHistory}
-</focus_history>
-
----
-
-<career_context>
-${careerContext}
-</career_context>
-${reviewProximitySection}
-${openFocusSection}
-${vaultNotesSection}
----
-${generationContext}
-<this_weeks_work_log>
-${workLogContent}
-</this_weeks_work_log>
-
----
-
-Return the object described by the schema. The brag book markdown goes in bragBookMarkdown.`;
+  for (const [name, text] of chunks) sections[name] += text.length;
 
   return { prompt, sections };
 }

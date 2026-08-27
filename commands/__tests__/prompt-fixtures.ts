@@ -135,13 +135,26 @@ export const focusDocContent = [
   lines(8, (i) => `- Current P1 item ${i}`),
 ].join("\n");
 
+/**
+ * Two archived focus docs of the shape a person actually keeps: a page each, with most of the
+ * open items repeated word for word between versions. That repetition is the stale-item signal
+ * the coach is asked to spot, so it has to survive the trim.
+ */
+const carriedItems = (prefix: string) =>
+  lines(12, (i) => `- ${prefix} item ${i}, still open and unchanged since the version before`);
+
 export const focusHistoryContent = [
   "### Focus Doc archived 2026-03-01",
   "",
   "## P0 - Own & Deliver",
   "",
-  lines(6, (i) => `- [x] Closed P0 item ${i} from the previous version`),
-  lines(110, (i) => `- Still-open item ${i}, which the current focus doc already carries in full, word for word, unchanged`),
+  lines(4, (i) => `- [x] Closed P0 item ${i} from the previous version`),
+  carriedItems("P0"),
+  "",
+  "## P1 - Influence & Shape",
+  "",
+  carriedItems("P1"),
+  "- Only in the March version, added late and dropped without a word",
   "",
   "---",
   "",
@@ -149,8 +162,12 @@ export const focusHistoryContent = [
   "",
   "## P0 - Own & Deliver",
   "",
-  lines(6, (i) => `- ~~Dropped item ${i}~~`),
-  lines(110, (i) => `- Another still-open item ${i}, duplicated word for word from the current focus doc, unchanged`),
+  lines(4, (i) => `- ~~Dropped item ${i}~~`),
+  carriedItems("P0"),
+  "",
+  "## P1 - Influence & Shape",
+  "",
+  carriedItems("P1"),
 ].join("\n");
 
 export const memoryContent = ["# Memory", "", "## Core Team", "", "| Date | Item | Category | Notes |", "|---|---|---|---|",
