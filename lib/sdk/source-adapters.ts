@@ -28,6 +28,7 @@ import {
   PAYLOAD_TEXT,
   PAYLOAD_TO,
   emptyBatch,
+  markIncomplete,
   type Source,
   type SourceBatch,
   type SourceContext,
@@ -51,8 +52,15 @@ const CONFLUENCE_PAGE_EXPAND = "space,history,history.lastUpdated,history.create
 /** The comment CQL asks for `container`; `history` is what carries the comment's own date. */
 const CONFLUENCE_COMMENT_EXPAND = "container,history";
 
-/** A stop on reading one pull request's reviews, so a runaway page count cannot spin. */
-const GITHUB_REVIEW_PAGES = 20;
+/**
+ * A backstop on reading one pull request's conversation.
+ *
+ * Both of these endpoints are served oldest first, so stopping early hides the newest —
+ * exactly the ones a week is about. The walk normally ends when a page comes back short;
+ * this is only here so a pathological thread cannot spin, and reaching it is reported as
+ * an incomplete read so the coverage it did not earn is not recorded.
+ */
+const GITHUB_PAGE_LIMIT = 200;
 
 /**
  * A stop on walking a page's version history.
@@ -141,6 +149,18 @@ interface ConfluenceCommentDetail {
 
 /** A page with its version number, which is the system's own id for a version event. */
 type ConfluencePageDetail = ConfluencePage & { version?: { number?: number } };
+
+/**
+ * A read of a page's version history.
+ *
+ * `complete` is the part that matters to the caller: a walk that gave up halfway looks
+ * exactly like a page nobody else edited, and treating the two the same is how a user's
+ * edit on the page that would not load gets dropped and never asked for again.
+ */
+interface VersionHistory {
+  versions: ConfluenceVersion[];
+  complete: boolean;
+}
 
 /** One entry in a page's version history. */
 interface ConfluenceVersion {
@@ -275,6 +295,19 @@ function stateOf(ctx: SourceContext): SourceState {
 /** Record a soft failure in both places: the batch the ledger reads, and the live run. */
 function warn(batch: SourceBatch, ctx: SourceContext, message: string): void {
   batch.warnings.push(message);
+  ctx.onWarning?.(message);
+}
+
+/**
+ * A soft failure that cost us data.
+ *
+ * The difference from `warn` is what the ledger does next: an incomplete answer must not
+ * be recorded as coverage, or the part that failed to load is never asked for again. Use
+ * this whenever a page would not come back or a walk stopped short; use `warn` when the
+ * answer is complete and merely disappointing.
+ */
+function partial(batch: SourceBatch, ctx: SourceContext, message: string): void {
+  markIncomplete(batch, message);
   ctx.onWarning?.(message);
 }
 
@@ -421,7 +454,7 @@ export function jiraSource(now: Clock = () => new Date()): Source {
         if (page.isLast) break;
       }
     } catch (err) {
-      warn(batch, ctx, `Could not read the rest of ${issue.key}'s history, some changes will be missing: ${String(err)}`);
+      partial(batch, ctx, `Could not read the rest of ${issue.key}'s history, some changes will be missing: ${String(err)}`);
     }
     return histories;
   }
@@ -452,7 +485,7 @@ export function jiraSource(now: Clock = () => new Date()): Source {
         comments.push(...page.comments);
       }
     } catch (err) {
-      warn(batch, ctx, `Could not read the rest of ${issue.key}'s comments, some will be missing: ${String(err)}`);
+      partial(batch, ctx, `Could not read the rest of ${issue.key}'s comments, some will be missing: ${String(err)}`);
     }
     return comments;
   }
@@ -656,10 +689,11 @@ export function confluenceSource(now: Clock = () => new Date()): Source {
    * between two runs would report one edit, on the day of the last one, and the three
    * weeks the other edits belong to would never hear about them.
    */
-  async function versionsOf(pageId: string, coveredThrough: Date, ctx: SourceContext, batch: SourceBatch): Promise<ConfluenceVersion[]> {
+  async function versionsOf(pageId: string, coveredThrough: Date, ctx: SourceContext, batch: SourceBatch): Promise<VersionHistory> {
     const versions: ConfluenceVersion[] = [];
     let path: string | undefined = `/wiki/api/v2/pages/${pageId}/versions?limit=50&sort=-modified-date`;
     let page = 0;
+    let complete = false;
 
     try {
       // Newest first, so the walk ends as soon as it reaches something the watermark
@@ -668,8 +702,8 @@ export function confluenceSource(now: Clock = () => new Date()): Source {
       // asked for again.
       while (path) {
         if (page++ >= CONFLUENCE_VERSION_PAGES) {
-          warn(batch, ctx, `Confluence page ${pageId} has more history than one run will walk; edits older than version ${versions[versions.length - 1]?.number ?? "?"} were not read.`);
-          break;
+          partial(batch, ctx, `Confluence page ${pageId} has more history than one run will walk; edits older than version ${versions[versions.length - 1]?.number ?? "?"} were not read.`);
+          return { versions, complete: false };
         }
         const res = await fetch(`${ctx.config.atlassian.url}${path}`, { headers: headersOf(ctx).atlassian });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -680,13 +714,19 @@ export function confluenceSource(now: Clock = () => new Date()): Source {
           const at = instant(version.createdAt);
           return at !== undefined && !after(at, coveredThrough);
         });
-        if (reachedTheKnown || parsed.results.length === 0) break;
+        if (reachedTheKnown || parsed.results.length === 0) {
+          complete = true;
+          break;
+        }
         path = parsed._links?.next;
       }
+      // Ran out of pages rather than out of interest: the whole history was read.
+      if (!path) complete = true;
     } catch (err) {
-      warn(batch, ctx, `Could not read the version history of Confluence page ${pageId}, some edits will be missing: ${String(err)}`);
+      partial(batch, ctx, `Could not read the version history of Confluence page ${pageId}, some edits will be missing: ${String(err)}`);
+      return { versions, complete: false };
     }
-    return versions;
+    return { versions, complete };
   }
 
   /** Comments the user wrote, as events against the page they hang off. */
@@ -703,7 +743,7 @@ export function confluenceSource(now: Clock = () => new Date()): Source {
     try {
       comments = await searchConfluence<ConfluenceCommentDetail>(ctx.config, headersOf(ctx), cql, CONFLUENCE_COMMENT_EXPAND);
     } catch (err) {
-      warn(batch, ctx, `Confluence comment search failed, comments will be missing: ${String(err)}`);
+      partial(batch, ctx, `Confluence comment search failed, comments will be missing: ${String(err)}`);
       return;
     }
 
@@ -777,8 +817,8 @@ export function confluenceSource(now: Clock = () => new Date()): Source {
         // Every edit made during the week, not the state the page happens to be in now.
         // A page edited three times in one week has three things to say about it, and the
         // search only ever reports the last of them.
-        const versions = await versionsOf(page.id, window.start, ctx, batch);
-        for (const version of versions) {
+        const history = await versionsOf(page.id, window.start, ctx, batch);
+        for (const version of history.versions) {
           if (version.authorId !== accountId) continue;
           const at = instant(version.createdAt);
           if (!at || !inWindow(at, window)) continue;
@@ -793,10 +833,11 @@ export function confluenceSource(now: Clock = () => new Date()): Source {
         }
 
         if (batch.events.length === eventsBefore) {
-          // The history answered and none of it was this user's work this week, so the
-          // page was merely alive while the week went by.
+          // The history answered *in full* and none of it was this user's work this week,
+          // so the page was merely alive while the week went by. A half-read history is
+          // not that answer: the edit we are looking for may be on the page that failed.
           const updated = instant(page.history?.lastUpdated?.when);
-          if (versions.length > 0 || (updated && !inWindow(updated, window))) {
+          if (history.complete || (updated && !inWindow(updated, window))) {
             batch.snapshots.pop();
             seen.delete(page.id);
             continue;
@@ -848,7 +889,7 @@ export function confluenceSource(now: Clock = () => new Date()): Source {
 
         // Every version made since the watermark, each dated when it was made, rather
         // than only the newest one dated when the page last moved.
-        const versions = await versionsOf(page.id, since, ctx, batch);
+        const { versions } = await versionsOf(page.id, since, ctx, batch);
         for (const version of versions) {
           // A page the user once contributed to keeps matching the contributor search,
           // so most of what comes back may be somebody else's editing.
@@ -961,12 +1002,12 @@ export function githubSource(now: Clock = () => new Date()): Source {
     try {
       // Paged. GitHub sends thirty by default, and a long review conversation is exactly
       // the kind of week worth writing about.
-      for (let page = 1; page <= GITHUB_REVIEW_PAGES; page++) {
+      for (let page = 1; page <= GITHUB_PAGE_LIMIT; page++) {
         const url = `https://api.github.com/repos/${repo}/pulls/${number}/reviews?per_page=100&page=${page}`;
         const { status, body } = await conditionalGet(url, ctx, opts.conditional);
         if (status === 304) return;
         if (status !== 200) {
-          warn(batch, ctx, `Could not read reviews for ${repo}#${number}, they will be missing: HTTP ${status}`);
+          partial(batch, ctx, `Could not read reviews for ${repo}#${number}, they will be missing: HTTP ${status}`);
           return;
         }
         // SAFETY: the reviews endpoint returns an array of reviews; every field this
@@ -990,9 +1031,9 @@ export function githubSource(now: Clock = () => new Date()): Source {
 
         if (reviews.length < 100) return;
       }
-      warn(batch, ctx, `${repo}#${number} has more reviews than one run will read; the oldest of them are missing.`);
+      partial(batch, ctx, `${repo}#${number} has more reviews than one run will read; the newest of them are missing, because GitHub serves this list oldest first.`);
     } catch (err) {
-      warn(batch, ctx, `Could not read reviews for ${repo}#${number}, they will be missing: ${String(err)}`);
+      partial(batch, ctx, `Could not read reviews for ${repo}#${number}, they will be missing: ${String(err)}`);
     }
   }
 
@@ -1012,12 +1053,16 @@ export function githubSource(now: Clock = () => new Date()): Source {
     opts: { conditional: Date | false; keep: (at: Instant) => boolean },
   ): Promise<void> {
     try {
-      for (let page = 1; page <= GITHUB_REVIEW_PAGES; page++) {
-        const url = `https://api.github.com/repos/${repo}/issues/${number}/comments?per_page=100&page=${page}`;
+      // `since` is GitHub's own filter on this endpoint. Without it a delta pages through
+      // years of an old thread to reach the comment made yesterday, and gives up before
+      // it gets there.
+      const from = opts.conditional ? `&since=${opts.conditional.toISOString()}` : "";
+      for (let page = 1; page <= GITHUB_PAGE_LIMIT; page++) {
+        const url = `https://api.github.com/repos/${repo}/issues/${number}/comments?per_page=100&page=${page}${from}`;
         const { status, body } = await conditionalGet(url, ctx, opts.conditional);
         if (status === 304) return;
         if (status !== 200) {
-          warn(batch, ctx, `Could not read comments on ${repo}#${number}, they will be missing: HTTP ${status}`);
+          partial(batch, ctx, `Could not read comments on ${repo}#${number}, they will be missing: HTTP ${status}`);
           return;
         }
         // SAFETY: the issue-comments endpoint returns an array of comments; every field
@@ -1041,9 +1086,9 @@ export function githubSource(now: Clock = () => new Date()): Source {
 
         if (comments.length < 100) return;
       }
-      warn(batch, ctx, `${repo}#${number} has more comments than one run will read; the oldest of them are missing.`);
+      partial(batch, ctx, `${repo}#${number} has more comments than one run will read; the newest of them are missing, because GitHub serves this list oldest first.`);
     } catch (err) {
-      warn(batch, ctx, `Could not read comments on ${repo}#${number}, they will be missing: ${String(err)}`);
+      partial(batch, ctx, `Could not read comments on ${repo}#${number}, they will be missing: ${String(err)}`);
     }
   }
 
@@ -1090,7 +1135,7 @@ export function githubSource(now: Clock = () => new Date()): Source {
           const found = await fetchGitHubPRs(headersOf(ctx), `type:pr ${role}:${username} ${orgFilter} created:<=${endDate} updated:>=${startDate}`, "updated");
           for (const pr of found) others.set(pr.html_url, pr);
         } catch (err) {
-          warn(batch, ctx, `A GitHub ${role} search failed, so some of what you did on other people's pull requests will be missing from this window: ${String(err)}`);
+          partial(batch, ctx, `A GitHub ${role} search failed, so some of what you did on other people's pull requests will be missing from this window: ${String(err)}`);
         }
       }
 
@@ -1111,10 +1156,18 @@ export function githubSource(now: Clock = () => new Date()): Source {
         if (!merged && closed && inWindow(closed, window)) {
           batch.events.push({ source: "github", kind: EVENT_KINDS.closed, itemId: pr.html_url, at: closed.iso, payload: {} });
         }
+
+        // Answering review feedback on your own pull request is most of what happens on
+        // one, and it happens under the same conversation as everyone else's comments.
+        // Skipping this because the PR was already snapshotted lost every reply the user
+        // made to their own reviewers.
+        await commentEvents(repoPathOf(pr), pr.number, pr.html_url, ctx, batch, { conditional: false, keep: () => true });
       }
 
       for (const pr of others.values()) {
-        // Own PRs came back from the authored search already, and you don't review yourself.
+        // Own PRs came back from the authored search already, and you don't review
+        // yourself — but their conversation was already read above, so only the snapshot
+        // and the review fetch are skipped here.
         if (authoredUrls.has(pr.html_url)) continue;
         batch.snapshots.push({ id: pr.html_url, firstSeenAt: spottedAt, payload: githubPayload(pr) });
         // No window filter on either: a review and a comment each carry their own date,
@@ -1149,7 +1202,7 @@ export function githubSource(now: Clock = () => new Date()): Source {
         try {
           discovered = await fetchGitHubPRs(headersOf(ctx), `${query} ${orgFilter} updated:>=${isoDate(since)}`, "updated");
         } catch (err) {
-          warn(batch, ctx, `A GitHub search failed, so ${missing} will be missing: ${String(err)}`);
+          partial(batch, ctx, `A GitHub search failed, so ${missing} will be missing: ${String(err)}`);
           continue;
         }
 
@@ -1185,7 +1238,7 @@ export function githubSource(now: Clock = () => new Date()): Source {
           const { status, body } = await conditionalGet(prUrl, ctx, since);
           if (status === 304) continue;
           if (status !== 200) {
-            warn(batch, ctx, `Could not read ${repo}#${number}, its merges and closures will be missing: HTTP ${status}`);
+            partial(batch, ctx, `Could not read ${repo}#${number}, its merges and closures will be missing: HTTP ${status}`);
             continue;
           }
           // SAFETY: the pull request endpoint returns one pull request. Both fields read
@@ -1203,7 +1256,7 @@ export function githubSource(now: Clock = () => new Date()): Source {
             batch.events.push({ source: "github", kind: EVENT_KINDS.closed, itemId, at: closed.iso, payload: {} });
           }
         } catch (err) {
-          warn(batch, ctx, `Could not read ${repo}#${number}, its merges and closures will be missing: ${String(err)}`);
+          partial(batch, ctx, `Could not read ${repo}#${number}, its merges and closures will be missing: ${String(err)}`);
         }
       }
 

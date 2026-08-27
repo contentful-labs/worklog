@@ -144,8 +144,17 @@ which weeks actually changed.
 **Known limits worth not rediscovering**: Jira has no comment-author search, so comment
 discovery reaches only tickets the user is assignee or reporter of, or that the ledger
 already tracks. GitHub's issue search describes a merged pull request as closed unless
-you read `pull_request.merged_at`, and Confluence's contributor search keeps returning a
-page long after the user's own last edit, so versions have to be filtered by `authorId`.
+you read `pull_request.merged_at`; its review and issue-comment lists are served oldest
+first, so a walk that stops early hides the newest; and Confluence's contributor search
+keeps returning a page long after the user's own last edit, so versions have to be
+filtered by `authorId`.
+
+A week is written to the vault and then marked written in the cache, in that order, with
+nothing between the two. A crash in that gap leaves the week written and unmarked, so the
+next run offers its events to the model again. The consequence is bounded: the
+preservation gate means a regeneration can only add to a week's entry, never take from
+it, so the worst case is an achievement recorded twice — never one lost. Closing the gap
+entirely would need a transaction log, which is not worth its weight for that.
 
 **Research tools**: `lib/ai-tools.ts` defines six tools (Jira, Confluence, vault read/search) once, then adapts them to the Vercel AI SDK for OpenAI and to an in-process MCP server for the Claude Agent SDK. Both providers see the same tool names, which `prompts/weekly-brag-prompt.md` refers to directly.
 

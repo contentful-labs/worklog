@@ -74,6 +74,15 @@ export interface SourceBatch {
   events: SourceEvent[];
   /** Fetches that failed softly. The run continues, and the user is told. */
   warnings: string[];
+  /**
+   * Set when the source knows it did not see everything it was asked about.
+   *
+   * A page of a history that would not load, a walk that hit its own safety limit: the
+   * events that did come back are still worth keeping, but the window they came from
+   * must not be recorded as read, or the part that was missed is never asked for again.
+   * Absent means the answer is complete, which is what every ordinary fetch returns.
+   */
+  incomplete?: boolean;
 }
 
 /**
@@ -168,12 +177,24 @@ export function emptyBatch(): SourceBatch {
   return { snapshots: [], events: [], warnings: [] };
 }
 
+/**
+ * Record that this answer is missing something, and say what.
+ *
+ * Both halves matter: the warning is for the person, and the flag is what stops the
+ * ledger from writing down that the window was covered.
+ */
+export function markIncomplete(batch: SourceBatch, why: string): void {
+  batch.incomplete = true;
+  batch.warnings.push(why);
+}
+
 /** Fold several batches into one, in the order given. */
 export function mergeBatches(batches: readonly SourceBatch[]): SourceBatch {
   return {
     snapshots: batches.flatMap((batch) => batch.snapshots),
     events: batches.flatMap((batch) => batch.events),
     warnings: batches.flatMap((batch) => batch.warnings),
+    incomplete: batches.some((batch) => batch.incomplete) || undefined,
   };
 }
 

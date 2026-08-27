@@ -757,27 +757,43 @@ export async function collectIntoLedger(
     const windowed: string[] = [];
     for (const week of weeks) {
       if (ledger.hasWindow(source.name, week.weekId)) continue;
-      file(await source.fetchWindow(week.window, ctx));
+      const batch = await source.fetchWindow(week.window, ctx);
+      file(batch);
+
+      // Whatever came back is kept either way; what an incomplete answer must not buy is
+      // the right to stop asking. A window left unmarked costs one repeated first fetch
+      // next time, and marking it would cost the part that did not load, for ever.
+      if (batch.incomplete) {
+        warnings.push(`${source.name} did not finish reading ${week.weekId}, so it will be asked again from the start next time.`);
+        continue;
+      }
+
       ledger.markWindow(source.name, week.weekId);
       // A whole window came back, so this week is read up to the moment it was asked.
       ledger.setWatermark(source.name, week.weekId, now);
       windowed.push(week.weekId);
     }
 
-    const delta = weeks.filter((week) => !windowed.includes(week.weekId));
+    const delta = weeks.filter((week) => !windowed.includes(week.weekId) && ledger.hasWindow(source.name, week.weekId));
     if (delta.length > 0) {
       const since = deltaStart(ledger, source.name, delta);
       const itemIds = itemsInWeeks(ledger, source.name, delta);
-      file(await source.fetchSince(since, itemIds, ctx));
+      const batch = await source.fetchSince(since, itemIds, ctx);
+      file(batch);
 
       // The query covered everything from `since` onwards for all of these weeks, so
       // each of them is read at least that far, and further when something later than
       // `since` actually came back. Never past the moment the query was asked, though:
       // one item with a clock-skewed future date would otherwise carry the watermark
       // into next week and take everything committed in between with it. And never to
-      // the clock, so a run that sees nothing new has nothing to write.
-      const read = clamp(since, newest, now);
-      for (const week of delta) ledger.setWatermark(source.name, week.weekId, read);
+      // the clock, so a run that sees nothing new has nothing to write. And not at all
+      // when the source says it did not finish: coverage it did not have is not coverage.
+      if (batch.incomplete) {
+        warnings.push(`${source.name} did not finish answering, so the weeks it was asked about keep their reading position and will be asked again.`);
+      } else {
+        const read = clamp(since, newest, now);
+        for (const week of delta) ledger.setWatermark(source.name, week.weekId, read);
+      }
     }
 
     outcome.tookMs = Math.round(performance.now() - startedAt);

@@ -239,10 +239,15 @@ export async function runRefresh(opts: RefreshOptions): Promise<void> {
       const bragBookPath = `${paths.vault}/${week} Brag Book.md`;
       const existingBragBook = existsSync(bragBookPath) ? await Bun.file(bragBookPath).text() : "";
 
-      spinner.start(`${week}: writing up what is new...`);
+      p.log.step(`${week}: writing up what is new`);
       // Neither document is written until the week validates, and then the brag book
       // goes first. A refresh that fails mid-generation leaves the week exactly as it
       // was rather than with a new work log and last month's entry.
+      //
+      // This is deliberately the last statement in here. Between the vault write inside
+      // and the marker `refreshWeeks` saves immediately after, anything at all — even a
+      // line of output — is time in which a crash would leave the week written and
+      // unmarked, and the next run would send its events to the model again.
       await generateWeek({
         weekInfo,
         wid: week,
@@ -257,7 +262,6 @@ export async function runRefresh(opts: RefreshOptions): Promise<void> {
         // added to, never replaced.
         amend: existingBragBook ? { existingBragBook, newMaterial } : undefined,
       });
-      spinner.stop(`${week}: updated`);
     },
   });
 
