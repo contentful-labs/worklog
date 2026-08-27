@@ -420,6 +420,12 @@ async function promptForContext(weekNumber: number, year: number, contextFilePat
 
 // --- Credential resolution ---
 
+/** The tokens a run holds. Empty for a system this run was not asked to read. */
+export interface EnvTokens {
+  apiToken: string;
+  githubToken: string;
+}
+
 /** Which systems a run is actually going to talk to. */
 export interface CredentialsNeeded {
   atlassian: boolean;
@@ -433,7 +439,7 @@ export interface CredentialsNeeded {
  * another: `worklog refresh --source github` used to stop because there was no Atlassian
  * token, which is a token it was never going to use.
  */
-export function getEnvTokens(needed: CredentialsNeeded = { atlassian: true, github: true }): { apiToken: string; githubToken: string } {
+export function getEnvTokens(needed: CredentialsNeeded = { atlassian: true, github: true }): EnvTokens {
   const apiToken = process.env.ATLASSIAN_API_TOKEN;
   if (needed.atlassian && !apiToken) {
     p.log.error("ATLASSIAN_API_TOKEN not set. Run `worklog init` to set up credentials.\nOr generate manually at: https://id.atlassian.com/manage-profile/security/api-tokens");

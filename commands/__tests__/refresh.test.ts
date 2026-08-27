@@ -4,7 +4,9 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-import { refreshWeeks, weeksInRange, type WeekToWrite } from "../refresh";
+import { credentialsFor, refreshWeeks, weeksInRange, type WeekToWrite } from "../refresh";
+import { allSources } from "../../lib/sdk/source-adapters";
+import { getEnvTokens } from "../worklog";
 import { parseSince, parseWeek } from "../../lib/sdk/week-utils";
 import { openLedger } from "../../lib/sdk/ledger";
 import type { Source, SourceBatch, SourceContext } from "../../lib/sdk/sources";
@@ -417,5 +419,126 @@ describe("a run that fails partway through", () => {
     const reopened = await openLedger(cache);
     expect(reopened.unwrittenEvents("2026-W33")).toEqual([]);
     expect(reopened.pendingWeeks()).toEqual(["2026-W36"]);
+  });
+});
+
+describe("a week a source did not finish reading", () => {
+  const partialBatch: SourceBatch = {
+    snapshots: [{
+      id: "TEAM-1234", firstSeenAt: "2026-09-01T09:00:00.000Z",
+      payload: { title: "Search Revamp indexer", url: "https://example.atlassian.net/browse/TEAM-1234" },
+    }],
+    events: [{
+      source: "jira", kind: "comment", itemId: "TEAM-1234",
+      at: "2026-09-01T09:00:00.000Z", payload: { text: "half the story" }, id: "c-1",
+    }],
+    warnings: ["page two would not load"],
+    incomplete: true,
+  };
+
+  function unfinishedSource(name: string, batch: SourceBatch, calls: string[] = []): Source {
+    return {
+      name,
+      isAvailable: async () => ({ ok: true }),
+      fetchWindow: async () => {
+        calls.push(`${name}:window`);
+        return batch;
+      },
+      fetchSince: async () => {
+        calls.push(`${name}:since`);
+        return batch;
+      },
+    };
+  }
+
+  beforeEach(async () => {
+    await mkdir(vault, { recursive: true });
+  });
+
+  it("is not written up from the half of it that arrived", async () => {
+    // The trigger: page one of a history comes back, page two fails. The events that did
+    // arrive are worth keeping, but writing the week up from them puts a partial account
+    // in the vault and marks it written — so the missing part is old news when it lands.
+    const run = await runOnce(unfinishedSource("jira", partialBatch));
+
+    expect(run.written).toEqual([]);
+    expect(run.unfinished).toEqual(["2026-W36"]);
+    expect(run.rows).toEqual([{ weekId: "2026-W36", regenerated: false }]);
+    // Kept, so the next run matches rather than duplicates it.
+    const ledger = await openLedger(cache);
+    expect(ledger.eventsForWeek("2026-W36")).toHaveLength(1);
+    expect(ledger.pendingWeeks()).toEqual(["2026-W36"]);
+  });
+
+  it("is written once the source finishes", async () => {
+    await runOnce(unfinishedSource("jira", partialBatch));
+
+    const whole: SourceBatch = { ...partialBatch, warnings: [], incomplete: undefined };
+    const second = await runOnce(unfinishedSource("jira", whole));
+
+    expect(second.unfinished).toEqual([]);
+    expect(second.written.map((w) => w.weekId)).toEqual(["2026-W36"]);
+  });
+
+  it("holds back a delta's weeks too, since which one lost something is unknown", async () => {
+    // First a clean window fetch so the week is collected, then an unfinished delta.
+    const augustWeek = week("2026-W33", "2026-08-10", "2026-08-16");
+    const clean: SourceBatch = { snapshots: [], events: [], warnings: [] };
+    await runOnce(stubSource("jira", clean), [augustWeek, septemberWeek]);
+
+    const run = await runOnce(unfinishedSource("jira", partialBatch), [augustWeek, septemberWeek]);
+
+    expect(run.written).toEqual([]);
+    expect(run.unfinished).toEqual(["2026-W36"]);
+  });
+});
+
+describe("which credentials a refresh actually needs", () => {
+  it("asks for Atlassian only when an Atlassian source is selected", () => {
+    expect(credentialsFor(allSources())).toEqual({ atlassian: true, github: true });
+    expect(credentialsFor(allSources().filter((s) => s.name === "github")))
+      .toEqual({ atlassian: false, github: true });
+    expect(credentialsFor(allSources().filter((s) => s.name === "jira")))
+      .toEqual({ atlassian: true, github: false });
+    expect(credentialsFor(allSources().filter((s) => s.name === "confluence")))
+      .toEqual({ atlassian: true, github: false });
+  });
+
+  it("does not stop a GitHub-only run for a missing Atlassian token", () => {
+    // The trigger: only GITHUB_TOKEN is set, and `refresh --source github` used to exit
+    // for want of a token it was never going to use.
+    const previous = process.env.ATLASSIAN_API_TOKEN;
+    const previousGitHub = process.env.GITHUB_TOKEN;
+    try {
+      delete process.env.ATLASSIAN_API_TOKEN;
+      process.env.GITHUB_TOKEN = "test-github-token";
+
+      const tokens = getEnvTokens({ atlassian: false, github: true });
+      expect(tokens.githubToken).toBe("test-github-token");
+      expect(tokens.apiToken).toBe("");
+    } finally {
+      if (previous === undefined) delete process.env.ATLASSIAN_API_TOKEN;
+      else process.env.ATLASSIAN_API_TOKEN = previous;
+      if (previousGitHub === undefined) delete process.env.GITHUB_TOKEN;
+      else process.env.GITHUB_TOKEN = previousGitHub;
+    }
+  });
+
+  it("does not stop a Jira-only run for a missing GitHub token", () => {
+    const previous = process.env.GITHUB_TOKEN;
+    const previousAtlassian = process.env.ATLASSIAN_API_TOKEN;
+    try {
+      delete process.env.GITHUB_TOKEN;
+      process.env.ATLASSIAN_API_TOKEN = "test-atlassian-token";
+
+      const tokens = getEnvTokens({ atlassian: true, github: false });
+      expect(tokens.apiToken).toBe("test-atlassian-token");
+      expect(tokens.githubToken).toBe("");
+    } finally {
+      if (previous === undefined) delete process.env.GITHUB_TOKEN;
+      else process.env.GITHUB_TOKEN = previous;
+      if (previousAtlassian === undefined) delete process.env.ATLASSIAN_API_TOKEN;
+      else process.env.ATLASSIAN_API_TOKEN = previousAtlassian;
+    }
   });
 });

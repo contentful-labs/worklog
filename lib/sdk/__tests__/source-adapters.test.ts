@@ -1420,3 +1420,134 @@ describe("a read that did not finish", () => {
     expect(batch.incomplete).toBe(true);
   });
 });
+
+describe("a page that failed after an earlier page succeeded", () => {
+  const since = new Date("2026-03-06T00:00:00Z");
+  const scope = `|since:${since.toISOString()}`;
+  const fullPage = Array.from({ length: 100 }, (_, i) => ({
+    id: 3000 + i, user: { login: USERNAME }, state: "COMMENTED", body: "n",
+    submitted_at: "2026-03-07T09:00:00Z",
+  }));
+  const onPageTwo = {
+    id: 4001, user: { login: USERNAME }, state: "APPROVED", body: "The last word.",
+    submitted_at: "2026-03-08T09:00:00Z",
+  };
+
+  it("is asked for again even though page one now answers 304", async () => {
+    // The trigger: 101 reviews since the watermark. Page one succeeds and stores its
+    // ETag, page two returns 500, and the batch is marked incomplete so the watermark
+    // holds. On the retry page one answers 304 — and the walk used to stop there, so
+    // page two was never requested again.
+    const asked: string[] = [];
+    let pageTwoWorks = false;
+    server.use(
+      http.get("https://api.github.com/search/issues", () => HttpResponse.json({ total_count: 0, items: [] })),
+      http.get("https://api.github.com/repos/example-org/repo/pulls/42", () => HttpResponse.json(authoredPRDetail)),
+      http.get("https://api.github.com/repos/example-org/repo/pulls/42/reviews", ({ request }) => {
+        const url = new URL(request.url);
+        const page = url.searchParams.get("page") || "";
+        asked.push(page);
+        if (page === "1") {
+          if (request.headers.get("If-None-Match") === '"reviews-p1"') return new HttpResponse(null, { status: 304 });
+          return HttpResponse.json(fullPage, { headers: { ETag: '"reviews-p1"' } });
+        }
+        if (!pageTwoWorks) return HttpResponse.json({ message: "Server error" }, { status: 500 });
+        return HttpResponse.json([onPageTwo]);
+      }),
+    );
+
+    const ctx = makeContext();
+    const first = await githubSource(() => NOW).fetchSince(since, [PR_URL], ctx);
+
+    expect(first.incomplete).toBe(true);
+    expect(asked).toEqual(["1", "2"]);
+    expect(ctx.store.get(`https://api.github.com/repos/example-org/repo/pulls/42/reviews?per_page=100&page=1${scope}`)).toBe('"reviews-p1"');
+
+    asked.length = 0;
+    pageTwoWorks = true;
+    const second = await githubSource(() => NOW).fetchSince(since, [PR_URL], ctx);
+
+    // Page one is free, and the walk carries on to the page that never arrived.
+    expect(asked).toEqual(["1", "2"]);
+    expect(second.events.filter((e) => e.kind === "review").map((e) => e.id)).toContain("4001");
+    expect(second.incomplete).toBeUndefined();
+  });
+
+  it("stops on a 304 only when that page is known to have been the last", async () => {
+    const asked: string[] = [];
+    server.use(
+      http.get("https://api.github.com/search/issues", () => HttpResponse.json({ total_count: 0, items: [] })),
+      http.get("https://api.github.com/repos/example-org/repo/pulls/42", () => HttpResponse.json(authoredPRDetail)),
+      http.get("https://api.github.com/repos/example-org/repo/pulls/42/reviews", ({ request }) => {
+        asked.push(new URL(request.url).searchParams.get("page") || "");
+        if (request.headers.get("If-None-Match") === '"reviews-short"') return new HttpResponse(null, { status: 304 });
+        return HttpResponse.json([onPageTwo], { headers: { ETag: '"reviews-short"' } });
+      }),
+    );
+
+    const ctx = makeContext();
+    await githubSource(() => NOW).fetchSince(since, [PR_URL], ctx);
+    asked.length = 0;
+    await githubSource(() => NOW).fetchSince(since, [PR_URL], ctx);
+
+    // One short page last time means one request this time, not a walk to the cap.
+    expect(asked).toEqual(["1"]);
+  });
+});
+
+describe("a Jira history whose embedded page starts partway through", () => {
+  it("is read from the beginning rather than continued from the wrong place", async () => {
+    // The trigger: Jira reports startAt 100 of 150 and embeds 50 histories. Continuing
+    // at `startAt=50` re-reads what we already have, reaches 150 rows, and never fetches
+    // histories 0-49 — and the batch then looks complete, so the watermark moves past
+    // them for good.
+    const asked: number[] = [];
+    const all = Array.from({ length: 150 }, (_, i) => ({
+      id: `h-${i}`,
+      created: "2026-03-04T10:00:00.000+0000",
+      items: [{ field: "status", fromString: "To Do", toString: `Step ${i}` }],
+    }));
+    const embedded = {
+      ...jiraIssue,
+      fields: { ...jiraIssue.fields, comment: { comments: [] } },
+      changelog: { startAt: 100, total: 150, histories: all.slice(100) },
+    };
+    server.use(
+      http.post(`${BASE_URL}/rest/api/3/search/jql`, () => HttpResponse.json({ issues: [embedded] })),
+      http.get(`${BASE_URL}/rest/api/3/issue/TEAM-1234/changelog`, ({ request }) => {
+        const startAt = Number(new URL(request.url).searchParams.get("startAt") ?? "0");
+        asked.push(startAt);
+        const values = all.slice(startAt, startAt + 100);
+        return HttpResponse.json({ values, startAt, total: all.length, isLast: startAt + values.length >= all.length });
+      }),
+    );
+
+    const batch = await jiraSource(() => NOW).fetchWindow(window, makeContext());
+
+    expect(asked).toEqual([0, 100]);
+    const statuses = batch.events.filter((e) => e.kind === "status");
+    expect(statuses).toHaveLength(150);
+    // The first fifty, which the old continuation skipped entirely.
+    expect(statuses.map((e) => e.id)).toContain("h-0:status");
+    expect(batch.incomplete).toBeUndefined();
+  });
+
+  it("says it did not finish when the walk ends short of the reported total", async () => {
+    const embedded = {
+      ...jiraIssue,
+      fields: { ...jiraIssue.fields, comment: { comments: [] } },
+      changelog: { startAt: 0, total: 150, histories: [{ id: "h-0", created: "2026-03-04T10:00:00.000+0000", items: [] }] },
+    };
+    server.use(
+      http.post(`${BASE_URL}/rest/api/3/search/jql`, () => HttpResponse.json({ issues: [embedded] })),
+      http.get(`${BASE_URL}/rest/api/3/issue/TEAM-1234/changelog`, () =>
+        HttpResponse.json({ values: [{ id: "h-0", created: "2026-03-04T10:00:00.000+0000", items: [] }], startAt: 0, total: 150, isLast: true }),
+      ),
+    );
+
+    const batch = await jiraSource(() => NOW).fetchWindow(window, makeContext());
+
+    expect(batch.incomplete).toBe(true);
+    expect(batch.warnings.some((w) => w.includes("reports 150 changes and only 1 could be read"))).toBe(true);
+  });
+});

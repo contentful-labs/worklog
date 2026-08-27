@@ -473,3 +473,69 @@ describe("what the weekly command accepts on the command line", () => {
     expect(() => command.parse(["--since", "2026-02-31"], { from: "user" })).toThrow(/real date/);
   });
 });
+
+describe("a ledger whose metadata cannot be read", () => {
+  it("stops the run rather than offering every week again", async () => {
+    // The trigger: truncate meta.json and run. Without it the ledger cannot say which
+    // weeks have already been written up, so every stored event looks new — and the
+    // marker saying otherwise cannot be saved either, so it happens again next run.
+    const tmp = mkdtempSync(join(tmpdir(), "worklog-corruptmeta-"));
+    const configHome = join(tmp, "config");
+    const cacheHome = join(tmp, "cache");
+    const vault = join(tmp, "vault");
+    const previousConfigHome = process.env.XDG_CONFIG_HOME;
+    const previousCacheHome = process.env.XDG_CACHE_HOME;
+    const previousAtlassian = process.env.ATLASSIAN_API_TOKEN;
+    const previousGitHub = process.env.GITHUB_TOKEN;
+
+    seedVault(vault);
+    writeConfig(configHome, vault);
+    mkdirSync(join(cacheHome, "worklog", "ledger"), { recursive: true });
+    writeFileSync(join(cacheHome, "worklog", "ledger", "meta.json"), '{"version": 2, "sourc');
+
+    process.env.XDG_CONFIG_HOME = configHome;
+    process.env.XDG_CACHE_HOME = cacheHome;
+    process.env.ATLASSIAN_API_TOKEN = "test-atlassian-token";
+    process.env.GITHUB_TOKEN = "test-github-token";
+
+    vi.stubGlobal("Bun", {
+      write: async (path: string, content: string) => writeFileSync(path, content),
+      file: (path: string) => ({ text: async () => readFileSync(path, "utf8") }),
+    });
+
+    // Only `exit` is stood in for; the rest of `process` stays real, because the modules
+    // under test read their env vars from it as they load.
+    const exited: number[] = [];
+    const exit = vi.spyOn(process, "exit").mockImplementation((code) => {
+      // `process.exit` also accepts a string or nullish; the command only ever passes a
+      // number, and Number() turns anything else into the NaN this test would notice.
+      exited.push(Number(code ?? 0));
+      throw new Error("process.exit");
+    });
+
+    try {
+      vi.resetModules();
+      const { aiQueryStructured } = await import("../../lib/sdk/ai");
+      const { runWorklog } = await import("../worklog");
+
+      await expect(runWorklog({ week: WEEK, noPrompt: true, force: true, verbose: false })).rejects.toThrow("process.exit");
+
+      expect(exited).toEqual([1]);
+      // No AI call, and the week the vault already had is untouched.
+      expect(vi.mocked(aiQueryStructured)).not.toHaveBeenCalled();
+      expect(readFileSync(join(vault, `${WEEK} Brag Book.md`), "utf8")).toBe(EXISTING_BRAG_BOOK);
+      expect(readFileSync(join(vault, `${WEEK} Work Log.md`), "utf8")).toBe(EXISTING_WORK_LOG);
+    } finally {
+      if (previousConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
+      else process.env.XDG_CONFIG_HOME = previousConfigHome;
+      if (previousCacheHome === undefined) delete process.env.XDG_CACHE_HOME;
+      else process.env.XDG_CACHE_HOME = previousCacheHome;
+      if (previousAtlassian === undefined) delete process.env.ATLASSIAN_API_TOKEN;
+      else process.env.ATLASSIAN_API_TOKEN = previousAtlassian;
+      if (previousGitHub === undefined) delete process.env.GITHUB_TOKEN;
+      else process.env.GITHUB_TOKEN = previousGitHub;
+      exit.mockRestore();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
