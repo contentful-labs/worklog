@@ -9,6 +9,7 @@ import {
 } from "../../lib/sdk/vault";
 import type { TeamTimeline } from "../../lib/sdk/vault";
 import { selectOpenFocusItems, summarizeFocusHistory, DEFAULT_INJECT_CAP } from "../../lib/sdk/focus";
+import { DEFAULT_IMPACT_WINDOW_WEEKS } from "../../lib/sdk/vault";
 import {
   config, timeline, weekInfo, focusTrackingContent, previousBragBooks, workContextContent, focusDocContent,
   focusHistoryContent, memoryContent, profileContent, impactLogContent, coachPersona,
@@ -198,7 +199,17 @@ describe("brag book prompt size", () => {
   it("carries a year of impact rows and counts the rest", async () => {
     const { prompt, sections, omissions } = await buildPrompt();
 
-    expect(omissions.impactRowsDropped).toBeGreaterThan(0);
+    // Measured from the week being generated, not from today: regenerating an old week must see
+    // what that week could have seen, so the cutoff moves with `weekInfo`.
+    const cutoff = new Date(weekInfo.startDate.getTime() - DEFAULT_IMPACT_WINDOW_WEEKS * 7 * 86_400_000)
+      .toISOString()
+      .split("T")[0];
+    const olderThanWindow = impactLogContent
+      .split("\n")
+      .filter((line) => line.startsWith("| 2") && line.slice(2, 12) < cutoff).length;
+
+    expect(olderThanWindow).toBeGreaterThan(0);
+    expect(omissions.impactRowsDropped).toBe(olderThanWindow);
     expect(prompt).toContain(`_(${omissions.impactRowsDropped} older entries not shown)_`);
     // The gap analysis is what the coach does with this file.
     expect(prompt).toContain("**Last significant impact:**");

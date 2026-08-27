@@ -968,9 +968,11 @@ describe("dropImpactRowsBefore", () => {
   });
 
   it("leaves a row with no parseable date alone", () => {
-    const odd = impactLog([{ date: "sometime", achievement: "Undated" }]);
+    // A value that sorts below the cutoff as a string, so only the date check can save it.
+    const odd = impactLog([{ date: "1 Mar 2026", achievement: "Undated" }]);
     const { content, dropped } = dropImpactRowsBefore(odd, "2030-01-01");
 
+    expect("1 Mar 2026" < "2030-01-01").toBe(true);
     expect(dropped).toBe(0);
     expect(content).toContain("Undated");
   });
