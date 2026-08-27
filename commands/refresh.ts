@@ -23,15 +23,15 @@ import {
   buildHeaders, getAccountId, getGitHubUsername, type WeekInfo,
 } from "../lib/sdk/data-fetch";
 import {
-  collectIntoLedger, newEvents, openLedger, weekWindow,
+  collectIntoLedger, openLedger, weekWindow,
   type CollectionOutcome, type CollectionWeek, type Ledger,
 } from "../lib/sdk/ledger";
-import { generateEventMarkdown } from "../lib/sdk/markdown";
+import { describeEvents, generateEventMarkdown } from "../lib/sdk/markdown";
 import { allSources } from "../lib/sdk/source-adapters";
-import { sourceContext, type Source, type SourceContext, type SourceEvent } from "../lib/sdk/sources";
+import { sourceContext, type Source, type SourceContext } from "../lib/sdk/sources";
 import { buildVaultPaths, getCurrentTeam, readTeamTimeline } from "../lib/sdk/vault";
 import {
-  formatDuration, getWeekEnd, getWeekNumber, getWeekStart, weekId, weekIdForDate,
+  formatDuration, getWeekEnd, getWeekStart, parseSince, parseWeek, weekIdForDate,
 } from "../lib/sdk/week-utils";
 import { loadConfig } from "../lib/config";
 import { createLogger } from "../lib/sdk/logger";
@@ -112,6 +112,8 @@ export interface RefreshRun {
   outcome: CollectionOutcome;
   /** Weeks that still need writing but fall outside the range this run covered. */
   waiting: string[];
+  /** Weeks in range that were not written because their stored events cannot be read. */
+  skipped: string[];
 }
 
 /**
@@ -131,19 +133,19 @@ export async function refreshWeeks(deps: {
 }): Promise<RefreshRun> {
   const { ledger, sources, weeks, contextFor, now, writeWeek } = deps;
 
-  // What each week held before this run, so the model can be told what is new rather
-  // than handed the whole week again.
-  const before = new Map(weeks.map((week) => [week.weekId, ledger.eventsForWeek(week.weekId)]));
-
+  const asked = new Set(weeks.map((week) => week.weekId));
   const outcome = await collectIntoLedger(ledger, sources, weeks, contextFor, now);
 
   // Everything owed a write, not only what this run happened to find. A delta answers
   // with events from any week, and a week whose events changed while nobody was looking
-  // at it stays owed until it is written: the next run would dedupe those events away
-  // and the vault would keep a stale week for good.
+  // at it stays owed until it is written: comparing against what this run started with
+  // would call those events old, and the model would never hear about them.
   const owed = ledger.pendingWeeks();
-  const inRange = owed.filter((week) => before.has(week));
-  const waiting = owed.filter((week) => !before.has(week));
+  const damaged = new Set(ledger.unreadableWeeks());
+  const inRange = owed.filter((week) => asked.has(week) && !damaged.has(week));
+  const waiting = owed.filter((week) => !asked.has(week));
+  const skipped = owed.filter((week) => asked.has(week) && damaged.has(week));
+
   const rewritten = new Set(inRange);
   const rows: WeekRow[] = weeks.map((week) => ({
     weekId: week.weekId,
@@ -152,23 +154,22 @@ export async function refreshWeeks(deps: {
 
   for (const weekId of inRange) {
     const weekInfo = weekInfoFor(weekId);
-    const events = ledger.eventsForWeek(weekId);
     const workLog = generateEventMarkdown({
       weekInfo,
-      events,
+      events: ledger.eventsForWeek(weekId),
       snapshotFor: (source, itemId) => ledger.snapshot(source, itemId),
       additionalContext: "",
     });
 
-    const added = newEvents(before.get(weekId) ?? [], events);
-    await writeWeek({ weekId, weekInfo, workLog, newMaterial: describeForPrompt(added) });
+    const added = ledger.unwrittenEvents(weekId);
+    await writeWeek({ weekId, weekInfo, workLog, newMaterial: describeEvents(added) });
     // Only now. A week that was not written — because the run stopped, or because the
-    // generation refused — is still owed one on the next run.
+    // generation refused — is still owed one on the next run, with the same material.
     ledger.markWritten(weekId);
   }
 
   await ledger.save();
-  return { rows, outcome, waiting };
+  return { rows, outcome, waiting, skipped };
 }
 
 export async function runRefresh(opts: RefreshOptions): Promise<void> {
@@ -213,7 +214,7 @@ export async function runRefresh(opts: RefreshOptions): Promise<void> {
   spinner.start("Asking each source what has changed...");
 
   let collected = false;
-  const { rows, outcome, waiting } = await refreshWeeks({
+  const { rows, outcome, waiting, skipped } = await refreshWeeks({
     ledger,
     sources,
     weeks,
@@ -258,7 +259,14 @@ export async function runRefresh(opts: RefreshOptions): Promise<void> {
 
   if (!collected) spinner.stop(`Collected from ${sources.length} source(s)`);
 
+  for (const notice of ledger.notices()) p.log.info(notice);
   for (const problem of ledger.problems()) p.log.warn(problem);
+  if (skipped.length > 0) {
+    p.log.warn(
+      `${skipped.length} week(s) have new activity but were not written because their cached events could not all be read: ` +
+      `${skipped.join(", ")}. Fix or delete the files named above and run again.`,
+    );
+  }
   for (const warning of outcome.warnings) p.log.warn(warning);
   if (waiting.length > 0) {
     p.log.warn(
@@ -275,18 +283,6 @@ export async function runRefresh(opts: RefreshOptions): Promise<void> {
 
   printTable(rows, outcome);
   p.outro(regenerated === 0 ? "Up to date" : `${regenerated} week(s) updated`);
-}
-
-/**
- * Events as prose for the prompt.
- *
- * Given only what a run added, this is the material the model has not already been told
- * about: the rest of the week is accounted for in the entry it is being asked to add to.
- */
-function describeForPrompt(events: readonly SourceEvent[]): string {
-  return events
-    .map((event) => `- ${event.at.slice(0, 16).replace("T", " ")} ${event.source} ${event.kind} on ${event.itemId}`)
-    .join("\n");
 }
 
 /** Where to start: the flag, else the current team's start date. */
@@ -323,47 +319,6 @@ function printTable(rows: readonly WeekRow[], outcome: CollectionOutcome): void 
     return `${source} ${formatDuration(result?.tookMs ?? 0)}${result?.unavailable ? " (skipped)" : ""}`;
   });
   p.log.message(`Time per source: ${timings.join(", ")}`);
-}
-
-/**
- * `--since`, if it is a day that exists.
- *
- * The format check is not enough on its own: `2026-02-31` matches it, and `new Date`
- * rolls it forward to March 3 without complaint. Round-tripping the parsed date back to
- * a string is what catches a day that was never on the calendar.
- */
-export function parseSince(value: string): string {
-  const failure = new Error("--since must be a real date in YYYY-MM-DD form, for example 2026-01-31");
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) throw failure;
-
-  const parsed = new Date(`${value}T00:00:00.000Z`);
-  if (Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== value) throw failure;
-  return value;
-}
-
-/**
- * `--week`, if that week exists in that year.
- *
- * Most ISO years have 52 weeks and some have 53, so the bound is the year's own last
- * week rather than a fixed number: asking for 2026-W53 should fail, and 2026-W99 should
- * not quietly become a range in 2027.
- */
-export function parseWeek(value: string): string {
-  const match = /^(\d{4})-W(\d{1,2})$/.exec(value);
-  if (!match) throw new Error("--week must be in YYYY-WNN form, for example 2026-W06");
-
-  const year = Number.parseInt(match[1], 10);
-  const week = Number.parseInt(match[2], 10);
-  const last = weeksInYear(year);
-  if (week < 1 || week > last) {
-    throw new Error(`--week must be between ${year}-W01 and ${weekId(last, year)}; ${value} is not a week of ${year}`);
-  }
-  return weekId(week, year);
-}
-
-/** 52, or 53 in a long year. December 28 is always in the last ISO week of its year. */
-function weeksInYear(year: number): number {
-  return getWeekNumber(new Date(Date.UTC(year, 11, 28)));
 }
 
 export function makeRefreshCommand(): Command {

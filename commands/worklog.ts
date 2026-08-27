@@ -43,6 +43,8 @@ import {
   getWeekStart,
   getWeekEnd,
   formatDuration,
+  parseSince,
+  parseWeek,
 } from "../lib/sdk/week-utils";
 import {
   buildHeaders,
@@ -50,7 +52,7 @@ import {
   getGitHubUsername,
   type WeekInfo,
 } from "../lib/sdk/data-fetch";
-import { generateEventMarkdown } from "../lib/sdk/markdown";
+import { describeEvents, generateEventMarkdown } from "../lib/sdk/markdown";
 import { collectIntoLedger, openLedger, weekWindow } from "../lib/sdk/ledger";
 import { sourceContext } from "../lib/sdk/sources";
 import { allSources } from "../lib/sdk/source-adapters";
@@ -1000,6 +1002,16 @@ export async function runWorklog(opts: {
       if (outcome.unavailable) p.log.warn(`${name} was skipped: ${outcome.unavailable}`);
     }
 
+    // A week whose cached events cannot all be read is a week with pieces missing.
+    // Writing it would turn a damaged cache file, which can be refetched, into a damaged
+    // week, which cannot.
+    if (ledger.unreadableWeeks().includes(wid)) {
+      s.stop(`${wid} skipped`);
+      for (const problem of ledger.problems()) p.log.warn(problem);
+      p.log.warn(`${wid} was not written: its cached events could not all be read. Fix or delete the file named above and run again.`);
+      continue;
+    }
+
     const weekEvents = ledger.eventsForWeek(wid);
     s.stop(`Fetched in ${formatDuration(fetchMs)} (${weekEvents.length} events this week)`);
     log(`Events in ${wid}: ${weekEvents.length}, added this run: ${[...collected.perSource.values()].reduce((sum, outcome) => sum + outcome.addedEvents, 0)}`);
@@ -1015,7 +1027,17 @@ export async function runWorklog(opts: {
     // run destroyed the previous work log before the model had said anything usable.
     log(`Work log built: ${workLogPath} (${markdown.length} chars, not yet written)`);
 
-    const week = await generateWeek({ weekInfo, wid, workLog: markdown, workLogPath, config, paths, timeline, log, spinner: s });
+    // A week that already has an entry is added to, never replaced — whatever brought us
+    // here. `--force` means "generate this week again even though it was fetched", and
+    // has never meant "throw away what the week already says about itself".
+    const bragBookPath = `${paths.vault}/${wid} Brag Book.md`;
+    const existingBragBook = existsSync(bragBookPath) ? await Bun.file(bragBookPath).text() : "";
+    const amend = existingBragBook
+      ? { existingBragBook, newMaterial: describeEvents(ledger.unwrittenEvents(wid)) }
+      : undefined;
+    if (amend) log(`${wid} already has a brag book; adding to it (${amend.newMaterial.split("\n").filter(Boolean).length} new event(s))`);
+
+    const week = await generateWeek({ weekInfo, wid, workLog: markdown, workLogPath, config, paths, timeline, log, spinner: s, amend });
     // The week is on disk, so it is no longer owed a write. Left unsaid, the next
     // refresh would find it still pending and regenerate a week nothing had changed in.
     ledger.markWritten(wid);
@@ -1065,16 +1087,10 @@ export function makeWorklogCommand(): Command {
       if (Number.isNaN(n) || n < 1) throw new Error("--weeks must be a positive number");
       return n;
     })
-    .option("--week <YYYY-WNN>", "Generate a specific week (e.g. 2026-W06)", (v) => {
-      if (!/^\d{4}-W\d{1,2}$/.test(v)) throw new Error("--week must be in YYYY-WNN format (e.g. 2026-W06)");
-      const weekNum = parseInt(v.split("-W")[1], 10);
-      if (weekNum < 1 || weekNum > 53) throw new Error("--week number must be between 1 and 53");
-      return v;
-    })
-    .option("--since <YYYY-MM-DD>", "Generate weeks from this date to now", (v) => {
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(v) || Number.isNaN(new Date(v).getTime())) throw new Error("--since must be a valid YYYY-MM-DD date");
-      return v;
-    })
+    // The same two checks `worklog refresh` makes. Generating the wrong week is the
+    // same mistake whichever command was asked for it.
+    .option("--week <YYYY-WNN>", "Generate a specific week (e.g. 2026-W06)", parseWeek)
+    .option("--since <YYYY-MM-DD>", "Generate weeks from this date to now", parseSince)
     .option("--prompt <text>", "Shared context applied to all weeks")
     .option("--context-file <path>", "JSON file mapping week IDs to per-week context", (v) => {
       if (!existsSync(v)) throw new Error(`Context file not found: ${v}`);

@@ -83,14 +83,16 @@ interface LedgerMeta {
   version: number;
   sources: Record<string, SourceMeta>;
   /**
-   * Weeks whose events have changed and whose work log has not been written since.
+   * Per week, the events that were in it the last time its work log was written.
    *
-   * A delta answers with events from any week, including ones this run was not asked
-   * about. They are filed where they belong and the week stays here until something
-   * writes it: the next run would otherwise dedupe them away, and the week would be
-   * stale in the vault for good.
+   * Not a list of weeks owed a write: a record of what each week has already been told
+   * about. A delta answers with events from any week, including ones this run was not
+   * asked about, and the week that receives them may not be written for days. Comparing
+   * against a mark taken at the start of a run would call those events old by then, and
+   * the model would never hear about them, so the comparison is against what was
+   * actually written instead.
    */
-  pendingWeeks: string[];
+  written: Record<string, string[]>;
 }
 
 /** What one call to `record` changed. */
@@ -110,7 +112,7 @@ export interface LedgerSnapshot extends SourceSnapshot {
 }
 
 function emptyMeta(): LedgerMeta {
-  return { version: LEDGER_VERSION, sources: {}, pendingWeeks: [] };
+  return { version: LEDGER_VERSION, sources: {}, written: {} };
 }
 
 function sourceMeta(meta: LedgerMeta, source: string): SourceMeta {
@@ -173,16 +175,19 @@ const snapshotSchema = z.object({
  * A source's meta, in either layout it has ever had on disk.
  *
  * Version 1 kept one watermark for the whole source and a bare list of collected weeks.
- * Both are read here and turned into the per-week form, so an existing cache keeps its
- * expensive window fetches instead of paying for them again.
+ * The weeks are kept, so an old cache does not pay for its window fetches again, but the
+ * watermark is not carried into them: it was advanced by whichever week happened to be
+ * refreshed last, and copying it into a week nobody checked would assert exactly what
+ * the per-week layout exists to stop asserting. A migrated week has no watermark at all,
+ * which sends its next delta back to the week's own start, once.
  */
 const sourceMetaSchema = z.object({
   fetchedAt: z.string().optional(),
   windows: z.union([z.array(z.string()), z.record(z.string(), z.string())]).default({}),
   state: z.record(z.string(), z.string()).default({}),
-}).transform(({ fetchedAt, windows, state }): SourceMeta => ({
+}).transform(({ windows, state }): SourceMeta => ({
   windows: Array.isArray(windows)
-    ? Object.fromEntries(windows.map((week) => [week, fetchedAt ?? ""]))
+    ? Object.fromEntries(windows.map((week) => [week, ""]))
     : windows,
   state,
 }));
@@ -190,7 +195,7 @@ const sourceMetaSchema = z.object({
 const metaSchema = z.object({
   version: z.number().default(LEDGER_VERSION),
   sources: z.record(z.string(), sourceMetaSchema).default({}),
-  pendingWeeks: z.array(z.string()).default([]),
+  written: z.record(z.string(), z.array(z.string())).default({}),
 });
 
 /**
@@ -199,18 +204,28 @@ const metaSchema = z.object({
  * A file that is missing, empty or not JSON at all reads as nothing there, which is the
  * same thing as far as the run is concerned: the ledger refetches what it cannot read.
  */
-async function readParsed<T>(path: string, schema: z.ZodType<T>, fallback: T): Promise<T> {
-  if (!existsSync(path)) return fallback;
+type FileRead<T> = { ok: true; value: T } | { ok: false; why: string };
+
+async function readParsed<T>(path: string, schema: z.ZodType<T>, fallback: T): Promise<FileRead<T>> {
+  // Nothing there and nothing written yet are both "no data", which is the normal state
+  // of a fresh install and of a run killed between opening a temp file and renaming it
+  // over the real one. A file with something unreadable in it is a different thing.
+  if (!existsSync(path)) return { ok: true, value: fallback };
 
   const raw = await readFile(path, "utf-8");
-  if (raw.trim().length === 0) return fallback;
+  if (raw.trim().length === 0) return { ok: true, value: fallback };
 
+  let json: unknown;
   try {
-    const parsed = schema.safeParse(JSON.parse(raw));
-    return parsed.success ? parsed.data : fallback;
+    json = JSON.parse(raw);
   } catch {
-    return fallback;
+    return { ok: false, why: "it is not valid JSON" };
   }
+
+  const parsed = schema.safeParse(json);
+  return parsed.success
+    ? { ok: true, value: parsed.data }
+    : { ok: false, why: "its contents are not the shape this version writes" };
 }
 
 /**
@@ -260,17 +275,30 @@ export interface Ledger {
   hasWindow(source: string, weekId: string): boolean;
   /** This source's own persisted state. Writes are kept until `save`. */
   stateFor(source: string): SourceState;
-  /** Weeks whose events changed and whose work log has not been written since. */
+
+  /** Weeks holding events their work log has not been told about, oldest first. */
   pendingWeeks(): string[];
+  /** The events in this week that its last written work log did not include. */
+  unwrittenEvents(weekId: string): SourceEvent[];
+  /**
+   * Weeks whose stored events could not all be read.
+   *
+   * Nothing may write a work log for one of these. What is in memory is a week with
+   * pieces missing, and writing it into the vault would turn a damaged cache file, which
+   * can be refetched, into a damaged week, which cannot.
+   */
+  unreadableWeeks(): string[];
   /** Anything unreadable found on disk, in the words the user should see. */
   problems(): string[];
+  /** Things worth saying once, like a cache that had to be brought forward a version. */
+  notices(): string[];
 
   /** File a batch. Returns what actually changed, which is nothing on a repeat. */
   record(source: string, batch: SourceBatch, seenAt: Date): RecordResult;
   markWindow(source: string, weekId: string): void;
   /** Move this week's watermark forward. An earlier time than the one held is ignored. */
   setWatermark(source: string, weekId: string, at: Date): void;
-  /** This week's work log is now written; it no longer needs writing again. */
+  /** This week's work log now covers everything the ledger holds for it. */
   markWritten(weekId: string): void;
 
   /** Persist whatever changed, and nothing that did not. */
@@ -282,39 +310,62 @@ export interface Ledger {
  *
  * A missing directory is an empty ledger rather than an error: the first run of a new
  * install has nothing cached, which is not a problem to report. A file that cannot be
- * read fully is a different matter — it is reported, and then left exactly as it is
- * rather than being rewritten without whatever could not be parsed.
+ * read fully is a different matter — it is reported, its week is barred from being
+ * written into the vault, and the file itself is left exactly as it is rather than
+ * rewritten without whatever could not be parsed.
  */
 export async function openLedger(root: string = ledgerRoot()): Promise<Ledger> {
   const eventsDir = join(root, "events");
   const snapshotsDir = join(root, "snapshots");
 
   const problems: string[] = [];
-  // Files that hold something this version cannot read. They are never written back:
+  const notices: string[] = [];
+  // Files holding something this version cannot read. They are never written back:
   // rewriting one would drop the unreadable rows for good.
   const frozen = new Set<string>();
+  const unreadable = new Set<string>();
 
   const metaPath = join(root, "meta.json");
   const rawMeta = await readParsed(metaPath, z.unknown(), undefined);
-  const parsedMeta = rawMeta === undefined ? undefined : metaSchema.safeParse(rawMeta);
-  if (parsedMeta && !parsedMeta.success) {
-    problems.push(`${metaPath} could not be read, so this run starts as if nothing had been fetched. The file is left alone.`);
+  const parsedMeta = rawMeta.ok && rawMeta.value !== undefined ? metaSchema.safeParse(rawMeta.value) : undefined;
+  if (!rawMeta.ok || (parsedMeta && !parsedMeta.success)) {
+    const why = rawMeta.ok ? "its contents are not the shape this version writes" : rawMeta.why;
+    problems.push(`${metaPath} could not be read because ${why}, so this run starts as if nothing had been fetched. The file is left alone.`);
     frozen.add(metaPath);
   }
   const meta = parsedMeta?.success ? parsedMeta.data : emptyMeta();
+  const storedVersion = parsedMeta?.success ? parsedMeta.data.version : LEDGER_VERSION;
+  if (storedVersion < LEDGER_VERSION) {
+    meta.version = LEDGER_VERSION;
+    notices.push(
+      `The activity cache was written by an older version. Each week it already holds will be checked once from the week's own start, ` +
+      `because the version it came from kept a single reading position for a whole source and that says nothing about any one week. ` +
+      `Anything already recorded is matched rather than duplicated.`,
+    );
+  }
 
   const weekFiles = existsSync(eventsDir) ? await readdir(eventsDir) : [];
   const events = new Map<string, SourceEvent[]>();
   for (const file of weekFiles) {
     if (!file.endsWith(".json")) continue;
     const path = join(eventsDir, file);
-    const rows = await readParsed(path, z.array(z.unknown()), []);
-    const { kept, bad } = parseRows(rows.map((row, index) => [String(index), row] as const), eventSchema);
-    if (bad.length > 0) {
-      problems.push(`${path}: row ${bad.join(", ")} could not be read. This run uses the rest of the file and does not write it back.`);
+    const weekId = file.slice(0, -".json".length);
+
+    const read = await readParsed(path, z.array(z.unknown()), []);
+    if (!read.ok) {
+      problems.push(`${path} could not be read because ${read.why}. ${weekId} will not be written until that is fixed, and the file is left alone.`);
       frozen.add(path);
+      unreadable.add(weekId);
+      continue;
     }
-    events.set(file.slice(0, -".json".length), kept.map(([, event]) => event));
+
+    const { kept, bad } = parseRows(read.value.map((row, index) => [String(index), row] as const), eventSchema);
+    if (bad.length > 0) {
+      problems.push(`${path}: row ${bad.join(", ")} could not be read. ${weekId} will not be written until that is fixed, and the file is left alone.`);
+      frozen.add(path);
+      unreadable.add(weekId);
+    }
+    events.set(weekId, kept.map(([, event]) => event));
   }
 
   const snapshotFiles = existsSync(snapshotsDir) ? await readdir(snapshotsDir) : [];
@@ -322,10 +373,17 @@ export async function openLedger(root: string = ledgerRoot()): Promise<Ledger> {
   for (const file of snapshotFiles) {
     if (!file.endsWith(".json")) continue;
     const path = join(snapshotsDir, file);
-    const stored = await readParsed(path, z.record(z.string(), z.unknown()), {});
-    const { kept, bad } = parseRows(Object.entries(stored), snapshotSchema);
+
+    const read = await readParsed(path, z.record(z.string(), z.unknown()), {});
+    if (!read.ok) {
+      problems.push(`${path} could not be read because ${read.why}. Items it describes will be refetched, and the file is left alone.`);
+      frozen.add(path);
+      continue;
+    }
+
+    const { kept, bad } = parseRows(Object.entries(read.value), snapshotSchema);
     if (bad.length > 0) {
-      problems.push(`${path}: ${bad.join(", ")} could not be read. This run uses the rest of the file and does not write it back.`);
+      problems.push(`${path}: ${bad.join(", ")} could not be read. Those items will be refetched, and the file is left alone.`);
       frozen.add(path);
     }
     snapshots.set(file.slice(0, -".json".length), Object.fromEntries(kept));
@@ -333,9 +391,7 @@ export async function openLedger(root: string = ledgerRoot()): Promise<Ledger> {
 
   const dirtyWeeks = new Set<string>();
   const dirtySources = new Set<string>();
-  let dirtyMeta = false;
-
-  const pending = new Set(meta.pendingWeeks);
+  let dirtyMeta = storedVersion < LEDGER_VERSION;
 
   const knownKeys = new Map<string, Set<string>>();
   const keysFor = (weekId: string): Set<string> => {
@@ -346,11 +402,11 @@ export async function openLedger(root: string = ledgerRoot()): Promise<Ledger> {
     return keys;
   };
 
-  const savePending = () => {
-    const next = [...pending].sort();
-    if (next.length === meta.pendingWeeks.length && next.every((week, i) => meta.pendingWeeks[i] === week)) return;
-    meta.pendingWeeks = next;
-    dirtyMeta = true;
+  const writtenKeys = (weekId: string): Set<string> => new Set(meta.written[weekId] ?? []);
+
+  const unwritten = (weekId: string): SourceEvent[] => {
+    const already = writtenKeys(weekId);
+    return (events.get(weekId) ?? []).filter((event) => !already.has(eventKey(event)));
   };
 
   /**
@@ -405,11 +461,23 @@ export async function openLedger(root: string = ledgerRoot()): Promise<Ledger> {
     },
 
     pendingWeeks() {
-      return [...pending].sort();
+      return [...events.keys()].filter((week) => unwritten(week).length > 0).sort();
+    },
+
+    unwrittenEvents(weekId) {
+      return unwritten(weekId);
+    },
+
+    unreadableWeeks() {
+      return [...unreadable].sort();
     },
 
     problems() {
       return [...problems];
+    },
+
+    notices() {
+      return [...notices];
     },
 
     record(source, batch, seenAt) {
@@ -449,11 +517,9 @@ export async function openLedger(root: string = ledgerRoot()): Promise<Ledger> {
         week.push(event);
         events.set(weekId, week);
         dirtyWeeks.add(weekId);
-        pending.add(weekId);
         addedEvents++;
         perWeek.set(weekId, (perWeek.get(weekId) ?? 0) + 1);
       }
-      if (addedEvents > 0) savePending();
 
       return { addedEvents, addedSnapshots, perWeek };
     },
@@ -474,8 +540,11 @@ export async function openLedger(root: string = ledgerRoot()): Promise<Ledger> {
     },
 
     markWritten(weekId) {
-      if (!pending.delete(weekId)) return;
-      savePending();
+      const next = [...keysFor(weekId)].sort();
+      const before = meta.written[weekId];
+      if (before && before.length === next.length && next.every((key, i) => before[i] === key)) return;
+      meta.written[weekId] = next;
+      dirtyMeta = true;
     },
 
     async save() {
@@ -505,7 +574,6 @@ export async function openLedger(root: string = ledgerRoot()): Promise<Ledger> {
     },
   };
 }
-
 /** Group a week's events by the item they happened to, in time order. */
 export function eventsByItem(events: readonly SourceEvent[]): Map<string, SourceEvent[]> {
   const byItem = new Map<string, SourceEvent[]>();
@@ -689,9 +757,11 @@ export async function collectIntoLedger(
 
       // The query covered everything from `since` onwards for all of these weeks, so
       // each of them is read at least that far, and further when something later than
-      // `since` actually came back. Never to the clock: a run that sees nothing new has
-      // nothing to write, which is what makes a repeated refresh free.
-      const read = newest && newest > since.toISOString() ? new Date(newest) : since;
+      // `since` actually came back. Never past the moment the query was asked, though:
+      // one item with a clock-skewed future date would otherwise carry the watermark
+      // into next week and take everything committed in between with it. And never to
+      // the clock, so a run that sees nothing new has nothing to write.
+      const read = clamp(since, newest, now);
       for (const week of delta) ledger.setWatermark(source.name, week.weekId, read);
     }
 
@@ -700,6 +770,13 @@ export async function collectIntoLedger(
   }
 
   return { perSource, weeksChanged, perWeek, warnings };
+}
+
+/** No earlier than the range the query covered, and no later than when it was asked. */
+function clamp(since: Date, newest: string | undefined, asked: Date): Date {
+  if (!newest || newest <= since.toISOString()) return since;
+  const seen = new Date(newest);
+  return seen > asked ? asked : seen;
 }
 
 /**

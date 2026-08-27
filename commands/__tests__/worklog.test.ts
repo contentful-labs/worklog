@@ -44,6 +44,9 @@ const WEEK = "2026-W09";
 const EXISTING_WORK_LOG = "---\ntags:\n  - areas/work\n  - areas/work/work-log\n---\n\n# Work Log 2026-W09\n\nReal fetched activity from the original run.\n";
 const EXISTING_BRAG_BOOK = "---\ntags:\n  - areas/work\n---\n\n# Brag Book - Week 09, 2026\n\n## Achievements\n\n- Real work\n";
 
+/** What a well-behaved regeneration returns: the week's own record, plus one new line. */
+const KEEPS_EXISTING = "# Brag Book - Week 09, 2026\n\n## Achievements\n\n- Real work\n- Shipped the thing";
+
 /** A structurally valid response whose document would fail validation. */
 const BAD_OUTPUT = {
   bragBookMarkdown: "   \n  ",
@@ -195,7 +198,7 @@ describe("runWorklog write ordering", () => {
       const { aiQueryStructured } = await import("../../lib/sdk/ai");
       vi.mocked(aiQueryStructured).mockResolvedValue({
         ...BAD_OUTPUT,
-        bragBookMarkdown: "# Brag Book - Week 09, 2026\n\n## Achievements\n\n- Shipped the thing",
+        bragBookMarkdown: KEEPS_EXISTING,
       });
 
       // The brag book is written first, so failing it must leave the work log alone too.
@@ -258,7 +261,7 @@ describe("runWorklog write ordering", () => {
       const { aiQueryStructured } = await import("../../lib/sdk/ai");
       vi.mocked(aiQueryStructured).mockResolvedValue({
         ...BAD_OUTPUT,
-        bragBookMarkdown: "# Brag Book - Week 09, 2026\n\n## Achievements\n\n- Shipped the thing",
+        bragBookMarkdown: KEEPS_EXISTING,
       });
 
       const { runWorklog } = await import("../worklog");

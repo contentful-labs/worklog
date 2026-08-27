@@ -91,28 +91,53 @@ export function validateBragBookMarkdown(markdown: string): void {
 }
 
 /**
- * The lines of a week's entry that a regeneration is not allowed to lose.
+ * What a week's entry records, split into the two parts a regeneration must keep.
  *
- * Every non-blank line of `## Achievements`, and every `### ` heading anywhere in the
- * document. Those headings are what the coaching section is made of, and an achievement
- * is a line someone wrote down about a week that has already happened.
+ * Achievement lines and coaching headings are checked against the same parts of the new
+ * document, not against the document as a whole. A line that has been taken out of the
+ * achievements and mentioned in passing in the coaching prose is gone from the list
+ * someone will read next year, and a check for the text anywhere would call that fine.
  */
-function linesToKeep(document: string): string[] {
-  const keep: string[] = [];
+interface EntryRecord {
+  achievements: string[];
+  coachingHeadings: string[];
+}
+
+const COACHING_OPEN = "<!-- COACHING_SESSION -->";
+const COACHING_CLOSE = "<!-- /COACHING_SESSION -->";
+
+function readEntry(document: string): EntryRecord {
+  const achievements: string[] = [];
+  const coachingHeadings: string[] = [];
+
   let inAchievements = false;
+  let inCoaching = false;
 
   for (const raw of document.split("\n")) {
     const line = raw.trim();
 
-    if (line.startsWith("## ")) inAchievements = line.toLowerCase() === "## achievements";
-    if (line.startsWith("### ")) {
-      keep.push(line);
+    if (line === COACHING_OPEN) {
+      inCoaching = true;
       continue;
     }
-    if (inAchievements && line.length > 0 && !line.startsWith("## ")) keep.push(line);
+    if (line === COACHING_CLOSE) {
+      inCoaching = false;
+      continue;
+    }
+
+    if (inCoaching) {
+      if (line.startsWith("### ")) coachingHeadings.push(line);
+      continue;
+    }
+
+    if (line.startsWith("## ")) {
+      inAchievements = line.toLowerCase() === "## achievements";
+      continue;
+    }
+    if (inAchievements && line.length > 0) achievements.push(line);
   }
 
-  return keep;
+  return { achievements, coachingHeadings };
 }
 
 /**
@@ -124,7 +149,15 @@ function linesToKeep(document: string): string[] {
  * replace a month of achievements with one line, atomically and irreversibly.
  */
 export function firstDroppedLine(existing: string, next: string): string | undefined {
-  return linesToKeep(existing).find((line) => !next.includes(line));
+  const before = readEntry(existing);
+  const after = readEntry(next);
+
+  const kept = new Set(after.achievements);
+  const dropped = before.achievements.find((line) => !kept.has(line));
+  if (dropped !== undefined) return dropped;
+
+  const headings = new Set(after.coachingHeadings);
+  return before.coachingHeadings.find((line) => !headings.has(line));
 }
 
 /**

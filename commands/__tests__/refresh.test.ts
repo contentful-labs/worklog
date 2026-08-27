@@ -4,7 +4,8 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-import { parseSince, parseWeek, refreshWeeks, weeksInRange, type WeekToWrite } from "../refresh";
+import { refreshWeeks, weeksInRange, type WeekToWrite } from "../refresh";
+import { parseSince, parseWeek } from "../../lib/sdk/week-utils";
 import { openLedger } from "../../lib/sdk/ledger";
 import type { Source, SourceBatch, SourceContext } from "../../lib/sdk/sources";
 import type { WorklogConfig } from "../../lib/config";

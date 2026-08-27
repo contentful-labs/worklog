@@ -251,6 +251,18 @@ export function generateEventMarkdown(options: {
   return lines.join("\n");
 }
 
+/**
+ * Events as prose for the prompt.
+ *
+ * Given only what a week's written entry has not been told about, this is the new
+ * material: the rest of the week is accounted for in the entry being added to.
+ */
+export function describeEvents(events: readonly SourceEvent[]): string {
+  return events
+    .map((event) => `- ${event.at.slice(0, 16).replace("T", " ")} ${event.source} ${event.kind} on ${event.itemId}`)
+    .join("\n");
+}
+
 /** One event as a line the model can read without knowing which system it came from. */
 function describeEvent(event: SourceEvent): string {
   const when = event.at.replace("T", " ").slice(0, 16);

@@ -166,8 +166,10 @@ describe("what is written to disk", () => {
     expect(meta).toMatchObject({
       version: 2,
       sources: { jira: { windows: { "2026-W33": seenAt.toISOString() } } },
-      pendingWeeks: ["2026-W33"],
+      written: {},
     });
+    // Recorded but not yet written into the vault, which is what makes it pending.
+    expect(ledger.pendingWeeks()).toEqual(["2026-W33"]);
 
     // Readable by a person, which is half the reason it is JSON on disk.
     expect(await readFile(join(root, "events", "2026-W33.json"), "utf-8")).toContain('\n  {\n    "source": "jira"');
