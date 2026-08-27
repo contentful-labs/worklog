@@ -108,9 +108,8 @@ export function toBragBookResult(output: BragBookOutput): BragBookResult {
     bragBookContent: output.bragBookMarkdown.trim(),
     itemsToAdd: keepValid(output.memoryItemsToAdd, validMemoryItemSchema)
       .map((row) => renderRow([row.date, row.item, row.category, row.notes])),
-    // Just the item. updateMemory matches on it alone, and it truncates at the first
-    // "(now part of", so appending the achievement would silently cut any item that
-    // already contains that phrase down to whatever precedes it.
+    // Just the item: updateMemory matches on it and has no use for the achievement.
+    // The whole string is the target now, so an item may contain any punctuation.
     itemsToRemove: keepValid(output.memoryGraduations, validMemoryGraduationSchema)
       .map((row) => unescapeCell(row.item)),
     impactLogEntry: impact.success ? impact.data : null,

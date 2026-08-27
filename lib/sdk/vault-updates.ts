@@ -94,9 +94,6 @@ const MEMORY_IDENTITY_COLUMNS = [0, 1, 2];
 const IMPACT_EVIDENCE_COLUMN = 4;
 /** Everything but the Evidence is what makes an impact row that row. */
 const IMPACT_IDENTITY_COLUMNS = [0, 1, 2, 3];
-/** How the prompt asks the model to mark a graduated memory item. */
-const GRADUATION_MARKER = "(now part of";
-
 const IMPACT_TIMELINE_HEADING = "## Impact Timeline";
 const ORG_NOTES_HEADING = "## Organizational Notes";
 const KEY_STRENGTHS_HEADING = "## Key Strengths";
@@ -1004,8 +1001,9 @@ export async function updateMemory(
   const graduated = new Set<number>();
   const unmatchedGraduations: UnmatchedGraduation[] = [];
   for (const removal of itemsToRemove) {
-    const marker = removal.indexOf(GRADUATION_MARKER);
-    const target = (marker === -1 ? removal : removal.slice(0, marker)).trim();
+    // The whole string is the item. It used to be cut at a "(now part of" suffix the
+    // caller appended, which also cut any item that contained that phrase itself.
+    const target = removal.trim();
 
     // The model names the item, not the day it happened, so every date of that item
     // graduates together: they were all folded into the same achievement. Case is not

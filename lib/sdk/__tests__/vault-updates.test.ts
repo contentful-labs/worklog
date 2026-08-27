@@ -84,7 +84,7 @@ describe("updateMemory", () => {
   it("removes graduated items", async () => {
     const path = join(tmpDir, "memory.md");
     await writeFile(path, "# Memory\n\n| Date | Item | Category | Notes |\n|------|------|----------|-------|\n| 2026-03-01 | Ship auth | project | |");
-    await updateMemory(path, [], ["Ship auth (now part of brag book)"]);
+    await updateMemory(path, [], ["Ship auth"]);
     const content = await readFile(path, "utf-8");
     expect(content).not.toContain("Ship auth");
   });
@@ -437,7 +437,7 @@ describe("updateMemory record identity", () => {
     await writeFile(path, CLEAN_MEMORY);
 
     await updateMemory(path, [], [
-      "Wrote the fallback path for the Search Revamp indexer (now part of: shipped indexer resilience)",
+      "Wrote the fallback path for the Search Revamp indexer",
     ]);
 
     const content = await readFile(path, "utf-8");
@@ -450,7 +450,7 @@ describe("updateMemory record identity", () => {
     await writeFile(path, CLEAN_MEMORY);
 
     const result = await updateMemory(path, [], [
-      "Fallback path work for the Search Revamp indexer (now part of: shipped indexer resilience)",
+      "Fallback path work for the Search Revamp indexer",
     ]);
 
     expect(result.removed).toBe(0);
@@ -474,7 +474,7 @@ describe("updateMemory record identity", () => {
     await writeFile(path, file);
 
     const result = await updateMemory(path, [], [
-      "Disable service billing alerts for platform teams (now part of: billing cleanup)",
+      "Disable service billing alerts for platform teams",
     ]);
 
     expect(result.removed).toBe(0);
@@ -493,7 +493,7 @@ describe("updateMemory record identity", () => {
 `);
 
     const result = await updateMemory(path, [], [
-      "Reviewed the Search Revamp rollout plan with the platform team (now part of: ran the rollout)",
+      "Reviewed the Search Revamp rollout plan with the platform team",
     ]);
 
     // The model names the item, not the day, so both dates of it graduate together.
@@ -511,7 +511,7 @@ describe("updateMemory record identity", () => {
 | 2026-03-02 | Reviewed the incident runbook | support |  |
 `);
 
-    const result = await updateMemory(path, [], ["Reviewed the incident runbook (now part of: on-call overhaul)"]);
+    const result = await updateMemory(path, [], ["Reviewed the incident runbook"]);
 
     expect(result.removed).toBe(1);
     const content = await readFile(path, "utf-8");
@@ -659,7 +659,7 @@ describe("applying the same week twice", () => {
         "| 2026-03-08 | Cut the search index rebuild from 40 to 12 minutes | project | TEAM-1234 |",
         "| 2026-03-08 | Documented the on-call escalation path | support |  |",
       ],
-      itemsToRemove: ["Fallback path work for the Search Revamp indexer (now part of: shipped indexer resilience)"],
+      itemsToRemove: ["Fallback path work for the Search Revamp indexer"],
       impactLogEntry: {
         date: "2026-03-08",
         achievement: "Led the Search Revamp rollout across three teams",
@@ -899,7 +899,7 @@ describe("record dedupe threshold", () => {
 
     // 0.83 similarity: close enough to name the row, nowhere near enough to delete it.
     const result = await updateMemory(path, [], [
-      "Fallback path work for the Search Revamp indexer (now part of: shipped indexer resilience)",
+      "Fallback path work for the Search Revamp indexer",
     ]);
 
     expect(result.unmatchedGraduations).toHaveLength(1);
@@ -1566,7 +1566,7 @@ describe("an ambiguous graduation removes nothing", () => {
     const path = join(tmpDir, "memory.md");
     await writeFile(path, TWO_MIGRATIONS);
 
-    await updateMemory(path, [], ["Ship Search Revamp migration (now part of: shipped the migration)"]);
+    await updateMemory(path, [], ["Ship Search Revamp migration"]);
 
     const content = await readFile(path, "utf-8");
     expect(content).toContain("backend migration");
@@ -1577,7 +1577,7 @@ describe("an ambiguous graduation removes nothing", () => {
     const path = join(tmpDir, "memory.md");
     await writeFile(path, TWO_MIGRATIONS);
 
-    await updateMemory(path, [], ["Ship Search Revamp backend migration (now part of: shipped the migration)"]);
+    await updateMemory(path, [], ["Ship Search Revamp backend migration"]);
 
     const content = await readFile(path, "utf-8");
     expect(content).not.toContain("backend migration");
@@ -1595,7 +1595,7 @@ describe("an ambiguous graduation removes nothing", () => {
 `);
 
     const result = await updateMemory(path, [], [
-      "Reviewed the Search Revamp rollout plan with the platform team (now part of: ran the rollout)",
+      "Reviewed the Search Revamp rollout plan with the platform team",
     ]);
 
     expect(result.removed).toBe(2);
@@ -1693,7 +1693,7 @@ describe("the archive boundary", () => {
     const path = join(tmpDir, "memory.md");
     await writeFile(path, ARCHIVED_ONLY_MEMORY);
 
-    expect(await updateMemory(path, [], ["Fallback path work for the Search Revamp indexer (now part of: shipped it)"]))
+    expect(await updateMemory(path, [], ["Fallback path work for the Search Revamp indexer"]))
       .toMatchObject({ status: "no-section" });
     expect(await readFile(path, "utf-8")).toBe(ARCHIVED_ONLY_MEMORY);
   });
@@ -2021,7 +2021,7 @@ describe("what a batch did", () => {
     await writeFile(path, CLEAN_MEMORY);
 
     const result = await updateMemory(path, [], [
-      "Wrote the fallback path for the Search Revamp indexer (now part of: shipped indexer resilience)",
+      "Wrote the fallback path for the Search Revamp indexer",
     ]);
 
     expect(result).toMatchObject({ status: "written", added: 0, removed: 1 });
@@ -2607,7 +2607,7 @@ describe("the same small work done again", () => {
     const path = join(tmpDir, "memory.md");
     await writeFile(path, RECURRING);
 
-    const result = await updateMemory(path, [], ["Reviewed the incident runbook (now part of: on-call overhaul)"]);
+    const result = await updateMemory(path, [], ["Reviewed the incident runbook"]);
 
     expect(result.removed).toBe(2);
     expect(await readFile(path, "utf-8")).not.toContain("incident runbook");
@@ -3750,7 +3750,7 @@ describe("what the run summary counts for the other two writers", () => {
     expect(memoryCounted(merged)).toBe(2);
 
     const graduated = await updateMemory(path, [], [
-      "Wrote the fallback path for the Search Revamp indexer (now part of: shipped indexer resilience)",
+      "Wrote the fallback path for the Search Revamp indexer",
     ]);
     expect(graduated).toMatchObject({ added: 0, removed: 1 });
     expect(memoryCounted(graduated)).toBe(1);
@@ -3783,7 +3783,7 @@ describe("case survives the paths that delete", () => {
     const path = join(tmpDir, "memory.md");
     await writeFile(path, TWO_CASINGS);
 
-    const result = await updateMemory(path, [], ["Set api_key in the deploy job (now part of: secrets cleanup)"]);
+    const result = await updateMemory(path, [], ["Set api_key in the deploy job"]);
 
     expect(result).toMatchObject({ removed: 1 });
     const content = await readFile(path, "utf-8");

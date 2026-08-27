@@ -205,10 +205,9 @@ describe("toBragBookResult", () => {
     expect(result.itemsToRemove).toEqual(["Three small perf PRs"]);
   });
 
-  it("keeps an item that contains the graduation marker updateMemory truncates at", () => {
-    // updateMemory cuts a target at the first "(now part of". Appending the achievement
-    // used to put that phrase in every target, so an item already containing it was
-    // truncated to the text before it and matched nothing.
+  it("keeps an item that contains the phrase the graduation marker used to be", () => {
+    // The suffix this used to append put "(now part of" into every target, and the writer
+    // cut each target there, so an item already containing the phrase lost its tail.
     const result = toBragBookResult(
       output({
         memoryGraduations: [
@@ -415,13 +414,22 @@ ${renderRow(["2026-03-05", "Perf | work on a | b", "perf", ""])}
     expect(after).toContain("Reviewed the search RFC");
   });
 
-  // Known residual, writer-side. updateMemory still truncates any target at the first
-  // "(now part of" (vault-updates.ts, GRADUATION_MARKER), so an item containing that
-  // phrase is cut down before it is compared. The adapter no longer contributes to this:
-  // it passes the item through whole, which the toBragBookResult test above pins. Closing
-  // it needs the truncation removed from the writer, which no longer has a caller that
-  // appends the marker. This test records what happens today so the change is visible.
-  it("cannot yet graduate an item whose own text contains the graduation marker", async () => {
+  it("reports the full requested text when nothing matches, not a truncated head", async () => {
+    const path = join(tmpDir, "memory.md");
+    await writeFile(path, MEMORY, "utf-8");
+
+    const { itemsToRemove } = toBragBookResult(
+      output({ memoryGraduations: [{ item: "Shipped the thing (now part of X) twice", nowPartOf: "A" }] }),
+    );
+    const result = await updateMemory(path, [], itemsToRemove);
+
+    expect(result.removed).toBe(0);
+    expect(result.unmatchedGraduations.map((u) => u.requested)).toEqual([
+      "Shipped the thing (now part of X) twice",
+    ]);
+  });
+
+  it("graduates an item whose own text contains the phrase the marker used to be", async () => {
     const path = join(tmpDir, "memory.md");
     const stored = `# Memory
 
@@ -441,15 +449,16 @@ ${renderRow(["2026-03-05", "Perf | work on a | b", "perf", ""])}
         ],
       }),
     );
-    // The adapter sends the whole item.
+    // The adapter sends the whole item, and the writer no longer cuts it short.
     expect(itemsToRemove).toEqual(["Documented fallback (now part of SDK) behavior"]);
 
     const result = await updateMemory(path, [], itemsToRemove);
 
-    // The writer cuts it at the marker, so it matches nothing and the row survives.
-    expect(result.removed).toBe(0);
-    expect(result.unmatchedGraduations.map((u) => u.requested)).toEqual(["Documented fallback"]);
-    expect(await readFile(path, "utf-8")).toBe(stored);
+    expect(result.removed).toBe(1);
+    expect(result.unmatchedGraduations).toEqual([]);
+    const after = await readFile(path, "utf-8");
+    expect(after).not.toContain("Documented fallback");
+    expect(after).toContain("Reviewed the search RFC");
   });
 
   it("removes the one row a graduation names exactly", async () => {
