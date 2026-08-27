@@ -264,6 +264,94 @@ describe("applyFocusUpdates", () => {
     expect(content).not.toContain("lapsed");
   });
 
+  it("counts one review per week however many times that week is generated", () => {
+    // A crash mid-run leaves the week to be retried, and the retry used to age every open
+    // item a second time. An item could reach lapsed having been shown to the coach once.
+    const first = applyFocusUpdates(base, {
+      reviewedIds: ["2026-W09.1"], updates: [], newItems: [], weekLabel: "2026-W35",
+    });
+    expect(first.content).toContain("| Write docs | pending | 1 |");
+    expect(first.lapsed).toBe(0);
+
+    let content = first.content;
+    for (let retry = 0; retry < 3; retry++) {
+      const rerun = applyFocusUpdates(content, {
+        reviewedIds: ["2026-W09.1"], updates: [], newItems: [], weekLabel: "2026-W35",
+      });
+      expect(rerun.lapsed).toBe(0);
+      content = rerun.content;
+    }
+
+    expect(content).toContain("| Write docs | pending | 1 |");
+    expect(content).not.toContain("lapsed");
+    // The marker is written once, not once per run.
+    expect(content.match(/reviewed 2026-W35/g)).toHaveLength(1);
+  });
+
+  it("counts the next week as its own review, and lapses on the second", () => {
+    const w35 = applyFocusUpdates(base, {
+      reviewedIds: ["2026-W09.1"], updates: [], newItems: [], weekLabel: "2026-W35",
+    });
+
+    const w36 = applyFocusUpdates(w35.content, {
+      reviewedIds: ["2026-W09.1"], updates: [], newItems: [], weekLabel: "2026-W36",
+    });
+    expect(w36.content).toContain("| Write docs | lapsed | 2 |");
+    expect(w36.lapsed).toBe(1);
+  });
+
+  it("does not lapse an item on a rerun of the week that first reviewed it", () => {
+    // The scenario the fix exists for: W35 reviews once, W35 runs again, and the item
+    // must still be one review away from lapsing rather than closed.
+    const w35 = applyFocusUpdates(base, {
+      reviewedIds: ["2026-W09.1"], updates: [], newItems: [], weekLabel: "2026-W35",
+    });
+    const retry = applyFocusUpdates(w35.content, {
+      reviewedIds: ["2026-W09.1"], updates: [], newItems: [], weekLabel: "2026-W35",
+    });
+
+    expect(retry.lapsed).toBe(0);
+    expect(retry.content).toContain("| Write docs | pending | 1 |");
+
+    const w36 = applyFocusUpdates(retry.content, {
+      reviewedIds: ["2026-W09.1"], updates: [], newItems: [], weekLabel: "2026-W36",
+    });
+    expect(w36.lapsed).toBe(1);
+  });
+
+  it("counts a later week once too, however often it is regenerated", () => {
+    const w35 = applyFocusUpdates(base, {
+      reviewedIds: ["2026-W09.2"], updates: [], newItems: [], weekLabel: "2026-W35",
+    });
+    const w36 = applyFocusUpdates(w35.content, {
+      reviewedIds: ["2026-W09.2"], updates: [], newItems: [], weekLabel: "2026-W36",
+    });
+    const w36Again = applyFocusUpdates(w36.content, {
+      reviewedIds: ["2026-W09.2"], updates: [], newItems: [], weekLabel: "2026-W36",
+    });
+
+    // Review RFC starts at 1 review, so W35 takes it to 2 and lapses it there.
+    expect(w35.lapsed).toBe(1);
+    expect(w36.lapsed).toBe(0);
+    expect(w36Again.content).toBe(w36.content);
+  });
+
+  it("does not let prose in the notes suppress a real review", () => {
+    // A coach writing about a nearby week must not be read as the marker for this one.
+    const withProse = applyFocusUpdates(base, {
+      reviewedIds: [],
+      updates: [{ id: "2026-W09.1", status: "ongoing", notes: "reviewed 2026-W3 briefly" }],
+      newItems: [], weekLabel: "2026-W34",
+    });
+
+    const w36 = applyFocusUpdates(withProse.content, {
+      reviewedIds: ["2026-W09.1"], updates: [], newItems: [], weekLabel: "2026-W36",
+    });
+
+    expect(w36.content).toContain("reviewed 2026-W36");
+    expect(w36.content).toContain("| Write docs | ongoing | 1 |");
+  });
+
   it("still lapses an unanswered commitment once later weeks review it", () => {
     // The accountability mechanism itself is unchanged: two later reviews still close it.
     const created = applyFocusUpdates(base, {
