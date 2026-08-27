@@ -2,6 +2,8 @@ import type { WorklogConfig } from "./types";
 import type { JiraIssue, ConfluencePage, GitHubPR } from "../types";
 import type { PRReview, WeekInfo } from "./data-fetch";
 import { extractText, formatDate } from "../utils";
+import { eventsByItem, renderable, type LedgerSnapshot } from "./ledger";
+import { EVENT_KINDS, type SourceEvent } from "./sources";
 
 export function generateMarkdown(
   issues: JiraIssue[],
@@ -152,4 +154,163 @@ export function generateMarkdown(
   }
 
   return lines.join("\n");
+}
+
+/**
+ * The week's work log, written from the ledger.
+ *
+ * A week is the events whose timestamps fall inside it, and nothing else. That is the
+ * whole difference from `generateMarkdown` above, which described items as they stand
+ * today: a ticket opened in August and closed in September appears in August with what
+ * happened in August, and its closing appears in September. The coach reading this for
+ * a past week cannot narrate it from a later state, because a later state is not here.
+ *
+ * Each item is titled from the snapshot taken when it was first seen, so a title
+ * reworded since then does not travel back either.
+ */
+export function generateEventMarkdown(options: {
+  weekInfo: WeekInfo;
+  events: readonly SourceEvent[];
+  snapshotFor: (source: string, itemId: string) => LedgerSnapshot | undefined;
+  additionalContext: string;
+  /** Today, for the "generated" stamp. Injectable so a test can pin it. */
+  now?: Date;
+}): string {
+  const { weekInfo, events, snapshotFor, additionalContext, now = new Date() } = options;
+  const start = weekInfo.startDate.toISOString().split("T")[0];
+  const end = weekInfo.endDate.toISOString().split("T")[0];
+
+  const lines: string[] = [];
+  lines.push("---");
+  lines.push("tags:");
+  lines.push("  - areas/work");
+  lines.push("  - areas/work/work-log");
+  lines.push("---");
+  lines.push("");
+  lines.push(`# Work Log - Week ${weekInfo.weekNumber}, ${weekInfo.year}`);
+  lines.push("");
+  lines.push(`**Period:** ${start} to ${end}`);
+  lines.push(`**Generated:** ${now.toISOString()}`);
+  lines.push("");
+  lines.push("This log holds what happened during the week above, dated by when it happened.");
+  lines.push("Work on these items outside this week belongs to the week it happened in.");
+  lines.push("");
+
+  const bySource = [...Map.groupBy(events, (event) => event.source)].sort(([a], [b]) => (a < b ? -1 : 1));
+
+  lines.push("## Summary");
+  lines.push("");
+  lines.push("| Source | Items | Events |");
+  lines.push("|--------|-------|--------|");
+  for (const [source, forSource] of bySource) {
+    lines.push(`| ${source} | ${eventsByItem(forSource).size} | ${forSource.length} |`);
+  }
+  if (bySource.length === 0) lines.push("| (nothing recorded) | 0 | 0 |");
+  lines.push("");
+
+  for (const [source, forSource] of bySource) {
+    const byItem = eventsByItem(forSource);
+    lines.push(`## ${source} (${byItem.size})`);
+    lines.push("");
+
+    for (const [itemId, itemEvents] of byItem) {
+      const snapshot = snapshotFor(source, itemId);
+      const item = renderable(snapshot?.payload);
+      const title = item.title ?? "";
+      // An item whose id is itself a link needs no url of its own, which is how a Slack
+      // permalink arrives.
+      const url = item.url ?? (itemId.startsWith("https://") ? itemId : "");
+
+      lines.push(`### ${itemId}${title ? ` - ${title}` : ""}`);
+      if (url) lines.push(`**Link:** ${url}`);
+      if (snapshot) lines.push(`**First seen:** ${snapshot.firstSeenAt.split("T")[0]}`);
+      lines.push("");
+      // Commits are summarised rather than listed. A week of steady work on one branch is
+      // thirty of them, and thirty near-identical lines crowd out everything the week is
+      // actually about — while the fact that the branch was worked on, and roughly what
+      // the work was, is the part worth reading.
+      const commits = itemEvents.filter((event) => event.kind === EVENT_KINDS.commit);
+      for (const event of itemEvents) {
+        if (event.kind !== EVENT_KINDS.commit) lines.push(describeEvent(event));
+      }
+      if (commits.length > 0) lines.push(describeCommits(commits));
+      lines.push("");
+    }
+  }
+
+  const spotted = events.filter((event) => renderable(event.payload).spotted === true).length;
+  if (spotted > 0) {
+    lines.push("## Dating");
+    lines.push("");
+    lines.push(
+      `${spotted} change${spotted === 1 ? "" : "s"} below carry no timestamp of their own, so they are dated ` +
+      "at the moment they were found rather than the moment they happened. They are marked *spotted*.",
+    );
+    lines.push("");
+  }
+
+  if (additionalContext.trim().length > 0) {
+    lines.push("## Additional Context");
+    lines.push("");
+    lines.push(additionalContext.trim());
+    lines.push("");
+  }
+
+  return lines.join("\n");
+}
+
+/**
+ * Events as prose for the prompt.
+ *
+ * Given only what a week's written entry has not been told about, this is the new
+ * material: the rest of the week is accounted for in the entry being added to.
+ */
+export function describeEvents(events: readonly SourceEvent[]): string {
+  return events
+    .map((event) => `- ${event.at.slice(0, 16).replace("T", " ")} ${event.source} ${event.kind} on ${event.itemId}`)
+    .join("\n");
+}
+
+/**
+ * A week's commits on one item, as one line.
+ *
+ * The dates it spans, how many there were, and the first few subjects. Enough for the
+ * coach to see that the work continued and what it was, without the log becoming a git
+ * history.
+ */
+function describeCommits(commits: readonly SourceEvent[]): string {
+  const days = [...new Set(commits.map((event) => event.at.slice(0, 10)))].sort();
+  const span = days.length === 1 ? days[0] : `${days[0]} to ${days[days.length - 1]}`;
+
+  const subjects = commits
+    .map((event) => renderable(event.payload).text?.trim())
+    .filter((text): text is string => Boolean(text));
+  const shown = subjects.slice(0, COMMIT_SUBJECTS_SHOWN);
+  const rest = subjects.length - shown.length;
+
+  const detail = shown.length > 0
+    ? `: ${shown.join("; ")}${rest > 0 ? `; and ${rest} more` : ""}`
+    : "";
+  return `- **${span}** ${commits.length} commit${commits.length === 1 ? "" : "s"}${detail}`;
+}
+
+/** How many commit subjects a week's entry shows before summarising the rest as a count. */
+const COMMIT_SUBJECTS_SHOWN = 5;
+
+/** One event as a line the model can read without knowing which system it came from. */
+function describeEvent(event: SourceEvent): string {
+  const when = event.at.replace("T", " ").slice(0, 16);
+  const happened = renderable(event.payload);
+  const spotted = happened.spotted === true ? " *(spotted, not dated by the source)*" : "";
+  const from = happened.from ?? "";
+  const to = happened.to ?? "";
+  const text = (happened.text ?? "").replace(/\s+/g, " ").trim();
+
+  const detail = from || to
+    ? `${from || "?"} to ${to || "?"}`
+    : text.length > 0
+      ? text.length > 300 ? `${text.slice(0, 300)}...` : text
+      : "";
+
+  return `- **${when}** ${event.kind}${detail ? `: ${detail}` : ""}${spotted}`;
 }

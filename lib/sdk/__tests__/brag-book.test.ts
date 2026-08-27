@@ -2,10 +2,15 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtemp, writeFile, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { toBragBookResult, validateBragBookMarkdown, parseReviewCycle, ensureBragBookFrontmatter } from "../brag-book";
+import {
+  toBragBookResult, validateBragBookMarkdown, parseReviewCycle, ensureBragBookFrontmatter,
+  firstDroppedLine, validatePreserved,
+} from "../brag-book";
 import { updateMemory } from "../vault-updates";
 import { escapeCell, renderRow } from "../markdown-table";
-import { bragBookOutputSchema, isFocusItemId, type BragBookOutput } from "../brag-book-schema";
+import {
+  bragBookMarkdownProblem, bragBookOutputSchema, isFocusItemId, type BragBookOutput,
+} from "../brag-book-schema";
 
 const MARKDOWN = "# Brag Book - Week 09, 2026\n\n## Achievements\n\n- Shipped auth";
 
@@ -597,5 +602,256 @@ describe("parseReviewCycle", () => {
     const result = parseReviewCycle(ctx, today);
     expect(result!.nextReview).toBe("Q1 Check-in");
     expect(result!.urgency).toBe("normal");
+  });
+});
+
+describe("regenerating a week that already has an entry", () => {
+  const existing = [
+    "---",
+    "tags:",
+    "  - areas/work",
+    "---",
+    "",
+    "# Brag Book - Week 36, 2026",
+    "",
+    "## Achievements",
+    "",
+    "- Cut search indexing from 40 minutes to 6.",
+    "- Took the on-call rota through a bad week without a page going unanswered.",
+    "",
+    "<!-- COACHING_SESSION -->",
+    "### What went well",
+    "",
+    "You said no to the extra scope.",
+    "<!-- /COACHING_SESSION -->",
+  ].join("\n");
+
+  it("accepts a document that keeps everything and adds to it", () => {
+    const next = existing.replace(
+      "- Took the on-call rota through a bad week without a page going unanswered.",
+      "- Took the on-call rota through a bad week without a page going unanswered.\n- Shipped the query parser rewrite.",
+    );
+
+    expect(firstDroppedLine(existing, next)).toBeUndefined();
+    expect(() => validatePreserved(existing, next)).not.toThrow();
+  });
+
+  it("refuses a document that drops an achievement, and names the one it dropped", () => {
+    // The trigger: the entry records A, the refresh finds B, and the model answers with
+    // a structurally perfect document containing only B. Writing it would delete A.
+    const onlyNew = [
+      "---",
+      "tags:",
+      "  - areas/work",
+      "---",
+      "",
+      "# Brag Book - Week 36, 2026",
+      "",
+      "## Achievements",
+      "",
+      "- Shipped the query parser rewrite.",
+      "",
+      "<!-- COACHING_SESSION -->",
+      "### What went well",
+      "",
+      "You said no to the extra scope.",
+      "<!-- /COACHING_SESSION -->",
+    ].join("\n");
+
+    expect(firstDroppedLine(existing, onlyNew)).toBe("- Cut search indexing from 40 minutes to 6.");
+    expect(() => validatePreserved(existing, onlyNew)).toThrow(/Refusing to write the brag book/);
+    expect(() => validatePreserved(existing, onlyNew)).toThrow(/Cut search indexing from 40 minutes to 6/);
+  });
+
+  it("refuses a document that drops a coaching heading", () => {
+    const withoutHeading = existing.replace("### What went well", "### Something else entirely");
+    expect(firstDroppedLine(existing, withoutHeading)).toBe("### What went well");
+  });
+
+  it("ignores lines outside the achievements and coaching sections", () => {
+    // Only what someone wrote down about the week is protected. The framing around it is
+    // the model's to rewrite, or a cosmetic change would fail an otherwise good week.
+    const rewordedIntro = existing.replace("# Brag Book - Week 36, 2026", "# Week 36, 2026");
+    expect(firstDroppedLine(existing, rewordedIntro)).toBeUndefined();
+  });
+
+  it("says nothing is dropped when there was nothing there to drop", () => {
+    expect(firstDroppedLine("", "# Brag Book\n\n## Achievements\n\n- Something new.")).toBeUndefined();
+  });
+});
+
+describe("moving an achievement instead of keeping it", () => {
+  const existing = [
+    "# Brag Book - Week 36, 2026",
+    "",
+    "## Achievements",
+    "",
+    "- Cut search indexing from 40 minutes to 6.",
+    "",
+    "<!-- COACHING_SESSION -->",
+    "### What went well",
+    "",
+    "You said no to the extra scope.",
+    "<!-- /COACHING_SESSION -->",
+  ].join("\n");
+
+  it("does not count a mention in the coaching prose as keeping the achievement", () => {
+    // The trigger: the line is taken out of the achievements and repeated in the
+    // coaching text. A check for the words anywhere in the document sees them and calls
+    // it preserved; the list someone reads next year has lost the entry.
+    const moved = [
+      "# Brag Book - Week 36, 2026",
+      "",
+      "## Achievements",
+      "",
+      "- Shipped the query parser rewrite.",
+      "",
+      "<!-- COACHING_SESSION -->",
+      "### What went well",
+      "",
+      "Earlier you noted: - Cut search indexing from 40 minutes to 6.",
+      "<!-- /COACHING_SESSION -->",
+    ].join("\n");
+
+    expect(firstDroppedLine(existing, moved)).toBe("- Cut search indexing from 40 minutes to 6.");
+  });
+
+  it("does not count an achievement bullet as keeping a coaching heading", () => {
+    const moved = existing
+      .replace("### What went well", "Nothing in particular.")
+      .replace("- Cut search indexing from 40 minutes to 6.", "- Cut search indexing from 40 minutes to 6.\n- ### What went well");
+
+    expect(firstDroppedLine(existing, moved)).toBe("### What went well");
+  });
+
+  it("is happy when both sections keep what they had", () => {
+    const added = existing.replace(
+      "- Cut search indexing from 40 minutes to 6.",
+      "- Cut search indexing from 40 minutes to 6.\n- Shipped the query parser rewrite.",
+    );
+    expect(firstDroppedLine(existing, added)).toBeUndefined();
+  });
+});
+
+describe("an achievements heading the validator accepts", () => {
+  /** The body is the same in every case; only the heading changes. */
+  function entry(heading: string): string {
+    return [
+      "# Brag Book - Week 36, 2026",
+      "",
+      heading,
+      "",
+      "- Cut search indexing from 40 minutes to 6.",
+      "",
+      "<!-- COACHING_SESSION -->",
+      "### What went well",
+      "",
+      "You said no to the extra scope.",
+      "<!-- /COACHING_SESSION -->",
+    ].join("\n");
+  }
+
+  /** The same document with the achievement gone, which is what must be refused. */
+  function stripped(heading: string): string {
+    return entry(heading).replace("- Cut search indexing from 40 minutes to 6.", "- Only the new thing.");
+  }
+
+  it.each([
+    ["plain", "## Achievements"],
+    ["bolded", "## **Achievements**"],
+    ["with a colon", "## Achievements:"],
+    ["with closing hashes", "## Achievements ##"],
+    ["indented three spaces", "   ## Achievements"],
+    ["singular", "## Achievement"],
+    ["at another depth", "# Achievements"],
+    ["underlined instead of hashed", "Achievements\n------------"],
+  ])("is read by the gate as well: %s", (_name, heading) => {
+    // The trigger: the validator accepts every one of these as an achievements section,
+    // and the gate recognised only the literal `## Achievements`. A book written any
+    // other way passed validation with its achievements invisible to the gate, so every
+    // one of them could be dropped without a word.
+    expect(bragBookMarkdownProblem(entry(heading))).toBeNull();
+    expect(firstDroppedLine(entry(heading), stripped(heading)))
+      .toBe("- Cut search indexing from 40 minutes to 6.");
+    expect(firstDroppedLine(entry(heading), entry(heading))).toBeUndefined();
+  });
+
+  it("still notices a dropped achievement when the two documents write the heading differently", () => {
+    // A model that reformats the heading has not removed anything by doing so, and one
+    // that reformats it while dropping a line has.
+    expect(firstDroppedLine(entry("## Achievements"), entry("## **Achievements**"))).toBeUndefined();
+    expect(firstDroppedLine(entry("## Achievements"), stripped("## Achievements:")))
+      .toBe("- Cut search indexing from 40 minutes to 6.");
+  });
+
+  it("reads a coaching heading however it is written", () => {
+    const existing = entry("## Achievements");
+    const reworded = existing.replace("### What went well", "### **What went well**:");
+    // Bolding and a colon are the same heading; a different heading is a dropped one.
+    expect(firstDroppedLine(existing, reworded)).toBeUndefined();
+    expect(firstDroppedLine(existing, existing.replace("### What went well", "### Something else")))
+      .toBe("### What went well");
+  });
+});
+
+describe("layouts the validator accepts that the gate used to look past", () => {
+  it("protects achievements written inside the coaching block", () => {
+    // The trigger: the validator does not care where the achievements section sits, so a
+    // document that opens the coaching block before it passes — and a gate that stopped
+    // reading headings once it saw the marker never found the section at all, leaving
+    // every achievement in it free to be dropped.
+    const existing = [
+      "# Brag Book - Week 36, 2026",
+      "",
+      "<!-- COACHING_SESSION -->",
+      "",
+      "## Achievements",
+      "",
+      "- Cut search indexing from 40 minutes to 6.",
+      "",
+      "<!-- /COACHING_SESSION -->",
+    ].join("\n");
+    const stripped = existing.replace("- Cut search indexing from 40 minutes to 6.", "- Only the new thing.");
+
+    expect(bragBookMarkdownProblem(existing)).toBeNull();
+    expect(firstDroppedLine(existing, stripped)).toBe("- Cut search indexing from 40 minutes to 6.");
+    expect(firstDroppedLine(existing, existing)).toBeUndefined();
+  });
+
+  it("protects a coaching heading written at a depth other than three", () => {
+    const existing = [
+      "# Brag Book - Week 36, 2026",
+      "",
+      "## Achievements",
+      "",
+      "- Cut search indexing from 40 minutes to 6.",
+      "",
+      "<!-- COACHING_SESSION -->",
+      "#### What went well",
+      "",
+      "You said no to the extra scope.",
+      "<!-- /COACHING_SESSION -->",
+    ].join("\n");
+
+    expect(bragBookMarkdownProblem(existing)).toBeNull();
+    expect(firstDroppedLine(existing, existing.replace("#### What went well", "#### Something else")))
+      .toBe("#### What went well");
+  });
+
+  it("protects what a document says before its first heading", () => {
+    // Nothing puts a line there on purpose, but the run accepts a document that opens
+    // with one, and a line someone wrote about the week is a line someone wrote about it.
+    const existing = [
+      "A quiet week, mostly spent on the indexer.",
+      "",
+      "## Achievements",
+      "",
+      "- Cut search indexing from 40 minutes to 6.",
+    ].join("\n");
+    const withoutIt = existing.replace("A quiet week, mostly spent on the indexer.\n\n", "");
+
+    expect(bragBookMarkdownProblem(existing)).toBeNull();
+    expect(firstDroppedLine(existing, withoutIt)).toBe("A quiet week, mostly spent on the indexer.");
+    expect(firstDroppedLine(existing, existing)).toBeUndefined();
   });
 });

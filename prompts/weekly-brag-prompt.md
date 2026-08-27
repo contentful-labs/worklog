@@ -298,13 +298,14 @@ IMPORTANT — proactive research expectations:
 4. When Confluence pages appear in the work log, use fetchConfluencePage to understand what the engineer contributed.
 5. Your coaching and brag book quality directly depends on how well you understand the engineer's actual work — surface-level summaries from ticket titles are not enough.
 
-CRITICAL — ticket status freshness:
-6. ALWAYS use fetchJiraTicket to get the latest status before writing about ANY ticket in the brag book or coaching notes. The work log snapshot may be stale — tickets change status after the data was fetched.
-7. Check ticket comments — they often contain important context: decisions made, blockers raised, scope changes, reviewer feedback, or follow-up actions that the ticket title/description alone won't capture.
-8. If a ticket's current status contradicts what the work log shows (e.g., work log says "In Progress" but ticket is now "Done" or "Won't Do"), use the CURRENT status and adjust your narrative accordingly.
-9. Do NOT describe a ticket as "in progress" or "blocked" if it has since been resolved. Do NOT claim completion if the ticket was reopened or reverted.
+CRITICAL — the week is a closed record, not a view of today:
+6. The work log below holds what happened during this week, each thing dated by when it happened. That is the week. Write it from that.
+7. For a PAST week, use the state as of the end of that week. Research tools are for understanding what the work WAS — read the ticket to learn what it was about, what was decided, what the comments of that week said. They are not for discovering what the ticket looks like now and narrating the week as though that was already known.
+8. A ticket that moved after the week ended moved in a later week. That transition belongs to that later week and will appear in its own work log. Do not write it into this one, and do not revise this week's account because of it.
+9. For the CURRENT week, today's state IS this week's state, so live status is fair and worth checking.
+10. Do not describe something as unresolved if the work log for THIS week shows it resolved, and do not claim a completion this week's log does not show.
 
-When you discover via research that a ticket's current status differs from the work log data, always use the CURRENT status in your brag book entry. The brag book should reflect reality at generation time, not the stale snapshot. Write about what actually happened — if a ticket was completed after the week ended but before generation, note the completion.
+The point is that a week, once written, stays true. Re-reading it later should show what was known then, and the story of what happened afterwards should be found in the weeks it happened in.
 </available_research_tools>
 
 <parsing_notes>

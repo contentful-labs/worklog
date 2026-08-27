@@ -71,11 +71,14 @@ export type { ModelPrice, LongContextTier, StepTokens } from "./pricing";
 export { PRICING_AS_OF, MODEL_ALIASES_AS_OF, priceFor, resolveModelAlias, pricedModels, estimateCostUsd, formatCostUsd } from "./pricing";
 
 // Markdown generation
-export { generateMarkdown } from "./markdown";
+export { generateMarkdown, generateEventMarkdown } from "./markdown";
 
 // Brag book result
 export type { BragBookResult, ReviewInfo } from "./brag-book";
-export { toBragBookResult, validateBragBookMarkdown, parseReviewCycle, ensureBragBookFrontmatter } from "./brag-book";
+export {
+  toBragBookResult, validateBragBookMarkdown, parseReviewCycle, ensureBragBookFrontmatter,
+  validatePreserved, firstDroppedLine,
+} from "./brag-book";
 
 // Brag book output schema
 export type { BragBookOutput, MemoryItem, MemoryGraduation, FocusStatus } from "./brag-book-schema";
@@ -144,6 +147,24 @@ export {
   buildTeamSprintJql,
   fetchDataForWeek,
 } from "./data-fetch";
+
+// Sources and the event ledger
+export type {
+  Source, SourceBatch, SourceEvent, SourceSnapshot, SourceContext, SourceState,
+  SourceAvailability, SourceWindow, SourceRuntime,
+} from "./sources";
+export {
+  emptyBatch, mergeBatches, sourceContext, EVENT_KINDS, PAYLOAD_TITLE, PAYLOAD_URL, PAYLOAD_TEXT,
+} from "./sources";
+export type {
+  Ledger, LedgerSnapshot, RecordResult, CollectionWeek, CollectionOutcome, SourceOutcome,
+} from "./ledger";
+export type { RenderablePayload, CacheEnv } from "./ledger";
+export {
+  openLedger, ledgerRoot, weekWindow, collectIntoLedger, eventsByItem, newEvents, renderable,
+  isSafeSourceName,
+} from "./ledger";
+export { allSources, jiraSource, confluenceSource, githubSource } from "./source-adapters";
 
 // Doc generators
 export { generateProfileDoc, generateWorkContextDoc, generateCoachPersonaDoc } from "./doc-generators";

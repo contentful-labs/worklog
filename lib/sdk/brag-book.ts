@@ -1,5 +1,6 @@
 import {
   MAX_NEW_FOCUS_ITEMS,
+  bragBookEntry,
   bragBookMarkdownProblem,
   validFocusStatusSchema,
   validImpactLogEntrySchema,
@@ -88,6 +89,50 @@ export function validateBragBookMarkdown(markdown: string): void {
       `Re-run the week; if it repeats, the prompt's output_format section and the model are out of step.`,
     );
   }
+}
+
+/**
+ * The first thing the new document drops, or nothing if it drops nothing.
+ *
+ * Regenerating a week adds to its entry; it never removes. The prompt says so, but a
+ * prompt is a request and this is the week's only record: a model that answers with a
+ * structurally perfect document containing only the new material would otherwise
+ * replace a month of achievements with one line, atomically and irreversibly.
+ */
+export function firstDroppedLine(existing: string, next: string): string | undefined {
+  const before = bragBookEntry(existing);
+  const after = bragBookEntry(next);
+
+  const kept = new Set(after.achievements);
+  const dropped = before.achievements.find((line) => !kept.has(line));
+  if (dropped !== undefined) return dropped;
+
+  // Anything written before the first heading is protected as a line rather than as a
+  // section: it has no section to belong to, and the new document only has to still
+  // contain it somewhere.
+  const droppedPreamble = before.preamble.find((line) => !next.includes(line));
+  if (droppedPreamble !== undefined) return droppedPreamble;
+
+  const headings = new Set(after.coachingHeadings.map((heading) => heading.key));
+  return before.coachingHeadings.find((heading) => !headings.has(heading.key))?.text;
+}
+
+/**
+ * Refuse to write a regenerated week that lost something.
+ *
+ * Named so the failure says what is missing. "The model returned a shorter document"
+ * would leave the reader to work out which of forty lines went, from a file that no
+ * longer contains it.
+ */
+export function validatePreserved(existing: string, next: string): void {
+  const dropped = firstDroppedLine(existing, next);
+  if (dropped === undefined) return;
+
+  throw new Error(
+    `Refusing to write the brag book: the regenerated week drops "${dropped}", which the existing entry records. ` +
+    `Nothing was written to the vault. A refresh adds to a week, it never rewrites it; re-run the week, and if it ` +
+    `repeats, the prompt's amend instructions and the model are out of step.`,
+  );
 }
 
 /**

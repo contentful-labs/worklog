@@ -2,8 +2,16 @@
  * ISO week date utilities — pure functions, no I/O.
  */
 
+/**
+ * The ISO week a moment falls in.
+ *
+ * Read in UTC, deliberately. The collection windows are UTC, so filing an event by the
+ * host's local calendar puts anything near midnight in a different week from the window
+ * that fetched it: under `TZ=Europe/London`, an event at 23:30Z on a Sunday belongs to
+ * the week that has just ended and was being filed into the one beginning.
+ */
 export function getWeekNumber(date: Date): number {
-  const d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
+  const d = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
   const dayNum = d.getUTCDay() || 7;
   d.setUTCDate(d.getUTCDate() + 4 - dayNum);
   const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
@@ -16,7 +24,7 @@ export function weekId(week: number, year: number): string {
 
 export function weekIdForDate(d: Date): string {
   const wn = getWeekNumber(d);
-  const utc = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
+  const utc = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
   const dayNum = utc.getUTCDay() || 7;
   utc.setUTCDate(utc.getUTCDate() + 4 - dayNum);
   const isoYear = utc.getUTCFullYear();
@@ -54,7 +62,7 @@ export function getExpectedBragBookWeeks(
 
   for (let i = 0; i < weeks; i++) {
     const d = new Date(end);
-    d.setDate(d.getDate() - i * 7);
+    d.setUTCDate(d.getUTCDate() - i * 7);
     const wid = weekIdForDate(d);
 
     if (sinceWeekId && wid < sinceWeekId) break;
@@ -70,4 +78,45 @@ export function formatDuration(ms: number): string {
   if (ms < 1000) return `${ms}ms`;
   if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
   return `${Math.floor(ms / 60000)}m ${Math.round((ms % 60000) / 1000)}s`;
+}
+
+/**
+ * `--since`, if it is a day that exists.
+ *
+ * The format check is not enough on its own: `2026-02-31` matches it, and `new Date`
+ * rolls it forward to March 3 without complaint. Round-tripping the parsed date back to
+ * a string is what catches a day that was never on the calendar.
+ */
+export function parseSince(value: string): string {
+  const failure = new Error("--since must be a real date in YYYY-MM-DD form, for example 2026-01-31");
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) throw failure;
+
+  const parsed = new Date(`${value}T00:00:00.000Z`);
+  if (Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== value) throw failure;
+  return value;
+}
+
+/**
+ * `--week`, if that week exists in that year.
+ *
+ * Most ISO years have 52 weeks and some have 53, so the bound is the year's own last
+ * week rather than a fixed number: asking for 2026-W53 should fail, and 2026-W99 should
+ * not quietly become a range in 2027.
+ */
+export function parseWeek(value: string): string {
+  const match = /^(\d{4})-W(\d{1,2})$/.exec(value);
+  if (!match) throw new Error("--week must be in YYYY-WNN form, for example 2026-W06");
+
+  const year = Number.parseInt(match[1], 10);
+  const week = Number.parseInt(match[2], 10);
+  const last = weeksInYear(year);
+  if (week < 1 || week > last) {
+    throw new Error(`--week must be between ${year}-W01 and ${weekId(last, year)}; ${value} is not a week of ${year}`);
+  }
+  return weekId(week, year);
+}
+
+/** 52, or 53 in a long year. December 28 is always in the last ISO week of its year. */
+function weeksInYear(year: number): number {
+  return getWeekNumber(new Date(Date.UTC(year, 11, 28)));
 }

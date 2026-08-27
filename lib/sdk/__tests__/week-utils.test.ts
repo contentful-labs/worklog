@@ -106,3 +106,43 @@ describe("re-exported getExpectedBragBookWeeks", () => {
     expect(weeks[0]).toMatch(/^\d{4}-W\d{2}$/);
   });
 });
+
+describe("a moment near midnight, on a machine that is not on UTC", () => {
+  /**
+   * The same reading the host's local calendar would have given.
+   *
+   * `TZ` is read when the process starts, so rather than restarting it, this recomputes
+   * the old behaviour: build the day from the local getters and take the ISO week of
+   * that. Under `TZ=Europe/London` in summer, 23:30Z on a Sunday is 00:30 on Monday, so
+   * the local reading is the week beginning and the UTC one is the week ending.
+   */
+  function weekIdByLocalCalendar(d: Date): string {
+    const localDay = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
+    return weekIdForDate(localDay);
+  }
+
+  it("is filed in the week the collection window was asking about", () => {
+    // The trigger: collection windows are UTC. An event at 23:30Z on the Sunday of W33 is
+    // inside W33's window; reading it on a local calendar an hour ahead files it in W34,
+    // and the week that fetched it never shows it.
+    const sundayNight = new Date("2026-08-16T23:30:00.000Z");
+
+    expect(weekIdForDate(sundayNight)).toBe("2026-W33");
+    // The last instant of the week, and the first of the next, both land where the
+    // window that covers them does.
+    expect(weekIdForDate(new Date("2026-08-16T23:59:59.999Z"))).toBe("2026-W33");
+    expect(weekIdForDate(new Date("2026-08-17T00:00:00.000Z"))).toBe("2026-W34");
+  });
+
+  it("gives the same answer whatever the host clock is offset by", () => {
+    // Offsetting the moment is the same thing a different `TZ` does to the local getters.
+    const sundayNight = new Date("2026-08-16T23:30:00.000Z");
+    const shifted = new Date(sundayNight.getTime() + 60 * 60 * 1000);
+
+    expect(weekIdForDate(sundayNight)).toBe("2026-W33");
+    expect(weekIdForDate(shifted)).toBe("2026-W34");
+    // And the local-calendar reading of the original is whatever this host's offset makes
+    // it, which is exactly why it is not what the ledger files by.
+    expect(["2026-W33", "2026-W34"]).toContain(weekIdByLocalCalendar(sundayNight));
+  });
+});

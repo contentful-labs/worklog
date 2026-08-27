@@ -1,5 +1,5 @@
-import { describe, it, expect, vi, afterEach } from "vitest";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -9,10 +9,15 @@ vi.mock("../../lib/sdk/ai", () => ({ aiQueryStructured: vi.fn() }));
 
 // Same for the network. runWorklog's own control flow is what is under test.
 vi.mock("../../lib/sdk/data-fetch", () => ({
-  buildHeaders: () => ({}),
+  buildHeaders: () => ({ atlassian: {}, github: {} }),
   getAccountId: async () => "acct-1",
   getGitHubUsername: async () => "testuser",
   fetchDataForWeek: async () => ({ issues: [], pages: [], prs: [], reviews: [], teamSprintItems: [] }),
+  // The sources read through these. An empty week is the right shape here: what is under
+  // test is what runWorklog does with the model's answer.
+  fetchJiraIssues: async () => [],
+  searchConfluence: async () => [],
+  fetchGitHubPRs: async () => [],
 }));
 
 // Only writeFileAtomic is stood in for, so the rest of the vault writers stay real.
@@ -38,6 +43,9 @@ const WEEK = "2026-W09";
 // like; without it the frontmatter migration would rewrite the fixture mid-test.
 const EXISTING_WORK_LOG = "---\ntags:\n  - areas/work\n  - areas/work/work-log\n---\n\n# Work Log 2026-W09\n\nReal fetched activity from the original run.\n";
 const EXISTING_BRAG_BOOK = "---\ntags:\n  - areas/work\n---\n\n# Brag Book - Week 09, 2026\n\n## Achievements\n\n- Real work\n";
+
+/** What a well-behaved regeneration returns: the week's own record, plus one new line. */
+const KEEPS_EXISTING = "# Brag Book - Week 09, 2026\n\n## Achievements\n\n- Real work\n- Shipped the thing";
 
 /** A structurally valid response whose document would fail validation. */
 const BAD_OUTPUT = {
@@ -89,6 +97,15 @@ function writeConfig(configHome: string, vault: string, options: { withTimeline?
   );
 }
 
+// Jira's expanded search posts to the API directly rather than through the mocked
+// module, so the network is closed off here too. An empty week is all this file needs:
+// what is under test is what runWorklog does with the model's answer.
+beforeEach(() => {
+  vi.stubGlobal("fetch", async () =>
+    new Response(JSON.stringify({ issues: [] }), { status: 200, headers: { "content-type": "application/json" } }),
+  );
+});
+
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.resetModules();
@@ -107,12 +124,14 @@ describe("runWorklog write ordering", () => {
     const configHome = join(tmp, "config");
     const vault = join(tmp, "vault");
     const previousConfigHome = process.env.XDG_CONFIG_HOME;
+    const previousCacheHome = process.env.XDG_CACHE_HOME;
     const previousAtlassian = process.env.ATLASSIAN_API_TOKEN;
     const previousGitHub = process.env.GITHUB_TOKEN;
 
     seedVault(vault);
     writeConfig(configHome, vault);
     process.env.XDG_CONFIG_HOME = configHome;
+    process.env.XDG_CACHE_HOME = join(tmp, "cache");
     process.env.ATLASSIAN_API_TOKEN = "test-atlassian-token";
     process.env.GITHUB_TOKEN = "test-github-token";
 
@@ -141,6 +160,8 @@ describe("runWorklog write ordering", () => {
     } finally {
       if (previousConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
       else process.env.XDG_CONFIG_HOME = previousConfigHome;
+      if (previousCacheHome === undefined) delete process.env.XDG_CACHE_HOME;
+      else process.env.XDG_CACHE_HOME = previousCacheHome;
       if (previousAtlassian === undefined) delete process.env.ATLASSIAN_API_TOKEN;
       else process.env.ATLASSIAN_API_TOKEN = previousAtlassian;
       if (previousGitHub === undefined) delete process.env.GITHUB_TOKEN;
@@ -156,12 +177,14 @@ describe("runWorklog write ordering", () => {
     const configHome = join(tmp, "config");
     const vault = join(tmp, "vault");
     const previousConfigHome = process.env.XDG_CONFIG_HOME;
+    const previousCacheHome = process.env.XDG_CACHE_HOME;
     const previousAtlassian = process.env.ATLASSIAN_API_TOKEN;
     const previousGitHub = process.env.GITHUB_TOKEN;
 
     seedVault(vault);
     writeConfig(configHome, vault);
     process.env.XDG_CONFIG_HOME = configHome;
+    process.env.XDG_CACHE_HOME = join(tmp, "cache");
     process.env.ATLASSIAN_API_TOKEN = "test-atlassian-token";
     process.env.GITHUB_TOKEN = "test-github-token";
 
@@ -175,7 +198,7 @@ describe("runWorklog write ordering", () => {
       const { aiQueryStructured } = await import("../../lib/sdk/ai");
       vi.mocked(aiQueryStructured).mockResolvedValue({
         ...BAD_OUTPUT,
-        bragBookMarkdown: "# Brag Book - Week 09, 2026\n\n## Achievements\n\n- Shipped the thing",
+        bragBookMarkdown: KEEPS_EXISTING,
       });
 
       // The brag book is written first, so failing it must leave the work log alone too.
@@ -202,6 +225,8 @@ describe("runWorklog write ordering", () => {
       restoreWrite();
       if (previousConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
       else process.env.XDG_CONFIG_HOME = previousConfigHome;
+      if (previousCacheHome === undefined) delete process.env.XDG_CACHE_HOME;
+      else process.env.XDG_CACHE_HOME = previousCacheHome;
       if (previousAtlassian === undefined) delete process.env.ATLASSIAN_API_TOKEN;
       else process.env.ATLASSIAN_API_TOKEN = previousAtlassian;
       if (previousGitHub === undefined) delete process.env.GITHUB_TOKEN;
@@ -215,12 +240,14 @@ describe("runWorklog write ordering", () => {
     const configHome = join(tmp, "config");
     const vault = join(tmp, "vault");
     const previousConfigHome = process.env.XDG_CONFIG_HOME;
+    const previousCacheHome = process.env.XDG_CACHE_HOME;
     const previousAtlassian = process.env.ATLASSIAN_API_TOKEN;
     const previousGitHub = process.env.GITHUB_TOKEN;
 
     seedVault(vault);
     writeConfig(configHome, vault);
     process.env.XDG_CONFIG_HOME = configHome;
+    process.env.XDG_CACHE_HOME = join(tmp, "cache");
     process.env.ATLASSIAN_API_TOKEN = "test-atlassian-token";
     process.env.GITHUB_TOKEN = "test-github-token";
 
@@ -234,7 +261,7 @@ describe("runWorklog write ordering", () => {
       const { aiQueryStructured } = await import("../../lib/sdk/ai");
       vi.mocked(aiQueryStructured).mockResolvedValue({
         ...BAD_OUTPUT,
-        bragBookMarkdown: "# Brag Book - Week 09, 2026\n\n## Achievements\n\n- Shipped the thing",
+        bragBookMarkdown: KEEPS_EXISTING,
       });
 
       const { runWorklog } = await import("../worklog");
@@ -247,6 +274,8 @@ describe("runWorklog write ordering", () => {
     } finally {
       if (previousConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
       else process.env.XDG_CONFIG_HOME = previousConfigHome;
+      if (previousCacheHome === undefined) delete process.env.XDG_CACHE_HOME;
+      else process.env.XDG_CACHE_HOME = previousCacheHome;
       if (previousAtlassian === undefined) delete process.env.ATLASSIAN_API_TOKEN;
       else process.env.ATLASSIAN_API_TOKEN = previousAtlassian;
       if (previousGitHub === undefined) delete process.env.GITHUB_TOKEN;
@@ -264,12 +293,139 @@ describe("team attribution without a timeline file", () => {
     const configHome = join(tmp, "config");
     const vault = join(tmp, "vault");
     const previousConfigHome = process.env.XDG_CONFIG_HOME;
+    const previousCacheHome = process.env.XDG_CACHE_HOME;
     const previousAtlassian = process.env.ATLASSIAN_API_TOKEN;
     const previousGitHub = process.env.GITHUB_TOKEN;
 
     seedVault(vault);
     writeConfig(configHome, vault, { withTimeline: false });
     process.env.XDG_CONFIG_HOME = configHome;
+    process.env.XDG_CACHE_HOME = join(tmp, "cache");
+    process.env.ATLASSIAN_API_TOKEN = "test-atlassian-token";
+    process.env.GITHUB_TOKEN = "test-github-token";
+
+    vi.stubGlobal("Bun", {
+      write: async (path: string, content: string) => writeFileSync(path, content),
+      file: (path: string) => ({ text: async () => readFileSync(path, "utf8") }),
+    });
+
+    try {
+      vi.resetModules();
+      const { aiQueryStructured } = await import("../../lib/sdk/ai");
+      vi.mocked(aiQueryStructured).mockResolvedValue({ ...BAD_OUTPUT, bragBookMarkdown: KEEPS_EXISTING });
+
+      const { runWorklog } = await import("../worklog");
+      await runWorklog({ week: WEEK, noPrompt: true, force: true, verbose: false });
+
+      const [call] = vi.mocked(aiQueryStructured).mock.calls;
+      const prompt = call[0].prompt;
+
+      expect(prompt).toContain("Search");
+      expect(prompt).not.toContain("Unknown");
+    } finally {
+      if (previousConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
+      else process.env.XDG_CONFIG_HOME = previousConfigHome;
+      if (previousCacheHome === undefined) delete process.env.XDG_CACHE_HOME;
+      else process.env.XDG_CACHE_HOME = previousCacheHome;
+      if (previousAtlassian === undefined) delete process.env.ATLASSIAN_API_TOKEN;
+      else process.env.ATLASSIAN_API_TOKEN = previousAtlassian;
+      if (previousGitHub === undefined) delete process.env.GITHUB_TOKEN;
+      else process.env.GITHUB_TOKEN = previousGitHub;
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("amending a week that already has an entry", () => {
+  it("writes nothing when a valid document drops an achievement the week already has", async () => {
+    // The trigger: the entry records A, the refresh finds B, and the model answers with
+    // a document that passes every structural check and contains only B. Writing it
+    // would delete A from the only place it exists.
+    const tmp = mkdtempSync(join(tmpdir(), "worklog-amend-"));
+    const configHome = join(tmp, "config");
+    const vault = join(tmp, "vault");
+    const previousConfigHome = process.env.XDG_CONFIG_HOME;
+    const previousCacheHome = process.env.XDG_CACHE_HOME;
+
+    seedVault(vault);
+    writeConfig(configHome, vault);
+    process.env.XDG_CONFIG_HOME = configHome;
+    process.env.XDG_CACHE_HOME = join(tmp, "cache");
+
+    vi.stubGlobal("Bun", {
+      write: async (path: string, content: string) => writeFileSync(path, content),
+      file: (path: string) => ({ text: async () => readFileSync(path, "utf8") }),
+    });
+
+    try {
+      vi.resetModules();
+      const { aiQueryStructured } = await import("../../lib/sdk/ai");
+      vi.mocked(aiQueryStructured).mockResolvedValue({
+        ...BAD_OUTPUT,
+        bragBookMarkdown: "# Brag Book - Week 09, 2026\n\n## Achievements\n\n- Only the new thing",
+      });
+
+      const { generateWeek } = await import("../worklog");
+      const { buildVaultPaths, readTeamTimeline } = await import("../../lib/sdk/vault");
+      const { loadConfig, TEAM_TIMELINE_PATH } = await import("../../lib/config");
+      const { getWeekStart, getWeekEnd } = await import("../../lib/sdk/week-utils");
+
+      const config = loadConfig();
+      if (!config) throw new Error("test config did not load");
+      const paths = buildVaultPaths(config, TEAM_TIMELINE_PATH);
+      const workLogPath = join(vault, `${WEEK} Work Log.md`);
+
+      await expect(generateWeek({
+        weekInfo: {
+          weekNumber: 9,
+          year: 2026,
+          startDate: getWeekStart(9, 2026),
+          endDate: getWeekEnd(9, 2026),
+          filename: `${WEEK} Work Log.md`,
+        },
+        wid: WEEK,
+        workLog: "# Work Log\n\nSomething new happened.\n",
+        workLogPath,
+        config,
+        paths,
+        timeline: readTeamTimeline(paths),
+        log: () => {},
+        // SAFETY: generateWeek calls start/stop/message on the spinner and nothing else,
+        // and @clack's own type carries members no fake can supply.
+        spinner: { start: vi.fn(), stop: vi.fn(), message: vi.fn() } as never,
+        amend: { existingBragBook: EXISTING_BRAG_BOOK, newMaterial: "- a comment" },
+      })).rejects.toThrow(/Refusing to write the brag book/);
+
+      // Both documents are exactly as they were.
+      expect(readFileSync(join(vault, `${WEEK} Brag Book.md`), "utf8")).toBe(EXISTING_BRAG_BOOK);
+      expect(readFileSync(workLogPath, "utf8")).toBe(EXISTING_WORK_LOG);
+    } finally {
+      if (previousConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
+      else process.env.XDG_CONFIG_HOME = previousConfigHome;
+      if (previousCacheHome === undefined) delete process.env.XDG_CACHE_HOME;
+      else process.env.XDG_CACHE_HOME = previousCacheHome;
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("regenerating a week that already has an entry", () => {
+  it("writes nothing when --force returns a document that drops an achievement", async () => {
+    // The trigger: `worklog --week X --force` on a week that already has a brag book.
+    // The response is valid and contains only the new material. Without amend mode the
+    // week is overwritten and what it recorded is gone.
+    const tmp = mkdtempSync(join(tmpdir(), "worklog-force-"));
+    const configHome = join(tmp, "config");
+    const vault = join(tmp, "vault");
+    const previousConfigHome = process.env.XDG_CONFIG_HOME;
+    const previousCacheHome = process.env.XDG_CACHE_HOME;
+    const previousAtlassian = process.env.ATLASSIAN_API_TOKEN;
+    const previousGitHub = process.env.GITHUB_TOKEN;
+
+    seedVault(vault);
+    writeConfig(configHome, vault);
+    process.env.XDG_CONFIG_HOME = configHome;
+    process.env.XDG_CACHE_HOME = join(tmp, "cache");
     process.env.ATLASSIAN_API_TOKEN = "test-atlassian-token";
     process.env.GITHUB_TOKEN = "test-github-token";
 
@@ -283,24 +439,168 @@ describe("team attribution without a timeline file", () => {
       const { aiQueryStructured } = await import("../../lib/sdk/ai");
       vi.mocked(aiQueryStructured).mockResolvedValue({
         ...BAD_OUTPUT,
-        bragBookMarkdown: "# Brag Book - Week 09, 2026\n\n## Achievements\n\n- Shipped the thing",
+        bragBookMarkdown: "# Brag Book - Week 09, 2026\n\n## Achievements\n\n- Only the new thing",
       });
 
       const { runWorklog } = await import("../worklog");
-      await runWorklog({ week: WEEK, noPrompt: true, force: true, verbose: false });
+      await expect(
+        runWorklog({ week: WEEK, noPrompt: true, force: true, verbose: false }),
+      ).rejects.toThrow(/Refusing to write the brag book/);
 
-      const [call] = vi.mocked(aiQueryStructured).mock.calls;
-      const prompt = call[0].prompt;
-
-      expect(prompt).toContain("Search");
-      expect(prompt).not.toContain("Unknown");
+      expect(readFileSync(join(vault, `${WEEK} Brag Book.md`), "utf8")).toBe(EXISTING_BRAG_BOOK);
+      expect(readFileSync(join(vault, `${WEEK} Work Log.md`), "utf8")).toBe(EXISTING_WORK_LOG);
     } finally {
       if (previousConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
       else process.env.XDG_CONFIG_HOME = previousConfigHome;
+      if (previousCacheHome === undefined) delete process.env.XDG_CACHE_HOME;
+      else process.env.XDG_CACHE_HOME = previousCacheHome;
       if (previousAtlassian === undefined) delete process.env.ATLASSIAN_API_TOKEN;
       else process.env.ATLASSIAN_API_TOKEN = previousAtlassian;
       if (previousGitHub === undefined) delete process.env.GITHUB_TOKEN;
       else process.env.GITHUB_TOKEN = previousGitHub;
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("what the weekly command accepts on the command line", () => {
+  it("makes the same two checks refresh makes", async () => {
+    const { makeWorklogCommand } = await import("../worklog");
+    const command = makeWorklogCommand().exitOverride().configureOutput({ writeErr: () => {} });
+
+    // The trigger: 2027 has 52 weeks, and `new Date` turns 31 February into 3 March.
+    expect(() => command.parse(["--week", "2027-W53"], { from: "user" })).toThrow(/not a week of 2027/);
+    expect(() => command.parse(["--since", "2026-02-31"], { from: "user" })).toThrow(/real date/);
+  });
+});
+
+describe("a ledger whose metadata cannot be read", () => {
+  it("stops the run rather than offering every week again", async () => {
+    // The trigger: truncate meta.json and run. Without it the ledger cannot say which
+    // weeks have already been written up, so every stored event looks new — and the
+    // marker saying otherwise cannot be saved either, so it happens again next run.
+    const tmp = mkdtempSync(join(tmpdir(), "worklog-corruptmeta-"));
+    const configHome = join(tmp, "config");
+    const cacheHome = join(tmp, "cache");
+    const vault = join(tmp, "vault");
+    const previousConfigHome = process.env.XDG_CONFIG_HOME;
+    const previousCacheHome = process.env.XDG_CACHE_HOME;
+    const previousAtlassian = process.env.ATLASSIAN_API_TOKEN;
+    const previousGitHub = process.env.GITHUB_TOKEN;
+
+    seedVault(vault);
+    writeConfig(configHome, vault);
+    mkdirSync(join(cacheHome, "worklog", "ledger"), { recursive: true });
+    writeFileSync(join(cacheHome, "worklog", "ledger", "meta.json"), '{"version": 2, "sourc');
+
+    process.env.XDG_CONFIG_HOME = configHome;
+    process.env.XDG_CACHE_HOME = cacheHome;
+    process.env.ATLASSIAN_API_TOKEN = "test-atlassian-token";
+    process.env.GITHUB_TOKEN = "test-github-token";
+
+    vi.stubGlobal("Bun", {
+      write: async (path: string, content: string) => writeFileSync(path, content),
+      file: (path: string) => ({ text: async () => readFileSync(path, "utf8") }),
+    });
+
+    // Only `exit` is stood in for; the rest of `process` stays real, because the modules
+    // under test read their env vars from it as they load.
+    const exited: number[] = [];
+    const exit = vi.spyOn(process, "exit").mockImplementation((code) => {
+      // `process.exit` also accepts a string or nullish; the command only ever passes a
+      // number, and Number() turns anything else into the NaN this test would notice.
+      exited.push(Number(code ?? 0));
+      throw new Error("process.exit");
+    });
+
+    try {
+      vi.resetModules();
+      const { aiQueryStructured } = await import("../../lib/sdk/ai");
+      const { runWorklog } = await import("../worklog");
+
+      await expect(runWorklog({ week: WEEK, noPrompt: true, force: true, verbose: false })).rejects.toThrow("process.exit");
+
+      expect(exited).toEqual([1]);
+      // No AI call, and the week the vault already had is untouched.
+      expect(vi.mocked(aiQueryStructured)).not.toHaveBeenCalled();
+      expect(readFileSync(join(vault, `${WEEK} Brag Book.md`), "utf8")).toBe(EXISTING_BRAG_BOOK);
+      expect(readFileSync(join(vault, `${WEEK} Work Log.md`), "utf8")).toBe(EXISTING_WORK_LOG);
+    } finally {
+      if (previousConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
+      else process.env.XDG_CONFIG_HOME = previousConfigHome;
+      if (previousCacheHome === undefined) delete process.env.XDG_CACHE_HOME;
+      else process.env.XDG_CACHE_HOME = previousCacheHome;
+      if (previousAtlassian === undefined) delete process.env.ATLASSIAN_API_TOKEN;
+      else process.env.ATLASSIAN_API_TOKEN = previousAtlassian;
+      if (previousGitHub === undefined) delete process.env.GITHUB_TOKEN;
+      else process.env.GITHUB_TOKEN = previousGitHub;
+      exit.mockRestore();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("a corrupt ledger and a vault that still needs migrating", () => {
+  it("stops before it has rewritten anything in the vault", async () => {
+    // The trigger: invalid meta.json plus a legacy weekly document with no frontmatter.
+    // Running the migrations first rewrites the document and leaves a backup behind, and
+    // only then does the run stop — so a user who has to go and repair the cache finds
+    // their vault already changed by a run that did nothing else.
+    const tmp = mkdtempSync(join(tmpdir(), "worklog-order-migrate-"));
+    const configHome = join(tmp, "config");
+    const cacheHome = join(tmp, "cache");
+    const vault = join(tmp, "vault");
+    const previousConfigHome = process.env.XDG_CONFIG_HOME;
+    const previousCacheHome = process.env.XDG_CACHE_HOME;
+    const previousAtlassian = process.env.ATLASSIAN_API_TOKEN;
+    const previousGitHub = process.env.GITHUB_TOKEN;
+
+    seedVault(vault);
+    writeConfig(configHome, vault);
+    // A weekly document from before frontmatter existed.
+    const legacy = join(vault, "2026-W08 Work Log.md");
+    const legacyContent = "# Work Log - Week 08, 2026\n\nSomething that happened.\n";
+    writeFileSync(legacy, legacyContent);
+
+    mkdirSync(join(cacheHome, "worklog", "ledger"), { recursive: true });
+    writeFileSync(join(cacheHome, "worklog", "ledger", "meta.json"), "{ not json");
+
+    process.env.XDG_CONFIG_HOME = configHome;
+    process.env.XDG_CACHE_HOME = cacheHome;
+    process.env.ATLASSIAN_API_TOKEN = "test-atlassian-token";
+    process.env.GITHUB_TOKEN = "test-github-token";
+
+    vi.stubGlobal("Bun", {
+      write: async (path: string, content: string) => writeFileSync(path, content),
+      file: (path: string) => ({ text: async () => readFileSync(path, "utf8") }),
+    });
+
+    const exited: number[] = [];
+    const exit = vi.spyOn(process, "exit").mockImplementation((code) => {
+      exited.push(Number(code ?? 0));
+      throw new Error("process.exit");
+    });
+
+    try {
+      vi.resetModules();
+      const { runWorklog } = await import("../worklog");
+
+      await expect(runWorklog({ week: WEEK, noPrompt: true, force: true, verbose: false })).rejects.toThrow("process.exit");
+
+      expect(exited).toEqual([1]);
+      // The legacy document is exactly as it was, and no backup was left beside it.
+      expect(readFileSync(legacy, "utf8")).toBe(legacyContent);
+      expect(readdirSync(vault).filter((name) => name.includes("backup") || name.endsWith(".bak"))).toEqual([]);
+    } finally {
+      if (previousConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
+      else process.env.XDG_CONFIG_HOME = previousConfigHome;
+      if (previousCacheHome === undefined) delete process.env.XDG_CACHE_HOME;
+      else process.env.XDG_CACHE_HOME = previousCacheHome;
+      if (previousAtlassian === undefined) delete process.env.ATLASSIAN_API_TOKEN;
+      else process.env.ATLASSIAN_API_TOKEN = previousAtlassian;
+      if (previousGitHub === undefined) delete process.env.GITHUB_TOKEN;
+      else process.env.GITHUB_TOKEN = previousGitHub;
+      exit.mockRestore();
       rmSync(tmp, { recursive: true, force: true });
     }
   });
