@@ -1305,3 +1305,109 @@ describe("a Confluence page edited more than once in a week", () => {
     expect(batch.snapshots).toEqual([]);
   });
 });
+
+describe("what the user said on their own pull request", () => {
+  it("is read on the first fetch of the week they said it in", async () => {
+    // The trigger: PR opened Monday, the user answers review feedback on Tuesday, and
+    // the week is first fetched on Sunday. Both searches return the PR; skipping the
+    // conversation because the PR was already snapshotted lost Tuesday entirely, and
+    // the window is then marked as read.
+    const commentCalls: string[] = [];
+    const monday = { ...authoredPR, created_at: "2026-03-02T09:00:00Z", closed_at: null, pull_request: { url: authoredPR.pull_request.url } };
+    server.use(
+      searchHandler([monday], [monday]),
+      http.get("https://api.github.com/repos/example-org/repo/issues/42/comments", ({ request }) => {
+        commentCalls.push(new URL(request.url).pathname);
+        return HttpResponse.json([
+          { id: 5001, user: { login: USERNAME }, body: "Split out, good catch.", created_at: "2026-03-03T14:00:00Z" },
+          { id: 5002, user: { login: "other-user" }, body: "Looks better.", created_at: "2026-03-03T15:00:00Z" },
+        ]);
+      }),
+    );
+
+    const batch = await githubSource(() => NOW).fetchWindow(window, makeContext());
+
+    expect(commentCalls).toHaveLength(1);
+    const comments = batch.events.filter((e) => e.kind === "comment");
+    expect(comments.map((e) => e.id)).toEqual(["5001"]);
+    expect(comments[0].at).toBe("2026-03-03T14:00:00.000Z");
+    // One snapshot, not two: the PR is in both search results.
+    expect(batch.snapshots).toHaveLength(1);
+  });
+
+  it("is asked for with GitHub's own since filter on a delta", async () => {
+    const since = new Date("2026-03-08T00:00:00Z");
+    const asked: string[] = [];
+    server.use(
+      http.get("https://api.github.com/search/issues", () => HttpResponse.json({ total_count: 0, items: [] })),
+      http.get("https://api.github.com/repos/example-org/repo/pulls/42/reviews", () => HttpResponse.json([])),
+      http.get("https://api.github.com/repos/example-org/repo/pulls/42", () => HttpResponse.json(authoredPRDetail)),
+      http.get("https://api.github.com/repos/example-org/repo/issues/42/comments", ({ request }) => {
+        asked.push(new URL(request.url).searchParams.get("since") || "");
+        return HttpResponse.json([]);
+      }),
+    );
+
+    await githubSource(() => NOW).fetchSince(since, [PR_URL], makeContext());
+
+    // Without it a delta pages through years of an old thread to reach yesterday.
+    expect(asked).toEqual([since.toISOString()]);
+  });
+});
+
+describe("a read that did not finish", () => {
+  it("keeps the Confluence page rather than concluding nobody touched it", async () => {
+    // The trigger: page one is fifty of a colleague's versions, the user's edit is on
+    // page two, and page two returns 503. Treating the half-answer as complete drops the
+    // page — and the week is then watermarked, so the edit is never asked for again.
+    // Created by somebody else, so the only thing this week could record is an edit.
+    const theirPage = { ...confluencePage, history: { ...confluencePage.history, createdBy: { accountId: "someone-else" } } };
+    server.use(
+      confluenceHandler([theirPage], []),
+      http.get(`${BASE_URL}/wiki/api/v2/pages/page-1/versions`, ({ request }) => {
+        const cursor = new URL(request.url).searchParams.get("cursor");
+        if (cursor) return HttpResponse.json({}, { status: 503 });
+        return HttpResponse.json({
+          results: [{ number: 9, createdAt: "2026-03-06T10:00:00.000Z", authorId: "someone-else" }],
+          _links: { next: "/wiki/api/v2/pages/page-1/versions?cursor=older" },
+        });
+      }),
+    );
+
+    const batch = await confluenceSource(() => NOW).fetchWindow(window, makeContext());
+
+    expect(batch.incomplete).toBe(true);
+    expect(batch.warnings.some((w) => w.includes("version history of Confluence page page-1"))).toBe(true);
+    // The page is still there to be asked about again, dated by what the search knows.
+    expect(batch.snapshots.map((s) => s.id)).toEqual(["page-1"]);
+    expect(batch.events.filter((e) => e.kind === "version")).toHaveLength(1);
+  });
+
+  it("still drops a page whose history was read in full and held nothing of the user's", async () => {
+    const theirPage = { ...confluencePage, history: { ...confluencePage.history, createdBy: { accountId: "someone-else" } } };
+    server.use(
+      confluenceHandler([theirPage], []),
+      http.get(`${BASE_URL}/wiki/api/v2/pages/page-1/versions`, () =>
+        HttpResponse.json({ results: [{ number: 9, createdAt: "2026-03-06T10:00:00.000Z", authorId: "someone-else" }] }),
+      ),
+    );
+
+    const batch = await confluenceSource(() => NOW).fetchWindow(window, makeContext());
+
+    expect(batch.incomplete).toBeUndefined();
+    expect(batch.snapshots).toEqual([]);
+    expect(batch.events).toEqual([]);
+  });
+
+  it("says so when a pull request's reviews will not load", async () => {
+    server.use(
+      searchHandler([], [reviewedPR]),
+      http.get("https://api.github.com/repos/example-org/repo/pulls/7/reviews", () =>
+        HttpResponse.json({ message: "Server error" }, { status: 500 }),
+      ),
+    );
+
+    const batch = await githubSource(() => NOW).fetchWindow(window, makeContext());
+    expect(batch.incomplete).toBe(true);
+  });
+});

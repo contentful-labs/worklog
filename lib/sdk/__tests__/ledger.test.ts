@@ -754,3 +754,101 @@ describe("the guard on where a file may be written", () => {
     expect(isSafeSourceName("../../victim")).toBe(false);
   });
 });
+
+describe("a source that says it did not finish", () => {
+  const week = (weekId: string, start: string, end: string) => ({
+    weekId,
+    window: { start: new Date(`${start}T00:00:00.000Z`), end: new Date(`${end}T23:59:59.999Z`) },
+  });
+
+  const ctx = (): SourceContext => ({
+    // SAFETY: this fake source reads nothing from config; a real one is handed a real
+    // config by the command, and this test is about the ledger, not about it.
+    config: {} as SourceContext["config"],
+  });
+
+  const found = {
+    source: "jira", kind: "comment", itemId: "TEAM-1234",
+    at: "2026-09-01T09:00:00.000Z", payload: {}, id: "c-1",
+  };
+
+  function source(incomplete: boolean, calls: string[]): Source {
+    return {
+      name: "jira",
+      isAvailable: async () => ({ ok: true }),
+      fetchWindow: async () => {
+        calls.push("window");
+        return { snapshots: [], events: [found], warnings: incomplete ? ["a page would not load"] : [], incomplete: incomplete || undefined };
+      },
+      fetchSince: async () => {
+        calls.push("since");
+        return { snapshots: [], events: [], warnings: [] };
+      },
+    };
+  }
+
+  it("keeps what came back but asks the whole window again next time", async () => {
+    // The trigger: a page of a history that would not load. The events that did arrive
+    // are worth keeping; what an unfinished answer must not buy is the right to stop
+    // asking, because the part that was missed would never be requested again.
+    const weeks = [week("2026-W36", "2026-08-31", "2026-09-06")];
+    const calls: string[] = [];
+    const now = new Date("2026-09-07T10:00:00.000Z");
+
+    const first = await openLedger(root);
+    const outcome = await collectIntoLedger(first, [source(true, calls)], weeks, ctx, now);
+    await first.save();
+
+    expect(first.eventsForWeek("2026-W36")).toHaveLength(1);
+    expect(first.hasWindow("jira", "2026-W36")).toBe(false);
+    expect(outcome.warnings.some((w) => w.includes("did not finish reading 2026-W36"))).toBe(true);
+
+    const second = await openLedger(root);
+    await collectIntoLedger(second, [source(false, calls)], weeks, ctx, new Date("2026-09-07T11:00:00.000Z"));
+
+    // Windowed again rather than skipped to a delta, and the repeat adds nothing.
+    expect(calls).toEqual(["window", "window"]);
+    expect(second.eventsForWeek("2026-W36")).toHaveLength(1);
+    expect(second.hasWindow("jira", "2026-W36")).toBe(true);
+  });
+
+  it("leaves the reading position alone when a delta did not finish", async () => {
+    const weeks = [week("2026-W36", "2026-08-31", "2026-09-06")];
+    const asked: string[] = [];
+    const firstRun = new Date("2026-09-07T10:00:00.000Z");
+
+    const deltaSource = (incomplete: boolean): Source => ({
+      name: "jira",
+      isAvailable: async () => ({ ok: true }),
+      fetchWindow: async () => ({ snapshots: [], events: [], warnings: [] }),
+      fetchSince: async (since) => {
+        asked.push(since.toISOString());
+        // Something did come back, so a run that counted this as coverage would move the
+        // reading position on to it and never ask about the part that failed.
+        return {
+          snapshots: [],
+          events: incomplete
+            ? [{ source: "jira", kind: "comment", itemId: "TEAM-1234", at: "2026-09-07T10:30:00.000Z", payload: {}, id: "c-partial" }]
+            : [],
+          warnings: incomplete ? ["a page would not load"] : [],
+          incomplete: incomplete || undefined,
+        };
+      },
+    });
+
+    const first = await openLedger(root);
+    await collectIntoLedger(first, [deltaSource(false)], weeks, ctx, firstRun);
+    await first.save();
+
+    const second = await openLedger(root);
+    await collectIntoLedger(second, [deltaSource(true)], weeks, ctx, new Date("2026-09-07T11:00:00.000Z"));
+    await second.save();
+
+    const third = await openLedger(root);
+    await collectIntoLedger(third, [deltaSource(false)], weeks, ctx, new Date("2026-09-07T12:00:00.000Z"));
+
+    // The third run asks from where the first run left off, because the second never
+    // finished and so never earned the right to move it.
+    expect(asked).toEqual([firstRun.toISOString(), firstRun.toISOString()]);
+  });
+});
