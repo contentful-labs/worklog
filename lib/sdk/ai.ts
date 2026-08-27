@@ -24,6 +24,15 @@ const OPENAI_INSTRUCTIONS = "You are a helpful assistant. Follow the user's inst
 /** How many tool-calling rounds a query may take before the model has to answer. */
 const MAX_STEPS = 6;
 
+/**
+ * Structured output is produced in a step of its own, after the last tool round. Budgeting
+ * only MAX_STEPS lets six research rounds spend the whole allowance, leaving no step to
+ * emit the object, and the query then fails having produced nothing. The prompt asks the
+ * model to research proactively, so six rounds is a normal week rather than a pathological
+ * one. Text queries have no such extra step and keep the plain budget.
+ */
+const MAX_STRUCTURED_STEPS = MAX_STEPS + 1;
+
 type JsonSchema = z.core.JSONSchema.BaseSchema;
 
 /**
@@ -266,7 +275,7 @@ async function queryOpenAIStructured(
     model: provider.responses(modelOverride || defaultModel),
     prompt,
     tools: buildResearchTools(config),
-    stopWhen: stepCountIs(MAX_STEPS),
+    stopWhen: stepCountIs(MAX_STRUCTURED_STEPS),
     output: Output.object({ schema, name: schemaName }),
     onStepFinish: logOpenAIStep(log),
     providerOptions: { openai: { instructions: OPENAI_INSTRUCTIONS, store: false } },

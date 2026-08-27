@@ -83,10 +83,17 @@ function writeConfig(configHome: string, vault: string) {
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.resetModules();
+  // The aiQueryStructured mock is shared across it.each rows, so its call count has to be
+  // reset or the second row sees the first row's call.
+  vi.clearAllMocks();
 });
 
 describe("runWorklog write ordering", () => {
-  it("leaves the existing work log and brag book untouched when the model returns a bad document", async () => {
+  it.each([
+    ["a blank document", "   \n  "],
+    // A heading with nothing under it passed every earlier check and replaced the week.
+    ["a bare heading", "# Brag Book - Week 09, 2026\n\n## Achievements"],
+  ])("leaves the existing work log and brag book untouched when the model returns %s", async (_name, badMarkdown) => {
     const tmp = mkdtempSync(join(tmpdir(), "worklog-order-"));
     const configHome = join(tmp, "config");
     const vault = join(tmp, "vault");
@@ -111,7 +118,7 @@ describe("runWorklog write ordering", () => {
       // CONFIG_DIR is read at module load, so import everything under the temp config home.
       vi.resetModules();
       const { aiQueryStructured } = await import("../../lib/sdk/ai");
-      vi.mocked(aiQueryStructured).mockResolvedValue(BAD_OUTPUT);
+      vi.mocked(aiQueryStructured).mockResolvedValue({ ...BAD_OUTPUT, bragBookMarkdown: badMarkdown });
 
       const { runWorklog } = await import("../worklog");
 

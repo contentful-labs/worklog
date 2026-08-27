@@ -19,7 +19,7 @@ vi.mock("../../openai-auth", () => ({
 import { streamText } from "ai";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import { resolveOpenAIAuth, refreshCodexToken } from "../../openai-auth";
-import { aiQueryStructured, postProcess, toAnthropicJsonSchema } from "../ai";
+import { aiQuery, aiQueryStructured, postProcess, toAnthropicJsonSchema } from "../ai";
 import type { WorklogConfig } from "../types";
 
 const mockedStreamText = vi.mocked(streamText);
@@ -65,6 +65,33 @@ function streamTextResult(output: unknown) {
   return { output: Promise.resolve(output) } as unknown as ReturnType<typeof streamText>;
 }
 
+/** The text-only counterpart, for the aiQuery path. */
+function streamTextText(text: string) {
+  // SAFETY: queryOpenAI awaits `result.text` and nothing else.
+  return { text: Promise.resolve(text) } as unknown as ReturnType<typeof streamText>;
+}
+
+/**
+ * The step count at which a recorded call's stopWhen halts the tool loop.
+ *
+ * `stepCountIs(n)` fires when `steps.length === n`, so this is the first n at which the
+ * loop would stop. Driving a real seven-step loop would need a fake LanguageModelV3; the
+ * budget itself is what was wrong, and this reads it directly.
+ */
+async function stopsAtStep(call: Parameters<typeof streamText>[0]): Promise<number> {
+  const conditions = call.stopWhen === undefined ? [] : [call.stopWhen].flat();
+  if (conditions.length !== 1) throw new Error(`expected one stop condition, got ${conditions.length}`);
+  const condition = conditions[0];
+
+  for (let n = 1; n <= 20; n++) {
+    // SAFETY: stepCountIs reads steps.length and never touches an element, so the
+    // array only has to be the right length.
+    const steps = Array.from({ length: n }) as Parameters<typeof condition>[0]["steps"];
+    if (await condition({ steps })) return n;
+  }
+  throw new Error("stop condition never fired within 20 steps");
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   mockedResolveAuth.mockReturnValue({ apiKey: "test-key", source: "env" });
@@ -101,6 +128,26 @@ describe("aiQueryStructured on the OpenAI path", () => {
     mockedStreamText.mockReturnValue(streamTextResult({ headline: 42 }));
 
     await expect(aiQueryStructured({ prompt: "go", config: configFor("openai"), schema })).rejects.toThrow();
+  });
+});
+
+describe("OpenAI step budget", () => {
+  it("leaves a step for the object after six tool rounds", async () => {
+    // The object arrives in a step of its own. Six research rounds are what the prompt
+    // asks for, so stopping at six would end the query having produced nothing.
+    mockedStreamText.mockReturnValue(streamTextResult({ headline: "hi", items: [] }));
+
+    await aiQueryStructured({ prompt: "go", config: configFor("openai"), schema });
+
+    expect(await stopsAtStep(mockedStreamText.mock.calls[0][0])).toBe(7);
+  });
+
+  it("gives a text query the plain budget, because it has no extra step", async () => {
+    mockedStreamText.mockReturnValue(streamTextText("# Done"));
+
+    await aiQuery({ prompt: "go", config: configFor("openai") });
+
+    expect(await stopsAtStep(mockedStreamText.mock.calls[0][0])).toBe(6);
   });
 });
 

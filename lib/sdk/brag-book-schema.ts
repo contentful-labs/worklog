@@ -29,7 +29,7 @@ import { z } from "zod";
 import { unified } from "unified";
 import remarkParse from "remark-parse";
 import remarkFrontmatter from "remark-frontmatter";
-import type { PhrasingContent } from "mdast";
+import type { RootContent } from "mdast";
 
 /** Statuses the coach may return for an open focus item. `pending` is not one: it means unanswered. */
 export const FOCUS_STATUSES = ["completed", "ongoing", "dropped"] as const;
@@ -220,40 +220,67 @@ export const validFocusStatusSchema = z.object({
 
 export const validNewFocusItemSchema = singleLineText;
 
+interface DocumentSection {
+  /** Normalized heading text. */
+  heading: string;
+  /** Whether anything but headings and structure follows it, before the next heading of its rank. */
+  hasContent: boolean;
+}
+
 /**
- * Heading text from a markdown document, normalized for comparison.
+ * The document's headings and whether each one has a body.
  *
  * Parsed with remark rather than scanned, because the scan this replaced rejected legal
  * CommonMark that models do write: closing hashes (`## Achievements ##`), up to three
  * spaces of indentation, and setext underlining. Recognizing valid markdown by hand is
  * the same mistake this whole phase exists to undo.
  */
-function documentHeadings(markdown: string): string[] {
+function documentSections(markdown: string): DocumentSection[] {
   // Frontmatter is stripped by the plugin; without it the closing `---` of the tags block
   // can be read as a setext underline and invent a heading.
   const tree = unified().use(remarkParse).use(remarkFrontmatter).parse(markdown);
 
-  const headings: string[] = [];
-  for (const node of tree.children) {
+  const sections: DocumentSection[] = [];
+  for (const [index, node] of tree.children.entries()) {
     if (node.type !== "heading") continue;
-    headings.push(normalizeHeading(collectText(node.children)));
+    sections.push({
+      heading: normalizeHeading(nodeText(node)),
+      hasContent: sectionHasContent(tree.children, index, node.depth),
+    });
   }
-  return headings;
+  return sections;
 }
 
 /**
- * Plain text of a heading, so `## **Achievements**` reads the same as `## Achievements`.
+ * Does the heading at `index` have a body?
  *
- * Four lines against mdast's own union rather than mdast-util-to-string, which reaches
+ * A deeper heading opens a subsection, and its body still counts as this section's
+ * content, so the scan runs on to the next heading of the same rank or shallower.
+ */
+function sectionHasContent(nodes: RootContent[], index: number, depth: number): boolean {
+  for (let i = index + 1; i < nodes.length; i++) {
+    const node = nodes[i];
+    if (node.type === "heading") {
+      if (node.depth <= depth) return false;
+      continue;
+    }
+    // An HTML comment or a horizontal rule is structure the template carries, not work.
+    if (node.type === "html" || node.type === "thematicBreak") continue;
+    if (nodeText(node).trim() !== "") return true;
+  }
+  return false;
+}
+
+/**
+ * Plain text of a node, so `## **Achievements**` reads the same as `## Achievements`.
+ *
+ * A few lines against mdast's own union rather than mdast-util-to-string, which reaches
  * this project only as a transitive dependency of remark.
  */
-function collectText(nodes: PhrasingContent[]): string {
-  let text = "";
-  for (const node of nodes) {
-    if ("value" in node) text += node.value;
-    else if ("children" in node) text += collectText(node.children);
-  }
-  return text;
+function nodeText(node: RootContent): string {
+  if ("value" in node) return node.value;
+  if ("children" in node) return node.children.map(nodeText).join("");
+  return "";
 }
 
 /** Models end a heading with a colon often enough that it should not fail a week. */
@@ -268,20 +295,25 @@ function normalizeHeading(text: string): string {
  *
  * This one hard-fails rather than dropping, because the file it replaces is the week's
  * only record and `worklog --force` regenerates over an existing entry. The check is
- * deliberately shallow: blank, and missing the achievements section the output_format
- * mandates. Requiring the literal `# Brag Book` H1 was tried and rejected, see the note
- * on validateBragBookMarkdown in brag-book.ts.
+ * deliberately shallow: blank, no headings, or an achievements section that the
+ * output_format mandates and the model left empty. Requiring the literal `# Brag Book` H1
+ * was tried and rejected, see the note on validateBragBookMarkdown in brag-book.ts.
  */
 export function bragBookMarkdownProblem(markdown: string): string | null {
   if (markdown.trim() === "") return "the model returned an empty brag book document";
 
-  const headings = documentHeadings(markdown);
-  if (headings.length === 0) return "the brag book document has no markdown headings";
+  const sections = documentSections(markdown);
+  if (sections.length === 0) return "the brag book document has no markdown headings";
 
   // Exact match on the heading text, not a substring: "Achievement statistics" is a stats
   // section, and accepting it would let a document with no achievements through.
-  const hasAchievements = headings.some((text) => text === "achievements" || text === "achievement");
-  if (!hasAchievements) return "the brag book document has no achievements section";
+  const achievements = sections.find((s) => s.heading === "achievements" || s.heading === "achievement");
+  if (!achievements) return "the brag book document has no achievements section";
+
+  // A heading on its own is not a week. A week with nothing to report still writes the
+  // "No significant achievements this week" line the output_format asks for, so this
+  // rejects an empty document rather than a quiet week.
+  if (!achievements.hasContent) return "the brag book document's achievements section is empty";
 
   return null;
 }

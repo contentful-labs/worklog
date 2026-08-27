@@ -123,6 +123,33 @@ describe("validateBragBookMarkdown", () => {
     expect(() => validateBragBookMarkdown(withFrontmatter)).toThrow(/no markdown headings/);
   });
 
+  it("rejects an achievements section with nothing under it", () => {
+    // A bare heading passed every check and replaced the week's only record with itself.
+    expect(() => validateBragBookMarkdown("## Achievements")).toThrow(/achievements section is empty/);
+    expect(() => validateBragBookMarkdown("# Brag Book - Week 09, 2026\n\n## Achievements\n\n## Stats\n\n- 0")).toThrow(
+      /achievements section is empty/,
+    );
+  });
+
+  it("does not count template structure as content", () => {
+    const structureOnly = "## Achievements\n\n<!-- nothing to report -->\n\n---\n\n## Stats\n\n- 0";
+    expect(() => validateBragBookMarkdown(structureOnly)).toThrow(/achievements section is empty/);
+  });
+
+  it("accepts the line the prompt asks for when the week was quiet", () => {
+    // A week with nothing to report is not an empty document, and must still be written.
+    const quiet = "## Achievements\n\nNo significant achievements this week - routine work captured in [[memory]].";
+    expect(() => validateBragBookMarkdown(quiet)).not.toThrow();
+  });
+
+  it("counts content that sits under a subsection", () => {
+    expect(() => validateBragBookMarkdown("## Achievements\n\n### Auth\n\n- Shipped auth")).not.toThrow();
+  });
+
+  it("counts a table as content, which is how one provider writes the section", () => {
+    expect(() => validateBragBookMarkdown("## Achievements\n\n| What | Evidence |\n|---|---|\n| Auth | TEAM-1234 |")).not.toThrow();
+  });
+
   it("rejects a heading that merely mentions achievements", () => {
     // A substring test would accept this and let a document with no achievements through.
     expect(() => validateBragBookMarkdown("# Brag Book\n\n## Achievement statistics\n\n- 0")).toThrow(
@@ -146,18 +173,22 @@ describe("toBragBookResult refuses to overwrite a real brag book", () => {
     await rm(tmpDir, { recursive: true, force: true });
   });
 
-  it("leaves an existing entry untouched when the model returns a blank document", async () => {
+  const EXISTING = "---\ntags:\n  - areas/work\n---\n\n# Brag Book - Week 09, 2026\n\n## Achievements\n\n- Real work";
+
+  it.each([
+    ["a blank document", "\n \n", /empty brag book/],
+    ["a bare heading", "# Brag Book - Week 09, 2026\n\n## Achievements", /achievements section is empty/],
+  ])("leaves an existing entry untouched when the model returns %s", async (_name, markdown, problem) => {
     const path = join(tmpDir, "2026-W09 Brag Book.md");
-    const existing = "---\ntags:\n  - areas/work\n---\n\n# Brag Book - Week 09, 2026\n\n## Achievements\n\n- Real work";
-    await writeFile(path, existing, "utf-8");
+    await writeFile(path, EXISTING, "utf-8");
 
     // The order runWorklog uses on a --force regeneration: adapt, then write.
     expect(() => {
-      const parsed = toBragBookResult(output({ bragBookMarkdown: "\n \n" }));
+      const parsed = toBragBookResult(output({ bragBookMarkdown: markdown }));
       throw new Error(`should not reach the write, got ${parsed.bragBookContent.length} chars`);
-    }).toThrow(/empty brag book/);
+    }).toThrow(problem);
 
-    expect(await readFile(path, "utf-8")).toBe(existing);
+    expect(await readFile(path, "utf-8")).toBe(EXISTING);
   });
 });
 
