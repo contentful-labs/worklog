@@ -30,7 +30,7 @@ import { githubSource, confluenceSource, jiraSource } from "../lib/sdk/source-ad
 import type { Source, SourceContext } from "../lib/sdk/sources";
 import { buildVaultPaths, getCurrentTeam, readTeamTimeline } from "../lib/sdk/vault";
 import { getWeekEnd, getWeekNumber, getWeekStart, weekId } from "../lib/sdk/week-utils";
-import { loadConfig } from "../lib/config";
+import { loadConfig, type WorklogConfig } from "../lib/config";
 import { createLogger } from "../lib/sdk/logger";
 import { generateWeek, getEnvTokens } from "./worklog";
 
@@ -95,6 +95,67 @@ function requireConfig() {
   return config;
 }
 
+/** What a week needs written, handed to whatever does the writing. */
+export interface WeekToWrite {
+  weekId: string;
+  weekInfo: WeekInfo;
+  workLog: string;
+  /** Only the events this run filed into the week, as prose for the prompt. */
+  newMaterial: string;
+}
+
+export interface RefreshRun {
+  rows: WeekRow[];
+  outcome: CollectionOutcome;
+}
+
+/**
+ * The whole of what refresh decides, with the writing left to the caller.
+ *
+ * Collect, then write again only the weeks whose event set is not what it was. A run
+ * that finds nothing calls `writeWeek` zero times, which is the property the command
+ * rests on: no AI call, no file written, nothing to undo.
+ */
+export async function refreshWeeks(deps: {
+  ledger: Ledger;
+  sources: readonly Source[];
+  weeks: readonly CollectionWeek[];
+  contextFor: (source: Source) => SourceContext;
+  now: Date;
+  config: WorklogConfig;
+  writeWeek: (week: WeekToWrite) => Promise<void>;
+}): Promise<RefreshRun> {
+  const { ledger, sources, weeks, contextFor, now, config, writeWeek } = deps;
+
+  const outcome = await collectIntoLedger(ledger, sources, weeks, contextFor, now);
+  const rows: WeekRow[] = weeks.map((week) => ({ weekId: week.weekId, regenerated: false }));
+
+  // A delta can turn up an event belonging to a week nobody asked about. It is filed,
+  // because it belongs there, but this run does not go and rewrite that week.
+  const asked = new Set(weeks.map((week) => week.weekId));
+  const changed = [...outcome.weeksChanged].filter((week) => asked.has(week)).sort();
+
+  for (const weekId of changed) {
+    const weekInfo = weekInfoFor(weekId);
+    const events = ledger.eventsForWeek(weekId);
+    const workLog = generateEventMarkdown({
+      weekInfo,
+      events,
+      snapshotFor: (source, itemId) => ledger.snapshot(source, itemId),
+      additionalContext: "",
+      config,
+    });
+
+    await writeWeek({ weekId, weekInfo, workLog, newMaterial: newMaterialFor(ledger, weekId) });
+
+    const row = rows.find((candidate) => candidate.weekId === weekId);
+    if (row) row.regenerated = true;
+  }
+
+  await ledger.save();
+  return { rows, outcome };
+}
+
 export async function runRefresh(opts: RefreshOptions): Promise<void> {
   const log = createLogger(opts.verbose ?? false);
   p.intro("worklog refresh");
@@ -135,74 +196,54 @@ export async function runRefresh(opts: RefreshOptions): Promise<void> {
   const spinner = p.spinner();
   spinner.start("Asking each source what has changed...");
 
-  const outcome = await collectIntoLedger(
+  let collected = false;
+  const { rows, outcome } = await refreshWeeks({
     ledger,
     sources,
     weeks,
-    (source) => sourceContext(source, { config, headers, atlassianAccountId, githubUsername, ledger, log }),
-    startedAt,
-  );
-  spinner.stop(`Collected from ${sources.length} source(s)`);
+    contextFor: (source) => sourceContext(source, { config, headers, atlassianAccountId, githubUsername, ledger, log }),
+    now: startedAt,
+    config,
+    writeWeek: async ({ weekId: week, weekInfo, workLog, newMaterial }) => {
+      if (!collected) {
+        spinner.stop(`Collected from ${sources.length} source(s)`);
+        collected = true;
+      }
+      await Bun.write(`${paths.vault}/${weekInfo.filename}`, workLog);
+
+      const bragBookPath = `${paths.vault}/${week} Brag Book.md`;
+      const existingBragBook = existsSync(bragBookPath) ? await Bun.file(bragBookPath).text() : "";
+
+      spinner.start(`${week}: writing up what is new...`);
+      await generateWeek({
+        weekInfo,
+        wid: week,
+        workLog,
+        config,
+        paths,
+        timeline,
+        log,
+        spinner,
+        // A week with no entry yet is written from scratch; one that has an entry is
+        // added to, never replaced.
+        amend: existingBragBook ? { existingBragBook, newMaterial } : undefined,
+      });
+      spinner.stop(`${week}: updated`);
+    },
+  });
+
+  if (!collected) spinner.stop(`Collected from ${sources.length} source(s)`);
 
   for (const warning of outcome.warnings) p.log.warn(warning);
   for (const [name, result] of outcome.perSource) {
     if (result.unavailable) p.log.warn(`${name} was skipped: ${result.unavailable}`);
   }
 
-  // Only weeks inside the range asked about: a delta can turn up an event belonging to a
-  // week nobody asked to refresh, and it is filed but not regenerated here.
-  const asked = new Set(weeks.map((week) => week.weekId));
-  const changed = [...outcome.weeksChanged].filter((week) => asked.has(week)).sort();
+  const regenerated = rows.filter((row) => row.regenerated).length;
+  if (regenerated === 0) p.log.success("Nothing new. No week was rewritten and no AI call was made.");
 
-  const rows: WeekRow[] = weeks.map((week) => ({ weekId: week.weekId, regenerated: false }));
-
-  if (changed.length === 0) {
-    await ledger.save();
-    p.log.success("Nothing new. No week was rewritten and no AI call was made.");
-    printTable(rows, outcome);
-    p.outro("Up to date");
-    return;
-  }
-
-  for (const week of changed) {
-    const row = rows.find((candidate) => candidate.weekId === week);
-    const weekInfo = weekInfoFor(week);
-    const events = ledger.eventsForWeek(week);
-
-    const workLog = generateEventMarkdown({
-      weekInfo,
-      events,
-      snapshotFor: (source, itemId) => ledger.snapshot(source, itemId),
-      additionalContext: "",
-      config,
-    });
-    const bragBookPath = `${paths.vault}/${week} Brag Book.md`;
-    const existingBragBook = existsSync(bragBookPath) ? await Bun.file(bragBookPath).text() : "";
-
-    spinner.start(`${week}: writing up what is new...`);
-    await generateWeek({
-      weekInfo,
-      wid: week,
-      workLog,
-      workLogPath: `${paths.vault}/${weekInfo.filename}`,
-      config,
-      paths,
-      timeline,
-      log,
-      spinner,
-      // A week with no entry yet is written from scratch; one that has an entry is added
-      // to, never replaced.
-      amend: existingBragBook
-        ? { existingBragBook, newMaterial: newMaterialFor(ledger, week) }
-        : undefined,
-    });
-    spinner.stop(`${week}: updated`);
-    if (row) row.regenerated = true;
-  }
-
-  await ledger.save();
   printTable(rows, outcome);
-  p.outro(`${changed.length} week(s) updated`);
+  p.outro(regenerated === 0 ? "Up to date" : `${regenerated} week(s) updated`);
 }
 
 /**

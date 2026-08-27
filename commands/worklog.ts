@@ -48,10 +48,12 @@ import {
   buildHeaders,
   getAccountId,
   getGitHubUsername,
-  fetchDataForWeek,
   type WeekInfo,
 } from "../lib/sdk/data-fetch";
-import { generateMarkdown } from "../lib/sdk/markdown";
+import { generateEventMarkdown } from "../lib/sdk/markdown";
+import { collectIntoLedger, openLedger } from "../lib/sdk/ledger";
+import { confluenceSource, githubSource, jiraSource } from "../lib/sdk/source-adapters";
+import type { Source } from "../lib/sdk/sources";
 import {
   toBragBookResult,
   parseReviewCycle,
@@ -415,6 +417,11 @@ async function promptForContext(weekNumber: number, year: number, contextFilePat
 
 // --- Credential resolution ---
 
+/** Every source the weekly run reads. One that cannot run says why and is skipped. */
+function allSources(): Source[] {
+  return [jiraSource(), confluenceSource(), githubSource()];
+}
+
 export function getEnvTokens(): { apiToken: string; githubToken: string } {
   const apiToken = process.env.ATLASSIAN_API_TOKEN;
   if (!apiToken) {
@@ -592,7 +599,8 @@ ${amend.newMaterial}
     if (!weekInfo) return "";
     const teamEntry = getTeamForDate(timeline, weekInfo.startDate);
     const teamLabel = teamEntry ? `${teamEntry.team}${teamEntry.domain ? ` (${teamEntry.domain})` : ""}` : "Unknown";
-    return `\n<generation_context>\nIMPORTANT: You are generating a brag book for **Week ${weekInfo.weekNumber}, ${weekInfo.year}** (${weekInfo.startDate.toISOString().split("T")[0]} to ${weekInfo.endDate.toISOString().split("T")[0]}).\n\nThis may be a historical regeneration. The work log data below is from that specific time period — it is NOT broken tooling. The tickets, PRs, and pages shown are the engineer's actual work from that week.\n\nTeam assignment at that time: ${teamLabel}${teamEntry?.notes ? `\nNote: ${teamEntry.notes}` : ""}\n\nFull team timeline:\n${formatTeamTimelineForPrompt(timeline)}\n\nDo NOT reference the current date, current team assignment, or any context files that reflect a different time period. Generate the brag book AS IF you are writing it during that week.\n</generation_context>\n`;
+    const isCurrentWeek = weekIdForDate(new Date()) === weekId(weekInfo.weekNumber, weekInfo.year);
+    return `\n<generation_context>\nIMPORTANT: You are generating a brag book for **Week ${weekInfo.weekNumber}, ${weekInfo.year}** (${weekInfo.startDate.toISOString().split("T")[0]} to ${weekInfo.endDate.toISOString().split("T")[0]}).\n\nThis may be a historical regeneration. The work log data below is from that specific time period — it is NOT broken tooling. The tickets, PRs, and pages shown are the engineer's actual work from that week.\n\nTeam assignment at that time: ${teamLabel}${teamEntry?.notes ? `\nNote: ${teamEntry.notes}` : ""}\n\nFull team timeline:\n${formatTeamTimelineForPrompt(timeline)}\n\n${isCurrentWeek ? "This is the CURRENT week, so today's state is this week's state and live status is fair." : "This is a PAST week. Use state as of the end of it. Anything that happened after it belongs to the week it happened in, not to this one."}\n\nDo NOT reference the current date, current team assignment, or any context files that reflect a different time period. Generate the brag book AS IF you are writing it during that week.\n</generation_context>\n`;
   })();
 
   // The prompt is assembled as labelled chunks that partition it exactly, so the breakdown
@@ -932,6 +940,12 @@ export async function runWorklog(opts: {
   const { apiToken, githubToken } = getEnvTokens();
   const headers = buildHeaders(config, { atlassianApiToken: apiToken, githubToken });
 
+  const ledger = await openLedger();
+  const sources = allSources();
+  // One clock for the whole run: watermarks move to when it started, not when each
+  // fetch happened to finish.
+  const runStartedAt = new Date();
+
   s.start("Getting account IDs...");
   log("Authenticating with Atlassian and GitHub...");
   const [accountId, githubUsername] = await Promise.all([
@@ -957,15 +971,44 @@ export async function runWorklog(opts: {
     const perWeekContext = skipPrompts ? "" : await promptForContext(weekInfo.weekNumber, weekInfo.year, contextFile);
     const additionalContext = [sharedPrompt, perWeekContext].filter(Boolean).join("\n\n");
 
-    // Fetch
+    // Fetch into the ledger, then write the week from it. The same path `refresh` takes,
+    // so a week generated today and the same week amended next month are built the same
+    // way from the same events.
     const fetchStart = performance.now();
     s.start("Fetching data...");
-    const { issues, pages, prs, reviews, teamSprintItems } = await fetchDataForWeek(config, headers, accountId, githubUsername, weekInfo, { onWarning: (msg) => p.log.warn(msg) });
+    const collected = await collectIntoLedger(
+      ledger,
+      sources,
+      [{ weekId: wid, window: { start: weekInfo.startDate, end: weekInfo.endDate } }],
+      (source) => ({
+        config,
+        headers,
+        identity: { atlassianAccountId: accountId, githubUsername },
+        onWarning: (message: string) => p.log.warn(message),
+        state: ledger.stateFor(source.name),
+        log,
+      }),
+      runStartedAt,
+    );
+    await ledger.save();
     const fetchMs = Math.round(performance.now() - fetchStart);
-    s.stop(`Fetched in ${formatDuration(fetchMs)} (${issues.length} jira, ${pages.length} confluence, ${prs.length} PRs, ${reviews.length} reviews)`);
-    log(`Jira: ${issues.length}, Confluence: ${pages.length}, PRs: ${prs.length}, Reviews: ${reviews.length}`);
 
-    const markdown = generateMarkdown(issues, pages, prs, reviews, teamSprintItems, weekInfo, additionalContext, config, accountId);
+    for (const warning of collected.warnings) p.log.warn(warning);
+    for (const [name, outcome] of collected.perSource) {
+      if (outcome.unavailable) p.log.warn(`${name} was skipped: ${outcome.unavailable}`);
+    }
+
+    const weekEvents = ledger.eventsForWeek(wid);
+    s.stop(`Fetched in ${formatDuration(fetchMs)} (${weekEvents.length} events this week)`);
+    log(`Events in ${wid}: ${weekEvents.length}, added this run: ${[...collected.perSource.values()].reduce((sum, outcome) => sum + outcome.addedEvents, 0)}`);
+
+    const markdown = generateEventMarkdown({
+      weekInfo,
+      events: weekEvents,
+      snapshotFor: (source, itemId) => ledger.snapshot(source, itemId),
+      additionalContext,
+      config,
+    });
     const workLogPath = `${paths.vault}/${weekInfo.filename}`;
     // Held in memory until the whole week validates. Writing it here would mean a --force
     // run destroyed the previous work log before the model had said anything usable.
@@ -979,7 +1022,13 @@ export async function runWorklog(opts: {
     p.log.success(`${wid} done in ${formatDuration(weekTotal)}`);
 
     timings.push({ weekId: wid, fetch: fetchMs, bragBook: week.bragBookMs, contextUpdates: week.contextUpdatesMs, total: weekTotal, ...week.cost });
-    results.push({ weekId: wid, jira: issues.length, confluence: pages.length, prs: prs.length, reviews: reviews.length, memoryAdded: week.memoryAdded, memoryRemoved: week.memoryRemoved, impactLog: week.impactLogged, workContextUpdates: week.workContextUpdates, profileUpdated: week.profileUpdated, focusItems: week.focusItems, focusUpdates: week.focusUpdates });
+    // Items touched this week, per source: the same shape the report always had, now
+    // counted from the week's own events rather than from a fetch response.
+    const itemsPerSource = (source: string) =>
+      new Set(weekEvents.filter((event) => event.source === source).map((event) => event.itemId)).size;
+    const reviewsThisWeek = weekEvents.filter((event) => event.source === "github" && event.kind === "review").length;
+
+    results.push({ weekId: wid, jira: itemsPerSource("jira"), confluence: itemsPerSource("confluence"), prs: itemsPerSource("github"), reviews: reviewsThisWeek, memoryAdded: week.memoryAdded, memoryRemoved: week.memoryRemoved, impactLog: week.impactLogged, workContextUpdates: week.workContextUpdates, profileUpdated: week.profileUpdated, focusItems: week.focusItems, focusUpdates: week.focusUpdates });
 
     progress.completedWeeks.push(wid);
     await saveProgress(progress);
