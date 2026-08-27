@@ -104,7 +104,12 @@ const defaultIssueComments = http.get("https://api.github.com/repos/:owner/:repo
   HttpResponse.json([]),
 );
 
-beforeEach(() => server.use(defaultVersions, defaultIssueComments));
+/** No commits, for the tests that are about something else on the pull request. */
+const defaultPrCommits = http.get("https://api.github.com/repos/:owner/:repo/pulls/:number/commits", () =>
+  HttpResponse.json([]),
+);
+
+beforeEach(() => server.use(defaultVersions, defaultIssueComments, defaultPrCommits));
 afterEach(() => server.resetHandlers());
 afterAll(() => server.close());
 

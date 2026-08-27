@@ -71,17 +71,18 @@ interface WeekRow {
  */
 export function weeksInRange(from: Date, to: Date): CollectionWeek[] {
   const weeks: CollectionWeek[] = [];
-  const cursor = new Date(from);
 
-  while (cursor <= to) {
-    // Through the ISO helper, not by pairing a week number with a calendar year. The
-    // last days of December belong to the first week of the next ISO year, and pairing
-    // them by hand gives 2025-W01: a week whose range starts in 2024.
+  // Week by week, not seven days at a time from wherever the range happens to begin.
+  // Stepping by seven kept the weekday of `from`, so a range starting on a Tuesday and
+  // ending on the Monday after next landed past the last week's Monday and dropped it —
+  // which for the default range is the current week, the one most worth refreshing.
+  const last = weekIdForDate(to);
+  const cursor = new Date(weekInfoFor(weekIdForDate(from)).startDate);
+
+  while (weekIdForDate(cursor) <= last) {
     const id = weekIdForDate(cursor);
-    if (!weeks.some((existing) => existing.weekId === id)) {
-      const info = weekInfoFor(id);
-      weeks.push(weekWindow(id, info.startDate, info.endDate));
-    }
+    const info = weekInfoFor(id);
+    weeks.push(weekWindow(id, info.startDate, info.endDate));
     cursor.setUTCDate(cursor.getUTCDate() + 7);
   }
 

@@ -3,7 +3,7 @@ import type { JiraIssue, ConfluencePage, GitHubPR } from "../types";
 import type { PRReview, WeekInfo } from "./data-fetch";
 import { extractText, formatDate } from "../utils";
 import { eventsByItem, renderable, type LedgerSnapshot } from "./ledger";
-import type { SourceEvent } from "./sources";
+import { EVENT_KINDS, type SourceEvent } from "./sources";
 
 export function generateMarkdown(
   issues: JiraIssue[],
@@ -225,7 +225,15 @@ export function generateEventMarkdown(options: {
       if (url) lines.push(`**Link:** ${url}`);
       if (snapshot) lines.push(`**First seen:** ${snapshot.firstSeenAt.split("T")[0]}`);
       lines.push("");
-      for (const event of itemEvents) lines.push(describeEvent(event));
+      // Commits are summarised rather than listed. A week of steady work on one branch is
+      // thirty of them, and thirty near-identical lines crowd out everything the week is
+      // actually about — while the fact that the branch was worked on, and roughly what
+      // the work was, is the part worth reading.
+      const commits = itemEvents.filter((event) => event.kind === EVENT_KINDS.commit);
+      for (const event of itemEvents) {
+        if (event.kind !== EVENT_KINDS.commit) lines.push(describeEvent(event));
+      }
+      if (commits.length > 0) lines.push(describeCommits(commits));
       lines.push("");
     }
   }
@@ -262,6 +270,32 @@ export function describeEvents(events: readonly SourceEvent[]): string {
     .map((event) => `- ${event.at.slice(0, 16).replace("T", " ")} ${event.source} ${event.kind} on ${event.itemId}`)
     .join("\n");
 }
+
+/**
+ * A week's commits on one item, as one line.
+ *
+ * The dates it spans, how many there were, and the first few subjects. Enough for the
+ * coach to see that the work continued and what it was, without the log becoming a git
+ * history.
+ */
+function describeCommits(commits: readonly SourceEvent[]): string {
+  const days = [...new Set(commits.map((event) => event.at.slice(0, 10)))].sort();
+  const span = days.length === 1 ? days[0] : `${days[0]} to ${days[days.length - 1]}`;
+
+  const subjects = commits
+    .map((event) => renderable(event.payload).text?.trim())
+    .filter((text): text is string => Boolean(text));
+  const shown = subjects.slice(0, COMMIT_SUBJECTS_SHOWN);
+  const rest = subjects.length - shown.length;
+
+  const detail = shown.length > 0
+    ? `: ${shown.join("; ")}${rest > 0 ? `; and ${rest} more` : ""}`
+    : "";
+  return `- **${span}** ${commits.length} commit${commits.length === 1 ? "" : "s"}${detail}`;
+}
+
+/** How many commit subjects a week's entry shows before summarising the rest as a count. */
+const COMMIT_SUBJECTS_SHOWN = 5;
 
 /** One event as a line the model can read without knowing which system it came from. */
 function describeEvent(event: SourceEvent): string {

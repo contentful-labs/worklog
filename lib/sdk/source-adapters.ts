@@ -204,6 +204,22 @@ function mergedAtOf(pr: SearchedPR): string | undefined {
   return pr.pull_request?.merged_at ?? pr.merged_at ?? undefined;
 }
 
+/**
+ * One commit on a pull request.
+ *
+ * `author` is the GitHub account when it could be matched to one, and `commit.author` is
+ * what git itself recorded — the name and email in the commit object. Either can identify
+ * the user, and on a machine with an unmatched email only the second one does.
+ */
+interface GitHubCommit {
+  sha: string;
+  commit?: {
+    message?: string;
+    author?: { name?: string; email?: string; date?: string };
+  };
+  author?: { login?: string };
+}
+
 /** One comment on a pull request's conversation. */
 interface GitHubIssueComment {
   id: number;
@@ -1150,6 +1166,65 @@ export function githubSource(now: Clock = () => new Date()): Source {
     }
   }
 
+  /**
+   * Commits the user pushed to one pull request, dated when each was authored.
+   *
+   * The reason this is here at all: opening a pull request produces one event, and
+   * everything after it is commits. A branch opened last week and worked on all of this
+   * one had nothing to say about this week, because nothing else on a pull request
+   * changes when you push to it.
+   */
+  async function commitEvents(
+    repo: string,
+    number: number,
+    itemId: string,
+    ctx: SourceContext,
+    batch: SourceBatch,
+    opts: { conditional: Date | false; keep: (at: Instant) => boolean },
+  ): Promise<void> {
+    const email = ctx.config.atlassian.email.toLowerCase();
+    try {
+      for (let page = 1; page <= GITHUB_PAGE_LIMIT; page++) {
+        const url = `https://api.github.com/repos/${repo}/pulls/${number}/commits?per_page=${GITHUB_PAGE_SIZE}&page=${page}`;
+        const { status, body } = await conditionalGet(url, ctx, opts.conditional, !mayUseStoredEtag(url, opts.conditional, ctx));
+        if (status === 304) {
+          if ((lastPageSize(url, opts.conditional, ctx) ?? 0) < GITHUB_PAGE_SIZE) return;
+          continue;
+        }
+        if (status !== 200) {
+          partial(batch, ctx, `Could not read the commits on ${repo}#${number}, they will be missing: HTTP ${status}`);
+          return;
+        }
+        // SAFETY: the commits endpoint returns an array of commits; every field read
+        // below is optional and guarded, so a shape change drops commits rather than
+        // throwing.
+        const commits = (Array.isArray(body) ? body : []) as GitHubCommit[];
+        rememberPageSize(url, opts.conditional, ctx, commits.length);
+
+        for (const commit of commits) {
+          const wroteIt = commit.author?.login === githubUserOf(ctx)
+            || (email.length > 0 && commit.commit?.author?.email?.toLowerCase() === email);
+          if (!wroteIt) continue;
+          const at = instant(commit.commit?.author?.date);
+          if (!at || !opts.keep(at)) continue;
+          batch.events.push({
+            source: "github",
+            kind: EVENT_KINDS.commit,
+            itemId,
+            at: at.iso,
+            id: commit.sha,
+            payload: { [PAYLOAD_TEXT]: (commit.commit?.message ?? "").split("\n")[0] },
+          });
+        }
+
+        if (commits.length < GITHUB_PAGE_SIZE) return;
+      }
+      partial(batch, ctx, `${repo}#${number} has more commits than one run will read; the newest of them are missing, because GitHub serves this list oldest first.`);
+    } catch (err) {
+      partial(batch, ctx, `Could not read the commits on ${repo}#${number}, they will be missing: ${String(err)}`);
+    }
+  }
+
   return {
     name: "github",
 
@@ -1220,6 +1295,7 @@ export function githubSource(now: Clock = () => new Date()): Source {
         // Skipping this because the PR was already snapshotted lost every reply the user
         // made to their own reviewers.
         await commentEvents(repoPathOf(pr), pr.number, pr.html_url, ctx, batch, { conditional: false, keep: () => true });
+        await commitEvents(repoPathOf(pr), pr.number, pr.html_url, ctx, batch, { conditional: false, keep: () => true });
       }
 
       for (const pr of others.values()) {
@@ -1290,6 +1366,7 @@ export function githubSource(now: Clock = () => new Date()): Source {
 
         await reviewEvents(repo, number, itemId, ctx, batch, { conditional: since, keep: (at) => after(at, since) });
         await commentEvents(repo, number, itemId, ctx, batch, { conditional: since, keep: (at) => after(at, since) });
+        await commitEvents(repo, number, itemId, ctx, batch, { conditional: since, keep: (at) => after(at, since) });
 
         const prUrl = `https://api.github.com/repos/${repo}/pulls/${number}`;
         try {

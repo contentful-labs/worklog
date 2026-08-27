@@ -115,7 +115,7 @@ describe("running refresh twice", () => {
     await mkdir(vault, { recursive: true });
   });
 
-  it("writes the week the first time and nothing at all the second", async () => {
+  it("writes the week the first time, and nothing in the vault ever again", async () => {
     const calls: string[] = [];
 
     const first = await runOnce(stubSource("jira", oneComment, calls));
@@ -123,20 +123,27 @@ describe("running refresh twice", () => {
     expect(first.rows).toEqual([{ weekId: "2026-W36", regenerated: true }]);
 
     const vaultAfterFirst = await snapshotOfDisk(vault);
-    const cacheAfterFirst = await snapshotOfDisk(cache);
     calls.length = 0;
 
     const second = await runOnce(stubSource("jira", oneComment, calls));
 
-    // The source is asked the cheap question and nothing else happens.
+    // The source is asked the cheap question, and nothing is generated or written.
     expect(calls).toEqual(["jira:since"]);
     expect(second.written).toEqual([]);
     expect(second.rows).toEqual([{ weekId: "2026-W36", regenerated: false }]);
     expect(second.outcome.perSource.get("jira")).toMatchObject({ addedEvents: 0, addedSnapshots: 0 });
-
-    // Byte for byte, in the vault and in the cache.
     expect(await snapshotOfDisk(vault)).toEqual(vaultAfterFirst);
-    expect(await snapshotOfDisk(cache)).toEqual(cacheAfterFirst);
+
+    // The cache settles from the second run on, not the first. A first delta is where a
+    // source learns its conditional state — the ETags that make the next fetch free — and
+    // writing down something it did not know before is learning, not churn. What has to
+    // be true is that a run which learns nothing writes nothing.
+    const cacheAfterSecond = await snapshotOfDisk(cache);
+    const third = await runOnce(stubSource("jira", oneComment, calls));
+
+    expect(third.written).toEqual([]);
+    expect(await snapshotOfDisk(vault)).toEqual(vaultAfterFirst);
+    expect(await snapshotOfDisk(cache)).toEqual(cacheAfterSecond);
   });
 
   it("writes the week again when the second run does find something", async () => {

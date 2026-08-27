@@ -288,18 +288,17 @@ const metaSchema = z.object({
  */
 type FileRead<T> = { ok: true; value: T } | { ok: false; why: string };
 
-async function readParsed<T>(path: string, schema: z.ZodType<T>, fallback: T, emptyIsFresh = true): Promise<FileRead<T>> {
-  // Nothing there is "no data", which is the normal state of a fresh install.
+async function readParsed<T>(path: string, schema: z.ZodType<T>, fallback: T): Promise<FileRead<T>> {
+  // Nothing there is "no data", which is the normal state of a fresh install. That is the
+  // only thing that means it.
   if (!existsSync(path)) return { ok: true, value: fallback };
 
   const raw = await readFile(path, "utf-8");
-  // An empty file is a run killed between opening a temp file and renaming it over the
-  // real one. For a week's events that costs a refetch. For the metadata it would read
-  // as a fresh install and hand the whole history back to the coach, so there it counts
-  // as damage rather than absence.
-  if (raw.trim().length === 0) {
-    return emptyIsFresh ? { ok: true, value: fallback } : { ok: false, why: "it is empty" };
-  }
+  // A file that exists and says nothing is damage, not absence. Writes here go through a
+  // temp file and a rename, so this is not a half-finished write of ours — and reading it
+  // as "no events yet" would let the week be written again from nothing while its
+  // watermark moved on, which is the same loss as a corrupt row with none of the noise.
+  if (raw.trim().length === 0) return { ok: false, why: "it is empty" };
 
   let json: unknown;
   try {
@@ -441,7 +440,7 @@ export async function openLedger(root: string = ledgerRoot()): Promise<Ledger> {
   const unreadable = new Set<string>();
 
   const metaPath = join(root, "meta.json");
-  const rawMeta = await readParsed(metaPath, z.unknown(), undefined, false);
+  const rawMeta = await readParsed(metaPath, z.unknown(), undefined);
   const parsedMeta = rawMeta.ok && rawMeta.value !== undefined ? metaSchema.safeParse(rawMeta.value) : undefined;
   /**
    * Why nothing may be written while the metadata is unreadable.

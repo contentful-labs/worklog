@@ -313,6 +313,15 @@ const COACHING_CLOSE = "<!-- /COACHING_SESSION -->";
 export interface EntryRecord {
   achievements: string[];
   coachingHeadings: CoachingHeading[];
+  /**
+   * Lines written before the document's first heading.
+   *
+   * Nothing puts them there on purpose, but a model that opens with a sentence before
+   * `## Achievements` has still written something down about the week, and the run
+   * accepts such a document. Protecting them costs nothing and stops the one layout the
+   * validator allows from being a way to lose text.
+   */
+  preamble: string[];
 }
 
 /** A coaching heading: what it is compared by, and how it was written. */
@@ -341,6 +350,12 @@ export function bragBookEntry(markdown: string): EntryRecord {
   const coachingHeadings: CoachingHeading[] = [];
   let inCoaching = false;
 
+  const firstHeading = tree.children.find((node) => node.type === "heading");
+  const preamble = lines
+    .slice(0, (firstHeading?.position?.start.line ?? lines.length + 1) - 1)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+
   for (const [index, node] of tree.children.entries()) {
     if (node.type === "html") {
       const value = node.value.trim();
@@ -350,20 +365,26 @@ export function bragBookEntry(markdown: string): EntryRecord {
     }
     if (node.type !== "heading") continue;
 
-    if (inCoaching) {
-      if (node.depth === 3) {
-        const line = lines[(node.position?.start.line ?? 1) - 1] ?? nodeText(node);
-        coachingHeadings.push({ key: normalizeHeading(nodeText(node)), text: line.trim() });
-      }
+    const heading = normalizeHeading(nodeText(node));
+
+    // Achievements are read wherever they are written. The validator does not care
+    // whether the section falls inside the coaching markers — a document that opens the
+    // coaching block early and puts its achievements after it passes — so a gate that
+    // stopped looking there left every achievement in such a document unprotected.
+    if (heading === "achievements" || heading === "achievement") {
+      achievements.push(...sectionLines(tree.children, index, node.depth, lines));
       continue;
     }
 
-    const heading = normalizeHeading(nodeText(node));
-    if (heading !== "achievements" && heading !== "achievement") continue;
-    achievements.push(...sectionLines(tree.children, index, node.depth, lines));
+    // Every depth, not only `###`. The validator accepts a coaching session written with
+    // `##` or `####` headings, and those are the same record of what was said.
+    if (inCoaching) {
+      const line = lines[(node.position?.start.line ?? 1) - 1] ?? nodeText(node);
+      coachingHeadings.push({ key: normalizeHeading(nodeText(node)), text: line.trim() });
+    }
   }
 
-  return { achievements, coachingHeadings };
+  return { achievements, coachingHeadings, preamble };
 }
 
 /**
@@ -381,7 +402,7 @@ function sectionLines(nodes: RootContent[], index: number, depth: number, lines:
     // start of the coaching block, whose own `###` headings are deeper and would
     // otherwise be read as part of the achievements above them.
     const closes = (node.type === "heading" && node.depth <= depth)
-      || (node.type === "html" && node.value.trim() === COACHING_OPEN);
+      || (node.type === "html" && (node.value.trim() === COACHING_OPEN || node.value.trim() === COACHING_CLOSE));
     if (closes) {
       end = (node.position?.start.line ?? end) - 1;
       break;

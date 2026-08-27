@@ -107,6 +107,12 @@ export function firstDroppedLine(existing: string, next: string): string | undef
   const dropped = before.achievements.find((line) => !kept.has(line));
   if (dropped !== undefined) return dropped;
 
+  // Anything written before the first heading is protected as a line rather than as a
+  // section: it has no section to belong to, and the new document only has to still
+  // contain it somewhere.
+  const droppedPreamble = before.preamble.find((line) => !next.includes(line));
+  if (droppedPreamble !== undefined) return droppedPreamble;
+
   const headings = new Set(after.coachingHeadings.map((heading) => heading.key));
   return before.coachingHeadings.find((heading) => !headings.has(heading.key))?.text;
 }

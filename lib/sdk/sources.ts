@@ -142,7 +142,6 @@ export interface Source {
   fetchSince(since: Date, itemIds: string[], ctx: SourceContext): Promise<SourceBatch>;
 }
 
-/** An empty batch, for the paths where a source has nothing to say. */
 /**
  * Everything a command has to resolve once before any source can run.
  *
@@ -173,6 +172,7 @@ export function sourceContext(source: Source, runtime: SourceRuntime): SourceCon
   };
 }
 
+/** An empty batch, for the paths where a source has nothing to say. */
 export function emptyBatch(): SourceBatch {
   return { snapshots: [], events: [], warnings: [] };
 }
@@ -234,6 +234,8 @@ export const EVENT_KINDS = {
   status: "status",
   description: "description",
   review: "review",
+  /** Code pushed to something already open. */
+  commit: "commit",
   merged: "merged",
   closed: "closed",
   version: "version",

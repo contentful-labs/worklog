@@ -141,6 +141,13 @@ story about a finished ticket. Recording is idempotent, so re-fetching a week ma
 what is already there and writes nothing, and that is what lets `worklog refresh` know
 which weeks actually changed.
 
+**What a repeated run costs**: a refresh that finds nothing makes no AI call and writes
+nothing to the vault, from the very first repeat. The cache settles one run later: the
+first delta a source runs is where it learns its conditional state — the ETags that make
+the next fetch free — and writing down something it did not know before is learning, not
+churn. From the second repeat on, a run that learns nothing writes nothing, in the vault
+or the cache.
+
 **Known limits worth not rediscovering**: Week arithmetic is UTC everywhere, in the
 collection windows and in the filing, so an event at 23:30 on a Sunday lands in the week
 that was fetching it rather than in the host's local one. A ledger whose `meta.json`
