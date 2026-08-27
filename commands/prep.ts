@@ -125,7 +125,7 @@ export async function runPrep(opts: {
     { type, weeks, sinceDate, untilDate, extended },
     {
       bragBooks, profile, workContext, careerContext, focusDoc, impactLog, focusTracking, memory,
-      teamTimeline: formatTeamTimelineForPrompt(readTeamTimeline(paths)),
+      teamTimeline: formatTeamTimelineForPrompt(readTeamTimeline(paths, { onWarning: (message) => p.log.warn(message) })),
       writingStyle,
     },
     rawTemplate,

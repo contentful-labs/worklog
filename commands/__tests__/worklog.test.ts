@@ -76,7 +76,7 @@ function writeConfig(configHome: string, vault: string) {
       },
     }),
   );
-  // readTeamTimeline reads this file directly and throws if it is missing.
+  // Seeded so the run uses a real timeline; readTeamTimeline defaults without one.
   writeFileSync(
     join(configHome, "worklog", "team-timeline.json"),
     JSON.stringify({

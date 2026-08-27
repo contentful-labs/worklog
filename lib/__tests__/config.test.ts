@@ -1,4 +1,6 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import {
@@ -279,5 +281,158 @@ describe("parseReviewCycleDates", () => {
 
   it("returns empty array for empty string", () => {
     expect(parseReviewCycleDates("")).toEqual([]);
+  });
+});
+
+describe("readConfig / requireConfig", () => {
+  /**
+   * CONFIG_DIR is computed at module load from XDG_CONFIG_HOME, so the env var has to be
+   * set before the import. Returns the temp home plus a teardown.
+   */
+  function withConfigHome(contents?: string) {
+    const tmp = mkdtempSync(join(tmpdir(), "worklog-config-"));
+    const configHome = join(tmp, "config");
+    mkdirSync(join(configHome, "worklog"), { recursive: true });
+    if (contents !== undefined) {
+      writeFileSync(join(configHome, "worklog", "config.json"), contents);
+    }
+
+    const previous = process.env.XDG_CONFIG_HOME;
+    process.env.XDG_CONFIG_HOME = configHome;
+
+    return {
+      configHome,
+      cleanup: () => {
+        if (previous === undefined) delete process.env.XDG_CONFIG_HOME;
+        else process.env.XDG_CONFIG_HOME = previous;
+        rmSync(tmp, { recursive: true, force: true });
+      },
+    };
+  }
+
+  async function loadUnder(contents?: string) {
+    const harness = withConfigHome(contents);
+    vi.resetModules();
+    const config = await import("../config");
+    return { ...harness, config };
+  }
+
+  const VALID = JSON.stringify({
+    version: 1,
+    vault: "/tmp/vault",
+    atlassian: { url: "https://acme.atlassian.net", email: "user@example.com" },
+    githubOrgs: [],
+    ai: { provider: "openai" },
+    profile: {
+      fullName: "Test User", displayName: "Test", jobTitle: "Engineer", level: "IC-5",
+      company: "Acme", location: "Remote", startDate: "2024-01-01", domain: "Platform",
+      team: "Search", teamDomain: "Search", ticketPrefixes: ["TEAM"],
+    },
+    career: {
+      framework: "example", currentLevel: "IC-5", targetLevel: "IC-6",
+      companyValues: [], reviewCycleDates: [], skills: [], growthAreas: [], careerDocPaths: [],
+    },
+    coaching: { tone: "direct", focusAreas: [] },
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.resetModules();
+  });
+
+  it("reads a config that is there", async () => {
+    const { config, cleanup } = await loadUnder(VALID);
+    try {
+      const result = config.readConfig();
+      expect(result.status).toBe("ok");
+      expect(config.loadConfig()?.vault).toBe("/tmp/vault");
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("reports an absent config as missing", async () => {
+    const { config, cleanup } = await loadUnder();
+    try {
+      expect(config.readConfig()).toEqual({ status: "missing" });
+      expect(config.loadConfig()).toBeNull();
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("reports a malformed config as unreadable, with the parse error", async () => {
+    // The distinction is the point: this used to look identical to "missing".
+    const { config, cleanup } = await loadUnder('{ "vault": "/tmp/vault", }');
+    try {
+      const result = config.readConfig();
+      expect(result.status).toBe("unreadable");
+      expect(result.status === "unreadable" && result.error).toBeTruthy();
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("still flattens both failures for loadConfig, so init can offer a fresh start", async () => {
+    // worklog init calls loadConfig to prefill, and a broken config is exactly when init
+    // is most needed. Throwing here would make the fix unreachable.
+    const { config, cleanup } = await loadUnder("not json at all");
+    try {
+      expect(() => config.loadConfig()).not.toThrow();
+      expect(config.loadConfig()).toBeNull();
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("sends a user with no config to init", async () => {
+    const { config, cleanup } = await loadUnder();
+    const errors: string[] = [];
+    vi.spyOn(console, "error").mockImplementation((message) => errors.push(String(message)));
+
+    try {
+      expect(() => config.requireConfig()).toThrow();
+      expect(errors.join("\n")).toContain("Run `worklog init`");
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("does not send a user with a broken config to init, and names the file", async () => {
+    // Re-running init over a config with one stray comma is how the settings get lost.
+    const { config, cleanup } = await loadUnder('{ "vault": "/tmp/vault", }');
+    const errors: string[] = [];
+    vi.spyOn(console, "error").mockImplementation((message) => errors.push(String(message)));
+
+    try {
+      expect(() => config.requireConfig()).toThrow();
+      const reported = errors.join("\n");
+      expect(reported).toContain("config.json at");
+      expect(reported).toContain("could not be parsed");
+      expect(reported).not.toContain("worklog init");
+      expect(reported).not.toContain("No worklog configuration found");
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("exits non-zero either way", async () => {
+    for (const contents of [undefined, "{ broken"]) {
+      const { config, cleanup } = await loadUnder(contents);
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      // SAFETY: process.exit is typed as returning never, so a stand-in has to be one
+      // too. Throwing is how a test observes the call without ending the run.
+      const exit = vi.spyOn(process, "exit").mockImplementation((() => {
+        throw new Error("exited");
+      }) as never);
+
+      try {
+        expect(() => config.requireConfig()).toThrow("exited");
+        expect(exit).toHaveBeenCalledWith(1);
+      } finally {
+        vi.restoreAllMocks();
+        cleanup();
+      }
+    }
   });
 });

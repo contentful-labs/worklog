@@ -2,6 +2,7 @@ import { readFile, readdir, stat } from "node:fs/promises";
 import { existsSync, readFileSync } from "node:fs";
 import type { WorklogConfig } from "./types";
 import { weekIdForDate } from "./week-utils";
+import { contractHome } from "../config";
 
 export interface VaultPaths {
   vault: string;
@@ -190,8 +191,40 @@ export async function discoverWeeklyNotes(
   return candidates.slice(0, 25).map(({ title, excerpt }) => ({ title, excerpt }));
 }
 
-export function readTeamTimeline(paths: VaultPaths): TeamTimeline {
-  return JSON.parse(readFileSync(paths.teamTimeline, "utf-8"));
+export interface ReadTeamTimelineOptions {
+  /** Told when the file is simply absent, so a command can surface it. */
+  onWarning?: (message: string) => void;
+}
+
+/**
+ * The team timeline, or an empty one when the file has not been set up.
+ *
+ * An absent timeline is a fresh install, not a broken one: every other vault reader
+ * defaults rather than throwing, and this one used to end the run with a bare ENOENT
+ * before anything useful had happened. Malformed JSON still fails hard, because that is
+ * a file someone wrote and got wrong, and silently ignoring it would attribute a whole
+ * history to the wrong team.
+ */
+export function readTeamTimeline(paths: VaultPaths, options: ReadTeamTimelineOptions = {}): TeamTimeline {
+  if (!existsSync(paths.teamTimeline)) {
+    options.onWarning?.(
+      `No team timeline at ${contractHome(paths.teamTimeline)}; every week will be attributed to the current team.`,
+    );
+    return { entries: [], transitionNotes: [] };
+  }
+
+  const raw = readFileSync(paths.teamTimeline, "utf-8");
+  try {
+    // SAFETY: the shape is not checked, and a wrong one surfaces as a missing team rather
+    // than a crash: getTeamForDate finds nothing in a bad entries array and every caller
+    // already handles an undefined team. Only the JSON itself has to be well formed here.
+    return JSON.parse(raw) as TeamTimeline;
+  } catch (err) {
+    throw new Error(
+      `Team timeline at ${contractHome(paths.teamTimeline)} is not valid JSON: ` +
+      `${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
 }
 
 export function getTeamForDate(timeline: TeamTimeline, date: Date): TeamTimelineEntry | undefined {

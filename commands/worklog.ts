@@ -564,7 +564,7 @@ export async function runWorklog(opts: {
 
   const config = requireConfig();
   const paths = buildVaultPaths(config, TEAM_TIMELINE_PATH);
-  const timeline = readTeamTimeline(paths);
+  const timeline = readTeamTimeline(paths, { onWarning: (message) => p.log.warn(message) });
 
   // Focus items are keyed by id now; upgrade a pre-id file before anything reads it.
   const migration = await migrateFocusTrackingFile(paths.focusTracking);
