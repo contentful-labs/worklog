@@ -53,7 +53,7 @@ export { aiQuery, aiQueryStructured, postProcess, toAnthropicJsonSchema } from "
 
 // Model pricing
 export type { ModelPrice, LongContextTier, StepTokens } from "./pricing";
-export { PRICING_AS_OF, priceFor, pricedModels, estimateCostUsd, formatCostUsd } from "./pricing";
+export { PRICING_AS_OF, MODEL_ALIASES_AS_OF, priceFor, resolveModelAlias, pricedModels, estimateCostUsd, formatCostUsd } from "./pricing";
 
 // Markdown generation
 export { generateMarkdown } from "./markdown";

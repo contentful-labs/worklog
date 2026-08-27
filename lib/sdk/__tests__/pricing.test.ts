@@ -1,5 +1,14 @@
 import { describe, it, expect } from "vitest";
-import { PRICING_AS_OF, estimateCostUsd, formatCostUsd, priceFor, pricedModels, type StepTokens } from "../pricing";
+import {
+  MODEL_ALIASES_AS_OF,
+  PRICING_AS_OF,
+  estimateCostUsd,
+  formatCostUsd,
+  priceFor,
+  pricedModels,
+  resolveModelAlias,
+  type StepTokens,
+} from "../pricing";
 
 const MILLION = 1_000_000;
 
@@ -18,6 +27,22 @@ describe("priceFor", () => {
 
   it("carries the day the rates were read", () => {
     expect(PRICING_AS_OF).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+  });
+
+  it("prices a provider alias the same as the id it stands for", () => {
+    // A config carrying `gpt-5.6` reaches the API fine and used to cost null.
+    expect(resolveModelAlias("gpt-5.6")).toBe("gpt-5.6-sol");
+    expect(priceFor("gpt-5.6")).toEqual(priceFor("gpt-5.6-sol"));
+  });
+
+  it("leaves a name that is not an alias alone", () => {
+    expect(resolveModelAlias("gpt-5")).toBe("gpt-5");
+    expect(resolveModelAlias("mystery-model")).toBe("mystery-model");
+    expect(priceFor("mystery-model")).toBeNull();
+  });
+
+  it("carries the day the aliases were checked", () => {
+    expect(MODEL_ALIASES_AS_OF).toMatch(/^\d{4}-\d{2}-\d{2}$/);
   });
 
   it("gives every priced model a cache-write rate at least its input rate", () => {
@@ -70,6 +95,11 @@ describe("estimateCostUsd", () => {
     // 300K in at 2x $4 = $2.40, 100K out at 1.5x $20 = $3.00.
     const cost = estimateCostUsd("gpt-5.6-sol", [step({ inputTokens: 300_000, outputTokens: 100_000 })]);
     expect(cost).toBeCloseTo(5.4, 10);
+  });
+
+  it("applies the long-context tier through an alias too", () => {
+    const viaAlias = estimateCostUsd("gpt-5.6", [step({ inputTokens: 300_000, outputTokens: 100_000 })]);
+    expect(viaAlias).toBeCloseTo(5.4, 10);
   });
 
   it("leaves a request just under the threshold on the base rate", () => {

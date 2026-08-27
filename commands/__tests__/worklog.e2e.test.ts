@@ -267,15 +267,29 @@ function setUp(): Harness {
 }
 
 /** Import runWorklog under the temp config home, with the fake wired up. */
-async function loadPipeline(output: Partial<BragBookOutput>, usageModel = "gpt-5") {
+interface FakeUsageOptions {
+  model?: string;
+  /** What the provider says the call cost. Only the Agent SDK reports one. */
+  reportedCostUsd?: number;
+}
+
+async function loadPipeline(output: Partial<BragBookOutput>, usage: FakeUsageOptions = {}) {
+  const { model = "gpt-5", reportedCostUsd } = usage;
   vi.resetModules();
   const { aiQueryStructured } = await import("../../lib/sdk/ai");
   vi.mocked(aiQueryStructured).mockImplementation(async (options) => {
     const step = { inputTokens: 56_000, outputTokens: 1_200, cachedInputTokens: 40_000, cacheWriteTokens: 0 };
-    options.onUsage?.({ model: usageModel, ...step, steps: [step] });
+    // undefined is how AIUsage says "the provider reported no cost", which is what the
+    // nullish check in costOf reads, so it can be passed straight through.
+    options.onUsage?.({ model, ...step, steps: [step], reportedCostUsd });
     return options.schema.parse(output);
   });
   return await import("../worklog");
+}
+
+/** The single stats record a one-week run appends. */
+function readStats(configHome: string) {
+  return JSON.parse(readFileSync(join(configHome, "worklog", "worklog-stats.json"), "utf8"));
 }
 
 const RUN = { week: WEEK, noPrompt: true, force: true, verbose: false } as const;
@@ -332,8 +346,7 @@ describe("one week end to end", () => {
       const { runWorklog } = await loadPipeline(FAKE_OUTPUT);
       await runWorklog({ ...RUN });
 
-      const statsPath = join(harness.configHome, "worklog", "worklog-stats.json");
-      const stats = JSON.parse(readFileSync(statsPath, "utf8"));
+      const stats = readStats(harness.configHome);
 
       expect(stats).toHaveLength(1);
       expect(stats[0]).toMatchObject({
@@ -348,7 +361,55 @@ describe("one week end to end", () => {
     }
   });
 
-  it("repeats the same week without drifting, except where it is known to", async () => {
+  it("prices a week whose model is a provider alias", async () => {
+    const harness = setUp();
+
+    try {
+      // `gpt-5.6` is what a config may carry; the rate card is keyed by `gpt-5.6-sol`.
+      const { runWorklog } = await loadPipeline(FAKE_OUTPUT, { model: "gpt-5.6" });
+      await runWorklog({ ...RUN });
+
+      const [record] = readStats(harness.configHome);
+      expect(record.model).toBe("gpt-5.6");
+      // 16k uncached at $4/M + 40k cached at $0.40/M + 1.2k out at $20/M, no tier at 56k.
+      expect(record.estimatedCostUsd).toBeCloseTo(0.064 + 0.016 + 0.024, 10);
+    } finally {
+      harness.cleanup();
+    }
+  });
+
+  it("records the provider's own cost in preference to the price table", async () => {
+    const harness = setUp();
+
+    try {
+      const { runWorklog } = await loadPipeline(FAKE_OUTPUT, { model: "gpt-5", reportedCostUsd: 0.99 });
+      await runWorklog({ ...RUN });
+
+      const [record] = readStats(harness.configHome);
+      // The table would have said $0.037 for these tokens on gpt-5.
+      expect(record.estimatedCostUsd).toBe(0.99);
+    } finally {
+      harness.cleanup();
+    }
+  });
+
+  it("treats a reported cost of zero as reported, not as missing", async () => {
+    const harness = setUp();
+
+    try {
+      // A subscription run can genuinely cost nothing. Falsy-checking the reported cost
+      // would fall through to the table and invent a charge for it.
+      const { runWorklog } = await loadPipeline(FAKE_OUTPUT, { model: "gpt-5", reportedCostUsd: 0 });
+      await runWorklog({ ...RUN });
+
+      const [record] = readStats(harness.configHome);
+      expect(record.estimatedCostUsd).toBe(0);
+    } finally {
+      harness.cleanup();
+    }
+  });
+
+  it("repeats the same week without drifting, bar two documented exceptions", async () => {
     const harness = setUp();
 
     try {
@@ -360,22 +421,35 @@ describe("one week end to end", () => {
       await second.runWorklog({ ...RUN });
       const afterTwo = { records: readRecords(harness.vault), generated: readGenerated(harness.vault) };
 
-      // Everything the writers dedupe: byte for byte.
+      // The record files the writers dedupe: byte for byte.
       for (const file of ["memory", "impactLog", "workContext", "profile"] as const) {
         expect(afterTwo.records[file], `${file} drifted on the second run`).toBe(afterOne.records[file]);
       }
       expect(afterTwo.generated.bragBook).toBe(afterOne.generated.bragBook);
+
+      // generateMarkdown stamps the work log with the moment it ran, so that line alone
+      // differs and everything else still has to match.
+      expect(afterTwo.generated.workLog).not.toBe(afterOne.generated.workLog);
       expect(withoutTimestamp(afterTwo.generated.workLog)).toBe(withoutTimestamp(afterOne.generated.workLog));
 
-      // KNOWN DEFECT, focus-tracking.md only. Regenerating a week is not a no-op there:
-      //   - a status note is appended again, so notes grow on every re-run
-      //     (appendNote in lib/sdk/focus.ts does not check whether the note is already there);
-      //   - the new commitment from run one is close enough to itself that run two records
-      //     it as restated.
+      // The two ways a rerun used to change focus-tracking.md, both closed upstream.
+      expect(afterTwo.records.focusTracking).not.toContain("Paired once so far; Paired once so far");
+      expect(afterTwo.records.focusTracking).not.toContain("restated");
+
+      // KNOWN DEFECT, one row. The commitment run one created is open by the time run two
+      // reads the file, so run two shows it to the coach as an outstanding item and ages
+      // it for going unanswered. Regenerating the same week three times therefore lapses
+      // the commitment that week itself created. lib/sdk/focus.ts applies its same-week
+      // rule to restatement but not to the aging loop that feeds on reviewedIds.
       // Pinned rather than asserted away, so whoever fixes it sees this test go red.
-      expect(afterTwo.records.focusTracking).not.toBe(afterOne.records.focusTracking);
-      expect(afterTwo.records.focusTracking).toContain("Paired once so far; Paired once so far");
-      expect(afterTwo.records.focusTracking).toContain("restated 2026-W10");
+      const ownItem = (file: string) => file.split("\n").find((line) => line.includes(`${WEEK}.1`));
+      expect(ownItem(afterOne.records.focusTracking)).toContain("| pending | 0 |");
+      expect(ownItem(afterTwo.records.focusTracking)).toContain("| pending | 1 |");
+
+      // Nothing else in the file moved.
+      const withoutOwnItem = (file: string) =>
+        file.split("\n").filter((line) => !line.includes(`${WEEK}.1`)).join("\n");
+      expect(withoutOwnItem(afterTwo.records.focusTracking)).toBe(withoutOwnItem(afterOne.records.focusTracking));
     } finally {
       harness.cleanup();
     }
@@ -425,7 +499,7 @@ describe("one week end to end", () => {
       };
       writeFileSync(statsPath, JSON.stringify([legacy]));
 
-      const { runWorklog } = await loadPipeline(FAKE_OUTPUT, "some-model-nobody-priced");
+      const { runWorklog } = await loadPipeline(FAKE_OUTPUT, { model: "some-model-nobody-priced" });
       await runWorklog({ ...RUN });
 
       const stats = JSON.parse(readFileSync(statsPath, "utf8"));

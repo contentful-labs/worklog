@@ -71,9 +71,32 @@ const PRICES = new Map<string, ModelPrice>([
   ["claude-sonnet-5", { inputPerMillion: 2, outputPerMillion: 10, cachedInputPerMillion: 0.2, cacheWritePerMillion: 2.5 }],
 ]);
 
-/** The rate card for a model id, or null when the table has never heard of it. */
+/**
+ * The day the aliases below were checked against the providers' model lists.
+ *
+ * Separate from PRICING_AS_OF because the two go stale for different reasons: a rate
+ * changes, an alias gets repointed at a new snapshot.
+ */
+export const MODEL_ALIASES_AS_OF = "2026-08-27";
+
+/**
+ * Names a provider accepts that resolve to a model in the table above.
+ *
+ * A config carrying `gpt-5.6` reaches the API perfectly well and would otherwise price as
+ * null, because the table is keyed by the full id the pricing page lists. Only aliases
+ * confirmed against the provider's own model list are here; anything else still falls
+ * through to null rather than being guessed at from a resemblance.
+ */
+const ALIASES = new Map<string, string>([["gpt-5.6", "gpt-5.6-sol"]]);
+
+/** The model id an alias stands for, or the id itself when it is not an alias. */
+export function resolveModelAlias(model: string): string {
+  return ALIASES.get(model) ?? model;
+}
+
+/** The rate card for a model id or a known alias, or null when neither is in the table. */
 export function priceFor(model: string): ModelPrice | null {
-  return PRICES.get(model) ?? null;
+  return PRICES.get(resolveModelAlias(model)) ?? null;
 }
 
 /** Model ids the table can price, for tests and for anyone adding a provider. */
