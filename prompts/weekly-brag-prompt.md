@@ -274,7 +274,6 @@ Every field outside `bragBookMarkdown` lands in a markdown table cell or a list 
 
 - dates are `YYYY-MM-DD` and must be real dates;
 - text stays on one line, with no newlines;
-- do not use `|` in impact, work context or graduation text;
 - an entry that breaks these rules is dropped, and the work it described goes unrecorded.
 </output_format>
 

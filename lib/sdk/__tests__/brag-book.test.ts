@@ -3,6 +3,7 @@ import { mkdtemp, writeFile, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { toBragBookResult, validateBragBookMarkdown, parseReviewCycle, ensureBragBookFrontmatter } from "../brag-book";
+import { updateMemory } from "../vault-updates";
 import { bragBookOutputSchema, isFocusItemId, type BragBookOutput } from "../brag-book-schema";
 
 const MARKDOWN = "# Brag Book - Week 09, 2026\n\n## Achievements\n\n- Shipped auth";
@@ -204,22 +205,25 @@ describe("toBragBookResult", () => {
     expect(result.itemsToRemove[0].split("(now part of")[0].trim()).toBe("Three small perf PRs");
   });
 
-  it("drops a graduation too short or too generic to match one memory row", () => {
-    // updateMemory deletes every line containing the item text, so `|` or `a` would
-    // wipe most of the file.
+  it("drops a graduation too short to name an item, but keeps one containing a pipe", () => {
     const result = toBragBookResult(
       output({
         memoryGraduations: [
           { item: "|", nowPartOf: "Search latency initiative" },
           { item: "a", nowPartOf: "Search latency initiative" },
           { item: "  ", nowPartOf: "Search latency initiative" },
+          // A pipe is ordinary text to updateMemory, which matches rows on their parsed
+          // cells. Dropping this would lose a real graduation.
           { item: "Perf | work", nowPartOf: "Search latency initiative" },
           { item: "Three small perf PRs", nowPartOf: "Search latency initiative" },
         ],
       }),
     );
 
-    expect(result.itemsToRemove).toEqual(["Three small perf PRs (now part of: Search latency initiative)"]);
+    expect(result.itemsToRemove).toEqual([
+      "Perf | work (now part of: Search latency initiative)",
+      "Three small perf PRs (now part of: Search latency initiative)",
+    ]);
   });
 
   it("drops a graduation with no achievement to attribute it to", () => {
@@ -239,13 +243,17 @@ describe("toBragBookResult", () => {
     expect(toBragBookResult(output({ impactLogEntry })).impactLogEntry).toEqual(impactLogEntry);
   });
 
-  it("drops an impact entry whose cells would split the impact table", () => {
+  it("drops an impact entry the writer could not record, and keeps one it can", () => {
     const base = { date: "2026-03-05", scope: "Team" as const, coreValue: "quality", evidence: "TEAM-1234" };
 
-    expect(toBragBookResult(output({ impactLogEntry: { ...base, achievement: "Shipped | auth" } })).impactLogEntry).toBeNull();
     expect(toBragBookResult(output({ impactLogEntry: { ...base, achievement: "Shipped\nauth" } })).impactLogEntry).toBeNull();
     expect(toBragBookResult(output({ impactLogEntry: { ...base, achievement: "  " } })).impactLogEntry).toBeNull();
     expect(toBragBookResult(output({ impactLogEntry: { ...base, date: "March 5th", achievement: "Shipped auth" } })).impactLogEntry).toBeNull();
+    // updateImpactLog renders through renderRow, which escapes the pipe.
+    expect(toBragBookResult(output({ impactLogEntry: { ...base, achievement: "Shipped a | b" } })).impactLogEntry).toEqual({
+      ...base,
+      achievement: "Shipped a | b",
+    });
   });
 
   it("keeps work context updates on one line and drops the rest", () => {
@@ -254,14 +262,16 @@ describe("toBragBookResult", () => {
         workContextUpdates: [
           { category: "process", info: "Sprints moved to two weeks", source: "team meeting" },
           { category: "process", info: "", source: "team meeting" },
+          // A newline would break the bullet updateWorkContext writes; a pipe would not.
           { category: "process", info: "Two\nlines", source: "" },
-          { category: "pro|cess", info: "Pipes break the bullet", source: "" },
+          { category: "tooling", info: "Uses a | b", source: "" },
         ],
       }),
     );
 
     expect(result.workContextUpdates).toEqual([
       { category: "process", info: "Sprints moved to two weeks", source: "team meeting" },
+      { category: "tooling", info: "Uses a | b", source: "" },
     ]);
   });
 
@@ -303,6 +313,65 @@ describe("toBragBookResult", () => {
   it("uses the markdown field as the brag book content", () => {
     const result = toBragBookResult(output({ bragBookMarkdown: `\n${MARKDOWN}\n` }));
     expect(result.bragBookContent).toBe(MARKDOWN);
+  });
+});
+
+describe("graduations reaching memory.md", () => {
+  let tmpDir: string;
+
+  beforeEach(async () => {
+    tmpDir = await mkdtemp(join(tmpdir(), "brag-book-grad-"));
+  });
+
+  afterEach(async () => {
+    await rm(tmpDir, { recursive: true, force: true });
+  });
+
+  const MEMORY = `# Memory
+
+## Team Now (2026 - present)
+
+| Date | Item | Category | Notes |
+|------|------|----------|-------|
+| 2026-03-05 | Fixed a flaky pagination test | bugfix |  |
+| 2026-03-06 | Reviewed the search RFC | review |  |
+`;
+
+  it("removes nothing when the graduation text matches no row exactly", async () => {
+    // "202" clears the adapter's minimum length, so nothing on this side stops it. What
+    // stops it is updateMemory needing an exact row match: a substring rule would see
+    // "202" inside both dates and delete the whole table.
+    const path = join(tmpDir, "memory.md");
+    await writeFile(path, MEMORY, "utf-8");
+
+    const { itemsToRemove } = toBragBookResult(
+      output({ memoryGraduations: [{ item: "202", nowPartOf: "Search reliability push" }] }),
+    );
+    expect(itemsToRemove).toEqual(["202 (now part of: Search reliability push)"]);
+
+    const result = await updateMemory(path, [], itemsToRemove);
+
+    expect(result.removed).toBe(0);
+    expect(result.unmatchedGraduations.map((u) => u.requested)).toEqual(["202"]);
+    expect(await readFile(path, "utf-8")).toBe(MEMORY);
+  });
+
+  it("removes the one row a graduation names exactly", async () => {
+    const path = join(tmpDir, "memory.md");
+    await writeFile(path, MEMORY, "utf-8");
+
+    const { itemsToRemove } = toBragBookResult(
+      output({
+        memoryGraduations: [{ item: "Fixed a flaky pagination test", nowPartOf: "Search reliability push" }],
+      }),
+    );
+    const result = await updateMemory(path, [], itemsToRemove);
+
+    expect(result.removed).toBe(1);
+    expect(result.unmatchedGraduations).toEqual([]);
+    const after = await readFile(path, "utf-8");
+    expect(after).not.toContain("Fixed a flaky pagination test");
+    expect(after).toContain("Reviewed the search RFC");
   });
 });
 

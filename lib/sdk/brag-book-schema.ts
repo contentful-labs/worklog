@@ -14,7 +14,10 @@
  *   document must not be blank. Enums are here too because a status or scope outside the
  *   set has no safe fallback, and both providers honour `enum`.
  * - The **element rules** further down are applied by `toBragBookResult` after parsing.
- *   They drop the one bad row and keep the rest of the week. Anything per-element lives
+ *   They drop the one bad row and keep the rest of the week. They check what the writers
+ *   cannot recover from, which is why pipes are not among them: every writer either
+ *   renders through `renderRow`, which escapes them, or writes a bullet where they are
+ *   ordinary text. Rejecting them here would only lose real work. Anything per-element lives
  *   here for that reason, not because the provider could not enforce it. Both providers
  *   do accept `minLength`, `pattern` and `maxItems` (measured against OpenAI strict mode
  *   and the Claude Code ajv path), which is exactly why they must not go in the wire
@@ -173,12 +176,6 @@ const optionalSingleLineText = z
   .trim()
   .refine((value) => !value.includes("\n") && !value.includes("\r"), "must be a single line");
 
-/**
- * A cell that reaches a writer which interpolates it raw rather than through `renderRow`,
- * so an unescaped pipe splits the table it lands in.
- */
-const unpipedText = singleLineText.refine((value) => !value.includes("|"), "must not contain a pipe");
-
 export const validMemoryItemSchema = z.object({
   // The Date column drives dropDatedRowsBefore's 26-week window, so a malformed date
   // would quietly distort every future prompt. Drop the row instead.
@@ -189,24 +186,23 @@ export const validMemoryItemSchema = z.object({
 });
 
 export const validMemoryGraduationSchema = z.object({
-  // updateMemory removes memory rows with `line.includes(item)`, so a one or two character
-  // item matches nearly every line in the file and deletes it. Length and no-pipe here are
-  // about that match being specific, not about rendering.
-  item: unpipedText.min(MIN_GRADUATION_LENGTH),
+  // updateMemory needs an exact row match to remove anything, so a stray character can no
+  // longer wipe the file. The minimum length stays as a floor on what counts as an item.
+  item: singleLineText.min(MIN_GRADUATION_LENGTH),
   nowPartOf: singleLineText,
 });
 
 export const validImpactLogEntrySchema = z.object({
   date: z.iso.date(),
-  achievement: unpipedText,
+  achievement: singleLineText,
   scope: z.enum(IMPACT_SCOPES),
-  coreValue: optionalSingleLineText.refine((v) => !v.includes("|"), "must not contain a pipe"),
-  evidence: optionalSingleLineText.refine((v) => !v.includes("|"), "must not contain a pipe"),
+  coreValue: optionalSingleLineText,
+  evidence: optionalSingleLineText,
 });
 
 export const validWorkContextUpdateSchema = z.object({
-  category: unpipedText,
-  info: unpipedText,
+  category: singleLineText,
+  info: singleLineText,
   source: optionalSingleLineText,
 });
 
