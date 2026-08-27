@@ -670,6 +670,77 @@ describe("condenseMemoryNotes", () => {
 
     expect(content).toBe(fenced);
   });
+
+  // A fence closes only on its own marker character, at least as long, with nothing after it.
+  // Toggling on either marker let a documentation example end its own block early.
+  it("does not let a tilde line close a backtick fence", () => {
+    const fenced = [
+      "```md",
+      "~~~",
+      "| 2020-01-01 | Example | Category | example notes |",
+      "~~~",
+      "```",
+    ].join("\n");
+
+    expect(condenseMemoryNotes(fenced, "2026-01-01").content).toBe(fenced);
+  });
+
+  it("does not let a backtick line close a tilde fence", () => {
+    const fenced = [
+      "~~~md",
+      "```",
+      "| 2020-01-01 | Example | Category | example notes |",
+      "```",
+      "~~~",
+    ].join("\n");
+
+    expect(condenseMemoryNotes(fenced, "2026-01-01").content).toBe(fenced);
+  });
+
+  it("does not let a shorter run close a longer fence", () => {
+    const fenced = [
+      "````md",
+      "```",
+      "| 2020-01-01 | Example | Category | example notes |",
+      "```",
+      "````",
+    ].join("\n");
+
+    expect(condenseMemoryNotes(fenced, "2026-01-01").content).toBe(fenced);
+  });
+
+  it("does not let a fence carrying an info string close a block", () => {
+    const fenced = [
+      "```md",
+      "```js",
+      "| 2020-01-01 | Example | Category | example notes |",
+      "```",
+      "```",
+    ].join("\n");
+
+    expect(condenseMemoryNotes(fenced, "2026-01-01").content).toBe(fenced);
+  });
+
+  it("treats an unclosed fence as running to the end of the file", () => {
+    const fenced = ["```md", "| 2020-01-01 | Example | Category | example notes |"].join("\n");
+
+    expect(condenseMemoryNotes(fenced, "2026-01-01").content).toBe(fenced);
+  });
+
+  it("still condenses rows after a fence that did close", () => {
+    const mixed = [
+      "```md",
+      "| 2020-01-01 | Example | Category | example notes |",
+      "```",
+      "",
+      "| 2020-02-02 | Real row | Category | real notes |",
+    ].join("\n");
+    const { content } = condenseMemoryNotes(mixed, "2026-01-01");
+
+    expect(content).toContain("example notes");
+    expect(content).not.toContain("real notes");
+    expect(content).toContain("Real row");
+  });
 });
 
 describe("summarizeArchivedFocusDocs one-off cap", () => {

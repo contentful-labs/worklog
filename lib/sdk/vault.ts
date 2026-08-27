@@ -148,6 +148,35 @@ export const DEFAULT_MEMORY_FULL_WEEKS = 12;
 /** Which cell of `| Date | Item | Category | Notes |` holds the notes. */
 const MEMORY_NOTES_COLUMN = 3;
 
+interface Fence {
+  marker: string;
+  length: number;
+  info: string;
+}
+
+/**
+ * Read a fence line: up to three leading spaces, then three or more backticks or tildes.
+ *
+ * The same shape as `maskFenced`'s reader in `vault-updates.ts`, which is private to that file.
+ * Duplicated rather than shared because that file is not this change's to touch.
+ */
+function readFence(line: string): Fence | null {
+  let i = 0;
+  while (i < 3 && line[i] === " ") i++;
+
+  const marker = line[i];
+  if (marker !== "`" && marker !== "~") return null;
+
+  let length = 0;
+  while (line[i + length] === marker) length++;
+  if (length < 3) return null;
+
+  const info = line.slice(i + length).trim();
+  // A backtick fence's info string may not itself contain a backtick.
+  if (marker === "`" && info.includes("`")) return null;
+  return { marker, length, info };
+}
+
 function isIsoDate(value: string): boolean {
   if (value.length !== 10) return false;
   for (let i = 0; i < 10; i++) {
@@ -190,16 +219,28 @@ interface CondensedMemory {
  */
 export function condenseMemoryNotes(content: string, fullSinceDate: string): CondensedMemory {
   const counts: MemoryRowCounts = { liveRows: 0, olderRows: 0, other: 0 };
-  let fenced = false;
+  // The open fence, not a boolean: a `~~~` line inside a ```` ```md ```` block is content, and
+  // toggling on either marker ended the block early and condensed the example table inside it.
+  let open: Fence | null = null;
 
   const lines = content.split("\n").map((line) => {
-    const trimmed = line.trimStart();
-    if (trimmed.startsWith("```") || trimmed.startsWith("~~~")) {
-      fenced = !fenced;
-      counts.other += line.length;
-      return line;
+    const fence = readFence(line);
+    if (fence) {
+      if (!open) {
+        open = fence;
+        counts.other += line.length;
+        return line;
+      }
+      // A closing fence matches the character, is at least as long, and carries no info.
+      if (fence.marker === open.marker && fence.length >= open.length && fence.info.length === 0) {
+        open = null;
+        counts.other += line.length;
+        return line;
+      }
     }
-    if (fenced || !trimmed.startsWith("|") || isTableSeparator(line)) {
+
+    const trimmed = line.trimStart();
+    if (open || !trimmed.startsWith("|") || isTableSeparator(line)) {
       counts.other += line.length;
       return line;
     }
