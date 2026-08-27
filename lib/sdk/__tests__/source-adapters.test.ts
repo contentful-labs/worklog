@@ -91,13 +91,6 @@ function findEvent(events: SourceEvent[], kind: string, itemId?: string): Source
   return events.find((e) => e.kind === kind && (!itemId || e.itemId === itemId));
 }
 
-/** Fails the test if the source made any HTTP call at all. */
-const noRequestsAllowed = [
-  http.all("*", ({ request }) => {
-    throw new Error(`Unexpected HTTP request: ${request.method} ${request.url}`);
-  }),
-];
-
 const server = setupServer();
 
 beforeAll(() => server.listen({ onUnhandledRequest: "error" }));
@@ -799,5 +792,101 @@ describe("githubSource", () => {
     expect(batch.events).toHaveLength(0);
     expect(batch.warnings[0]).toContain("not a pull request url");
     expect(ctx.warnings).toEqual(batch.warnings);
+  });
+});
+
+describe("what belongs to the user and what does not", () => {
+  it("leaves a colleague's comment out of the user's week", async () => {
+    // The trigger: a coworker comments on a ticket assigned to the user. Recording it
+    // makes somebody else's words evidence of the user's work.
+    server.use(http.post(`${BASE_URL}/rest/api/3/search/jql`, () => HttpResponse.json({ issues: [jiraIssue] })));
+
+    const batch = await jiraSource(() => NOW).fetchWindow(window, makeContext());
+    const comments = batch.events.filter((e) => e.kind === "comment");
+
+    expect(comments.map((e) => e.id)).toEqual(["c-1"]);
+    expect(comments.some((e) => renderable(e.payload).text?.includes("Thanks for picking this up"))).toBe(false);
+  });
+
+  it("leaves it out of a delta too", async () => {
+    server.use(http.post(`${BASE_URL}/rest/api/3/search/jql`, () => HttpResponse.json({ issues: [jiraIssue] })));
+
+    const batch = await jiraSource(() => NOW).fetchSince(new Date("2026-03-01T00:00:00Z"), ["TEAM-1234"], makeContext());
+    expect(batch.events.filter((e) => e.kind === "comment").map((e) => e.id)).toEqual(["c-1"]);
+  });
+});
+
+describe("lifecycle events a week did not open in", () => {
+  it("gives a Jira week the status change made in it, not the issue's latest state", async () => {
+    // The trigger: created in one week, moved in the next, last touched in a third.
+    // Searching on the issue's own `updated` and ignoring the changelog reports the
+    // issue once, to the wrong week, with no idea what actually happened.
+    const moved = {
+      ...jiraIssue,
+      fields: { ...jiraIssue.fields, created: "2026-03-03T09:00:00.000+0000", updated: "2026-03-20T17:00:00.000+0000", comment: { comments: [] } },
+      changelog: {
+        histories: [
+          { id: "h-1", created: "2026-03-11T10:00:00.000+0000", items: [{ field: "status", fromString: "To Do", toString: "In Progress" }] },
+        ],
+      },
+    };
+    server.use(http.post(`${BASE_URL}/rest/api/3/search/jql`, () => HttpResponse.json({ issues: [moved] })));
+
+    const secondWeek: SourceWindow = { start: new Date("2026-03-09T00:00:00Z"), end: new Date("2026-03-15T23:59:59Z") };
+    const batch = await jiraSource(() => NOW).fetchWindow(secondWeek, makeContext());
+
+    const status = findEvent(batch.events, "status");
+    expect(status?.at).toBe("2026-03-11T10:00:00.000Z");
+    expect(renderable(status?.payload).to).toBe("In Progress");
+    // Nothing from the week it was opened in, and nothing from the week it last moved in.
+    expect(kinds(batch.events)).toEqual(["status"]);
+  });
+
+  it("follows the pages of a long Jira changelog", async () => {
+    const paged = {
+      ...jiraIssue,
+      fields: { ...jiraIssue.fields, comment: { comments: [] } },
+      changelog: {
+        total: 2,
+        histories: [
+          { id: "h-1", created: "2026-03-04T10:00:00.000+0000", items: [{ field: "status", fromString: "To Do", toString: "In Progress" }] },
+        ],
+      },
+    };
+    server.use(
+      http.post(`${BASE_URL}/rest/api/3/search/jql`, () => HttpResponse.json({ issues: [paged] })),
+      http.get(`${BASE_URL}/rest/api/3/issue/TEAM-1234/changelog`, () =>
+        HttpResponse.json({
+          values: [{ id: "h-2", created: "2026-03-05T10:00:00.000+0000", items: [{ field: "status", fromString: "In Progress", toString: "Done" }] }],
+          isLast: true,
+        }),
+      ),
+    );
+
+    const batch = await jiraSource(() => NOW).fetchWindow(window, makeContext());
+    expect(batch.events.filter((e) => e.kind === "status").map((e) => e.id)).toEqual(["h-1:status", "h-2:status"]);
+  });
+
+  it("gives a GitHub week the merge that happened in it, even though the PR is older", async () => {
+    // The trigger: opened in one week, merged in the next. Searching by creation date
+    // means the merging week never finds the PR, and the opening week throws the merge
+    // away for being out of range, so the merge is recorded nowhere at all.
+    const seenQueries: string[] = [];
+    const mergedLater = { ...authoredPR, created_at: "2026-03-03T09:00:00Z", merged_at: "2026-03-11T09:00:00Z", closed_at: "2026-03-11T09:00:00Z" };
+    server.use(
+      http.get("https://api.github.com/search/issues", ({ request }) => {
+        const q = new URL(request.url).searchParams.get("q") || "";
+        seenQueries.push(q);
+        const items = q.includes("reviewed-by:") ? [] : [mergedLater];
+        return HttpResponse.json({ total_count: items.length, items });
+      }),
+    );
+
+    const secondWeek: SourceWindow = { start: new Date("2026-03-09T00:00:00Z"), end: new Date("2026-03-15T23:59:59Z") };
+    const batch = await githubSource(() => NOW).fetchWindow(secondWeek, makeContext());
+
+    expect(seenQueries[0]).toContain("updated:2026-03-09..2026-03-15");
+    expect(kinds(batch.events)).toEqual(["merged"]);
+    expect(findEvent(batch.events, "merged")?.at).toBe("2026-03-11T09:00:00.000Z");
   });
 });

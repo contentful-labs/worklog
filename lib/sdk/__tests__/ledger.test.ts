@@ -5,7 +5,8 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import {
-  openLedger, ledgerRoot, eventsByItem, newEvents, renderable, collectIntoLedger, weekWindow,
+  openLedger, ledgerRoot, eventsByItem, isSafeSourceName, newEvents, renderable, collectIntoLedger,
+  weekWindow,
 } from "../ledger";
 import type { Source, SourceBatch, SourceContext } from "../sources";
 
@@ -420,5 +421,164 @@ describe("what a run added", () => {
 
   it("is everything when the week was empty", () => {
     expect(newEvents([], [comment, status])).toEqual([comment, status]);
+  });
+});
+
+describe("a refresh that asks about one week", () => {
+  const week = (weekId: string, start: string, end: string) => ({
+    weekId,
+    window: { start: new Date(`${start}T00:00:00.000Z`), end: new Date(`${end}T23:59:59.999Z`) },
+  });
+
+  const ctx = (): SourceContext => ({
+    // SAFETY: this fake source reads nothing from config; a real one is handed a real
+    // config by the command, and this test is about the ledger, not about it.
+    config: {} as SourceContext["config"],
+  });
+
+  /** Remembers every `since` it was asked for, and answers with nothing. */
+  function recorder(name: string, asked: string[]): Source {
+    return {
+      name,
+      isAvailable: async () => ({ ok: true }),
+      fetchWindow: async () => ({ snapshots: [], events: [], warnings: [] }),
+      fetchSince: async (since) => {
+        asked.push(since.toISOString());
+        return { snapshots: [], events: [], warnings: [] };
+      },
+    };
+  }
+
+  it("does not claim to have read on behalf of the weeks it left alone", async () => {
+    // The trigger: August's week is read up to 1 August. On 27 August a refresh of the
+    // current week only. If that advanced one watermark for the whole source, the next
+    // refresh of August would ask for changes after 27 August and never see the comment
+    // somebody left on an August ticket on the 10th.
+    const august = week("2026-W33", "2026-08-10", "2026-08-16");
+    const current = week("2026-W35", "2026-08-24", "2026-08-30");
+    const asked: string[] = [];
+
+    const first = await openLedger(root);
+    first.markWindow("jira", august.weekId);
+    first.setWatermark("jira", august.weekId, new Date("2026-08-01T00:00:00.000Z"));
+    first.markWindow("jira", current.weekId);
+    first.setWatermark("jira", current.weekId, new Date("2026-08-24T00:00:00.000Z"));
+    await first.save();
+
+    const scoped = await openLedger(root);
+    await collectIntoLedger(scoped, [recorder("jira", asked)], [current], ctx, new Date("2026-08-27T09:00:00.000Z"));
+    await scoped.save();
+
+    const later = await openLedger(root);
+    expect(later.watermarkFor("jira", august.weekId)?.toISOString()).toBe("2026-08-01T00:00:00.000Z");
+
+    await collectIntoLedger(later, [recorder("jira", asked)], [august], ctx, new Date("2026-08-28T09:00:00.000Z"));
+    expect(asked).toEqual(["2026-08-24T00:00:00.000Z", "2026-08-01T00:00:00.000Z"]);
+  });
+
+  it("asks from the earliest of the weeks it was given, so one query covers them all", async () => {
+    const asked: string[] = [];
+    const ledger = await openLedger(root);
+    ledger.markWindow("jira", "2026-W33");
+    ledger.setWatermark("jira", "2026-W33", new Date("2026-08-01T00:00:00.000Z"));
+    ledger.markWindow("jira", "2026-W35");
+    ledger.setWatermark("jira", "2026-W35", new Date("2026-08-24T00:00:00.000Z"));
+
+    await collectIntoLedger(
+      ledger,
+      [recorder("jira", asked)],
+      [week("2026-W33", "2026-08-10", "2026-08-16"), week("2026-W35", "2026-08-24", "2026-08-30")],
+      ctx,
+      new Date("2026-08-27T09:00:00.000Z"),
+    );
+
+    expect(asked).toEqual(["2026-08-01T00:00:00.000Z"]);
+  });
+
+  it("writes nothing at all when two runs an hour apart both find nothing", async () => {
+    // The trigger for a watermark that moved to the clock: no AI call, no vault write,
+    // and yet meta.json changed, every single run.
+    const weeks = [week("2026-W36", "2026-08-31", "2026-09-06")];
+    const event = { source: "jira", kind: "comment", itemId: "TEAM-1234", at: "2026-09-01T09:00:00.000Z", payload: {}, id: "c-1" };
+    const answering = (): Source => ({
+      name: "jira",
+      isAvailable: async () => ({ ok: true }),
+      fetchWindow: async () => ({ snapshots: [], events: [event], warnings: [] }),
+      fetchSince: async () => ({ snapshots: [], events: [event], warnings: [] }),
+    });
+
+    const first = await openLedger(root);
+    await collectIntoLedger(first, [answering()], weeks, ctx, new Date("2026-09-07T10:00:00.000Z"));
+    first.markWritten("2026-W36");
+    await first.save();
+
+    const second = await openLedger(root);
+    await collectIntoLedger(second, [answering()], weeks, ctx, new Date("2026-09-07T11:00:00.000Z"));
+    await second.save();
+    const afterSecond = await readFile(join(root, "meta.json"), "utf-8");
+
+    const third = await openLedger(root);
+    await collectIntoLedger(third, [answering()], weeks, ctx, new Date("2026-09-07T12:00:00.000Z"));
+    await third.save();
+
+    expect(await readFile(join(root, "meta.json"), "utf-8")).toBe(afterSecond);
+  });
+});
+
+describe("a source with a name that is really a path", () => {
+  const traversal = "../../victim";
+
+  it("is not a name this ledger accepts", () => {
+    expect(isSafeSourceName("jira")).toBe(true);
+    expect(isSafeSourceName("slack-messages")).toBe(true);
+    expect(isSafeSourceName(traversal)).toBe(false);
+    expect(isSafeSourceName("Jira")).toBe(false);
+  });
+
+  it("records nothing, says so, and writes no file outside the ledger", async () => {
+    const ledger = await openLedger(root);
+    const result = ledger.record(traversal, {
+      snapshots: [{ id: "x", firstSeenAt: "2026-08-10T09:00:00.000Z", payload: {} }],
+      events: [{ source: traversal, kind: "created", itemId: "x", at: "2026-08-10T09:00:00.000Z", payload: {} }],
+      warnings: [],
+    }, seenAt);
+    await ledger.save();
+
+    expect(result).toMatchObject({ addedEvents: 0, addedSnapshots: 0 });
+    expect(ledger.problems()[0]).toContain(traversal);
+    expect(existsSync(root)).toBe(false);
+  });
+});
+
+describe("a ledger file this version cannot read", () => {
+  const good = { source: "jira", kind: "comment", itemId: "TEAM-1234", at: "2026-08-31T11:00:00.000Z", payload: {}, id: "c-1" };
+
+  async function seedWithCorruptRow(): Promise<string> {
+    const ledger = await openLedger(root);
+    ledger.record("jira", batch({ events: [good] }), seenAt);
+    await ledger.save();
+
+    const path = join(root, "events", "2026-W36.json");
+    await writeFile(path, JSON.stringify([good, { source: "jira", kind: 7 }], null, 2), "utf-8");
+    return path;
+  }
+
+  it("says which file and which row, and leaves the file exactly as it is", async () => {
+    const path = await seedWithCorruptRow();
+    const before = await readFile(path, "utf-8");
+
+    const ledger = await openLedger(root);
+    expect(ledger.problems()[0]).toContain("2026-W36.json");
+    expect(ledger.problems()[0]).toContain("row 1");
+
+    // The run carries on with what it could read, and files a new event into that week.
+    ledger.record("jira", batch({
+      events: [{ source: "jira", kind: "status", itemId: "TEAM-1234", at: "2026-09-02T09:00:00.000Z", payload: {} }],
+    }), seenAt);
+    await ledger.save();
+
+    expect(await readFile(path, "utf-8")).toBe(before);
+    // In memory the week is complete enough to write a work log from.
+    expect(ledger.eventsForWeek("2026-W36").map((event) => event.kind)).toEqual(["comment", "status"]);
   });
 });
