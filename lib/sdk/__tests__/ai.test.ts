@@ -19,7 +19,7 @@ vi.mock("../../openai-auth", () => ({
 import { streamText } from "ai";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import { resolveOpenAIAuth, refreshCodexToken } from "../../openai-auth";
-import { aiQuery, aiQueryStructured, postProcess, toAnthropicJsonSchema } from "../ai";
+import { aiQuery, aiQueryStructured, postProcess, toAnthropicJsonSchema, type AIUsage } from "../ai";
 import type { WorklogConfig } from "../types";
 
 const mockedStreamText = vi.mocked(streamText);
@@ -49,26 +49,74 @@ function messageStream(messages: unknown[]) {
   return stream as ReturnType<typeof query>;
 }
 
-function anthropicResult(overrides: { subtype?: string; structured_output?: unknown; result?: string }) {
+function anthropicResult(
+  overrides: {
+    subtype?: string;
+    structured_output?: unknown;
+    result?: string;
+    num_turns?: number;
+    usage?: Record<string, number>;
+    total_cost_usd?: number;
+    modelUsage?: Record<string, { outputTokens?: number }>;
+  } = {},
+) {
   return {
     type: "result",
     subtype: "success",
     num_turns: 1,
     usage: { input_tokens: 10, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 20 },
+    total_cost_usd: 0,
+    modelUsage: {},
     ...overrides,
   };
 }
 
-/** streamText is mocked, so only the fields aiQueryStructured awaits have to exist. */
-function streamTextResult(output: unknown) {
-  // SAFETY: queryOpenAIStructured awaits `result.output` and nothing else.
-  return { output: Promise.resolve(output) } as unknown as ReturnType<typeof streamText>;
+/**
+ * What a provider result says about tokens, with every field optional.
+ *
+ * The SDK's own LanguageModelUsage has these as `number | undefined` inside a required
+ * details object; a case that only cares about two of them should not have to spell out
+ * the rest, and one case deliberately omits them all.
+ */
+interface FakeUsage {
+  inputTokens?: number;
+  outputTokens?: number;
+  inputTokenDetails?: { noCacheTokens?: number; cacheReadTokens?: number; cacheWriteTokens?: number };
+}
+
+/** What the SDK reports when nothing asked about tokens. */
+const NO_USAGE: FakeUsage = {
+  inputTokens: 0,
+  outputTokens: 0,
+  inputTokenDetails: { noCacheTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
+};
+
+/** streamText is mocked, so a stand-in only needs the fields the query functions await. */
+function fakeStreamResult(fields: Record<string, Promise<unknown>>) {
+  // SAFETY: those fields are `text` or `output`, plus `totalUsage` and `steps` when the
+  // caller passed onUsage. The other thirty-odd fields of the real result are never
+  // touched, and implementing them faithfully would be a worse test than this assertion.
+  return fields as unknown as ReturnType<typeof streamText>;
+}
+
+/** Whatever the provider handed back, before anything validated it. */
+type ProviderOutput = Record<string, unknown>;
+
+function streamTextResult(output: ProviderOutput, usage: FakeUsage = NO_USAGE, stepCount = 1) {
+  return fakeStreamResult({
+    output: Promise.resolve(output),
+    totalUsage: Promise.resolve(usage),
+    steps: Promise.resolve(Array.from({ length: stepCount })),
+  });
 }
 
 /** The text-only counterpart, for the aiQuery path. */
-function streamTextText(text: string) {
-  // SAFETY: queryOpenAI awaits `result.text` and nothing else.
-  return { text: Promise.resolve(text) } as unknown as ReturnType<typeof streamText>;
+function streamTextText(text: string, usage: FakeUsage = NO_USAGE, stepCount = 1) {
+  return fakeStreamResult({
+    text: Promise.resolve(text),
+    totalUsage: Promise.resolve(usage),
+    steps: Promise.resolve(Array.from({ length: stepCount })),
+  });
 }
 
 /**
@@ -128,6 +176,71 @@ describe("aiQueryStructured on the OpenAI path", () => {
     mockedStreamText.mockReturnValue(streamTextResult({ headline: 42 }));
 
     await expect(aiQueryStructured({ prompt: "go", config: configFor("openai"), schema })).rejects.toThrow();
+  });
+});
+
+describe("usage reporting", () => {
+  const usage = {
+    inputTokens: 1200,
+    outputTokens: 340,
+    inputTokenDetails: { noCacheTokens: 200, cacheReadTokens: 1000, cacheWriteTokens: 0 },
+  };
+
+  it("reports tokens, the model that ran, and the step count", async () => {
+    mockedStreamText.mockReturnValue(streamTextResult({ headline: "hi", items: [] }, usage, 3));
+    const seen: AIUsage[] = [];
+
+    await aiQueryStructured({
+      prompt: "go",
+      config: configFor("openai"),
+      schema,
+      model: "gpt-5",
+      onUsage: (u) => seen.push(u),
+    });
+
+    expect(seen).toEqual([
+      { model: "gpt-5", inputTokens: 1200, outputTokens: 340, cachedInputTokens: 1000, steps: 3 },
+    ]);
+  });
+
+  it("reports the resolved default when no model was asked for", async () => {
+    mockedResolveAuth.mockReturnValue({ apiKey: "tok", source: "codex-subscription", accountId: "acct" });
+    mockedStreamText.mockReturnValue(streamTextResult({ headline: "hi", items: [] }, usage, 1));
+    const seen: AIUsage[] = [];
+
+    await aiQueryStructured({ prompt: "go", config: configFor("openai"), schema, onUsage: (u) => seen.push(u) });
+
+    expect(seen[0].model).toBe("gpt-5.6-sol");
+  });
+
+  it("reports usage on the text path too", async () => {
+    mockedStreamText.mockReturnValue(streamTextText("# Done", usage, 2));
+    const seen: AIUsage[] = [];
+
+    await aiQuery({ prompt: "go", config: configFor("openai"), onUsage: (u) => seen.push(u) });
+
+    expect(seen[0]).toMatchObject({ inputTokens: 1200, outputTokens: 340, steps: 2 });
+  });
+
+  it("does not ask the provider for usage when nobody wants it", async () => {
+    // The mock would resolve them anyway; the point is that a provider result without
+    // usage fields still works for callers that never passed onUsage.
+    mockedStreamText.mockReturnValue(fakeStreamResult({ output: Promise.resolve({ headline: "hi", items: [] }) }));
+
+    await expect(aiQueryStructured({ prompt: "go", config: configFor("openai"), schema })).resolves.toEqual({
+      headline: "hi",
+      items: [],
+    });
+  });
+
+  it("treats missing token counts as zero rather than failing the week", async () => {
+    const sparse = { inputTokens: undefined, outputTokens: undefined, inputTokenDetails: {} };
+    mockedStreamText.mockReturnValue(streamTextResult({ headline: "hi", items: [] }, sparse, 1));
+    const seen: AIUsage[] = [];
+
+    await aiQueryStructured({ prompt: "go", config: configFor("openai"), schema, onUsage: (u) => seen.push(u) });
+
+    expect(seen[0]).toMatchObject({ inputTokens: 0, outputTokens: 0, cachedInputTokens: 0 });
   });
 });
 
@@ -208,6 +321,35 @@ describe("aiQueryStructured on the Anthropic path", () => {
     await expect(aiQueryStructured({ prompt: "go", config: configFor("anthropic"), schema })).rejects.toThrow(
       "no structured output",
     );
+  });
+
+  it("reports usage from the run's own totals, cache included", async () => {
+    mockedQuery.mockReturnValue(
+      messageStream([
+        anthropicResult({
+          structured_output: { headline: "hi", items: [] },
+          num_turns: 4,
+          usage: { input_tokens: 5, cache_creation_input_tokens: 2000, cache_read_input_tokens: 18000, output_tokens: 900 },
+          total_cost_usd: 0.42,
+          modelUsage: { "claude-opus-5": {}, "claude-haiku-4-5": {} },
+        }),
+      ]),
+    );
+    const seen: AIUsage[] = [];
+
+    await aiQueryStructured({ prompt: "go", config: configFor("anthropic"), schema, onUsage: (u) => seen.push(u) });
+
+    expect(seen).toEqual([
+      {
+        model: "claude-opus-5",
+        // Fresh, cache-write and cache-read tokens are all input the run paid for.
+        inputTokens: 20005,
+        outputTokens: 900,
+        cachedInputTokens: 18000,
+        steps: 4,
+        reportedCostUsd: 0.42,
+      },
+    ]);
   });
 
   it("rejects a structured result that does not satisfy the schema", async () => {

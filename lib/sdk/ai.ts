@@ -1,16 +1,42 @@
-import { streamText, stepCountIs, Output, type OnStepFinishEvent } from "ai";
+import { streamText, stepCountIs, Output, type OnStepFinishEvent, type StreamTextResult } from "ai";
 import { createOpenAI, type OpenAIProvider } from "@ai-sdk/openai";
 import { z } from "zod";
 import { resolveOpenAIAuth, refreshCodexToken, type OpenAIAuthResolution } from "../openai-auth";
 import { buildResearchTools, buildResearchMcpServer, RESEARCH_MCP_SERVER_NAME, RESEARCH_MCP_TOOL_IDS } from "../ai-tools";
 import type { WorklogConfig } from "./types";
 import type { Logger } from "./logger";
+import type { SDKResultMessage } from "@anthropic-ai/claude-agent-sdk";
+
+/**
+ * What one query spent.
+ *
+ * Reported through a callback rather than the return value so existing callers keep
+ * working: aiQuery still returns a string and aiQueryStructured still returns the object.
+ */
+export interface AIUsage {
+  /** The model the provider actually ran, which is not always the one in config. */
+  model: string;
+  /** Total input tokens, cached ones included. */
+  inputTokens: number;
+  outputTokens: number;
+  /** The part of inputTokens that was served from cache. */
+  cachedInputTokens: number;
+  /** Tool rounds, plus the step that produced the object on a structured query. */
+  steps: number;
+  /**
+   * What the provider itself says the call cost. Only the Agent SDK reports one, and it
+   * beats any local price table: it knows the model mix and the rates in force.
+   */
+  reportedCostUsd?: number;
+}
 
 export interface AIQueryOptions {
   prompt: string;
   model?: string;
   config: WorklogConfig;
   log?: Logger;
+  /** Called once per query, after the provider has finished, when usage is available. */
+  onUsage?: (usage: AIUsage) => void;
 }
 
 export interface StructuredQueryOptions<T> extends AIQueryOptions {
@@ -44,7 +70,7 @@ type JsonSchema = z.core.JSONSchema.BaseSchema;
  * Returns the final text output with preamble stripped and code block unwrapped.
  */
 export async function aiQuery(options: AIQueryOptions): Promise<string> {
-  const { config, prompt, model: modelOverride, log = () => {} } = options;
+  const { config, prompt, model: modelOverride, log = () => {}, onUsage } = options;
   const provider = config.ai.provider ?? "openai";
   const model = modelOverride ?? config.ai.model;
 
@@ -53,10 +79,10 @@ export async function aiQuery(options: AIQueryOptions): Promise<string> {
   let raw: string;
   if (provider === "anthropic") {
     log("Querying Anthropic via Claude Agent SDK...");
-    raw = await queryAnthropic(config, model, prompt);
+    raw = await queryAnthropic(config, model, prompt, log, onUsage);
   } else {
     log(`Querying OpenAI via Vercel AI SDK (model: ${model || "gpt-5"})...`);
-    raw = await queryOpenAI(config, model, prompt, log);
+    raw = await queryOpenAI(config, model, prompt, log, onUsage);
   }
 
   log(`Raw AI response: ${raw.length} chars`);
@@ -69,15 +95,15 @@ export async function aiQuery(options: AIQueryOptions): Promise<string> {
  * be recovered from the text afterwards.
  */
 export async function aiQueryStructured<T>(options: StructuredQueryOptions<T>): Promise<T> {
-  const { config, prompt, schema, schemaName = "result", model: modelOverride, log = () => {} } = options;
+  const { config, prompt, schema, schemaName = "result", model: modelOverride, log = () => {}, onUsage } = options;
   const provider = config.ai.provider ?? "openai";
   const model = modelOverride ?? config.ai.model;
 
   log(`AI provider: ${provider}, model: ${model ?? "default"}, structured output: ${schemaName}`);
 
   const raw = provider === "anthropic"
-    ? await queryAnthropicStructured(config, model, prompt, schema, log)
-    : await queryOpenAIStructured(config, model, prompt, schema, schemaName, log);
+    ? await queryAnthropicStructured(config, model, prompt, schema, log, onUsage)
+    : await queryOpenAIStructured(config, model, prompt, schema, schemaName, log, onUsage);
 
   return schema.parse(raw);
 }
@@ -108,13 +134,49 @@ function anthropicOptions(model: string | undefined, researchServer: Awaited<Ret
   };
 }
 
-async function queryAnthropic(config: WorklogConfig, model: string | undefined, prompt: string): Promise<string> {
+/**
+ * Log and report what an Agent SDK run spent.
+ *
+ * `total_cost_usd` is the SDK's own figure. It is worth more than a local price table
+ * because a single run can span models: the main turn on one, side tasks on another.
+ */
+function reportAnthropicUsage(
+  message: SDKResultMessage,
+  requestedModel: string | undefined,
+  log: Logger,
+  onUsage?: (usage: AIUsage) => void,
+): void {
+  const { input_tokens, cache_creation_input_tokens, cache_read_input_tokens, output_tokens } = message.usage;
+  log(`Anthropic result: ${message.subtype}, ${message.num_turns} turns, ${input_tokens} in (+${cache_creation_input_tokens} cache write, +${cache_read_input_tokens} cache read) / ${output_tokens} out`);
+  if (!onUsage) return;
+
+  // The run's own model list is the truth; the requested model can be undefined because
+  // the CLI has its own default.
+  const models = Object.keys(message.modelUsage);
+  onUsage({
+    model: models[0] ?? requestedModel ?? "unknown",
+    inputTokens: input_tokens + cache_creation_input_tokens + cache_read_input_tokens,
+    outputTokens: output_tokens,
+    cachedInputTokens: cache_read_input_tokens,
+    steps: message.num_turns,
+    reportedCostUsd: message.total_cost_usd,
+  });
+}
+
+async function queryAnthropic(
+  config: WorklogConfig,
+  model: string | undefined,
+  prompt: string,
+  log: Logger,
+  onUsage?: (usage: AIUsage) => void,
+): Promise<string> {
   const { query } = await import("@anthropic-ai/claude-agent-sdk");
   const researchServer = await buildResearchMcpServer(config);
 
   let result = "";
   try {
     for await (const message of query({ prompt, options: anthropicOptions(model, researchServer) })) {
+      if (message.type === "result") reportAnthropicUsage(message, model, log, onUsage);
       if (message.type === "assistant" && message.message?.content) {
         const hasToolUse = message.message.content.some(
           (b: { type: string }) => b.type === "tool_use"
@@ -153,6 +215,7 @@ async function queryAnthropicStructured(
   prompt: string,
   schema: z.ZodType<unknown>,
   log: Logger,
+  onUsage?: (usage: AIUsage) => void,
 ): Promise<unknown> {
   const { query } = await import("@anthropic-ai/claude-agent-sdk");
   const researchServer = await buildResearchMcpServer(config);
@@ -165,8 +228,7 @@ async function queryAnthropicStructured(
       options: { ...anthropicOptions(model, researchServer), outputFormat: { type: "json_schema", schema: jsonSchema } },
     })) {
       if (message.type !== "result") continue;
-      const { input_tokens, cache_creation_input_tokens, cache_read_input_tokens, output_tokens } = message.usage;
-      log(`Anthropic result: ${message.subtype}, ${message.num_turns} turns, ${input_tokens} in (+${cache_creation_input_tokens} cache write, +${cache_read_input_tokens} cache read) / ${output_tokens} out`);
+      reportAnthropicUsage(message, model, log, onUsage);
       outcome = {
         subtype: message.subtype,
         structured: message.subtype === "success" ? message.structured_output : undefined,
@@ -236,6 +298,29 @@ async function createConfiguredOpenAI(): Promise<ConfiguredOpenAI> {
 
 type ResearchTools = ReturnType<typeof buildResearchTools>;
 
+/**
+ * Report what a streamText run spent, once it has finished.
+ *
+ * `totalUsage` is the sum across steps, so it has to be read after the caller has awaited
+ * the text or the object; the per-step numbers logged along the way are for the log only.
+ */
+async function reportOpenAIUsage(
+  // Both callers fit: neither picked field depends on the output type, so `never` stands
+  // in for it rather than making this generic over something it does not read.
+  result: Pick<StreamTextResult<ResearchTools, never>, "totalUsage" | "steps">,
+  model: string,
+  onUsage: (usage: AIUsage) => void,
+): Promise<void> {
+  const [usage, steps] = await Promise.all([result.totalUsage, result.steps]);
+  onUsage({
+    model,
+    inputTokens: usage.inputTokens ?? 0,
+    outputTokens: usage.outputTokens ?? 0,
+    cachedInputTokens: usage.inputTokenDetails.cacheReadTokens ?? 0,
+    steps: steps.length,
+  });
+}
+
 function logOpenAIStep(log: Logger) {
   return (step: OnStepFinishEvent<ResearchTools>) => {
     for (const call of step.toolCalls) {
@@ -246,11 +331,18 @@ function logOpenAIStep(log: Logger) {
   };
 }
 
-async function queryOpenAI(config: WorklogConfig, modelOverride: string | undefined, prompt: string, log: Logger): Promise<string> {
+async function queryOpenAI(
+  config: WorklogConfig,
+  modelOverride: string | undefined,
+  prompt: string,
+  log: Logger,
+  onUsage?: (usage: AIUsage) => void,
+): Promise<string> {
   const { provider, defaultModel } = await createConfiguredOpenAI();
+  const model = modelOverride || defaultModel;
 
   const result = streamText({
-    model: provider.responses(modelOverride || defaultModel),
+    model: provider.responses(model),
     prompt,
     tools: buildResearchTools(config),
     stopWhen: stepCountIs(MAX_STEPS),
@@ -258,7 +350,9 @@ async function queryOpenAI(config: WorklogConfig, modelOverride: string | undefi
     providerOptions: { openai: { instructions: OPENAI_INSTRUCTIONS, store: false } },
   });
 
-  return await result.text;
+  const text = await result.text;
+  if (onUsage) await reportOpenAIUsage(result, model, onUsage);
+  return text;
 }
 
 async function queryOpenAIStructured(
@@ -268,11 +362,13 @@ async function queryOpenAIStructured(
   schema: z.ZodType<unknown>,
   schemaName: string,
   log: Logger,
+  onUsage?: (usage: AIUsage) => void,
 ): Promise<unknown> {
   const { provider, defaultModel } = await createConfiguredOpenAI();
+  const model = modelOverride || defaultModel;
 
   const result = streamText({
-    model: provider.responses(modelOverride || defaultModel),
+    model: provider.responses(model),
     prompt,
     tools: buildResearchTools(config),
     stopWhen: stepCountIs(MAX_STRUCTURED_STEPS),
@@ -281,7 +377,9 @@ async function queryOpenAIStructured(
     providerOptions: { openai: { instructions: OPENAI_INSTRUCTIONS, store: false } },
   });
 
-  return await result.output;
+  const output = await result.output;
+  if (onUsage) await reportOpenAIUsage(result, model, onUsage);
+  return output;
 }
 
 /** Strip AI preamble and code block wrapping from raw model output. */

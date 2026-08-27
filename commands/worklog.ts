@@ -3,7 +3,8 @@ import { existsSync } from "node:fs";
 import { Command } from "commander";
 import * as p from "@clack/prompts";
 import { requireConfig, STATS_PATH, TEAM_TIMELINE_PATH } from "../lib/config";
-import { aiQueryStructured } from "../lib/sdk/ai";
+import { aiQueryStructured, type AIUsage } from "../lib/sdk/ai";
+import { estimateCostUsd, formatCostUsd } from "../lib/sdk/pricing";
 import { fillTemplate, buildConfigContext } from "../lib/sdk/template";
 import {
   buildVaultPaths,
@@ -79,6 +80,13 @@ function weeksBefore(date: Date, weeks: number): Date {
 
 // --- Stats ---
 
+/** What one week spent at the provider. */
+interface WeekTokens {
+  input: number;
+  output: number;
+  cached: number;
+}
+
 interface TimingRecord {
   weekId: string;
   date: string;
@@ -87,6 +95,11 @@ interface TimingRecord {
   contextUpdates: number;
   total: number;
   counts: { jira: number; confluence: number; prs: number; reviews: number };
+  // Optional because stats.json predates cost tracking: older records have none of the
+  // three, and the summary has to read those files without inventing zeros for them.
+  tokens?: WeekTokens;
+  estimatedCostUsd?: number | null;
+  model?: string;
 }
 
 async function loadStats(): Promise<TimingRecord[]> {
@@ -144,6 +157,9 @@ interface WeekTiming {
   bragBook: number;
   contextUpdates: number;
   total: number;
+  tokens: WeekTokens;
+  estimatedCostUsd: number | null;
+  model: string;
 }
 
 interface WeekResult {
@@ -159,6 +175,50 @@ interface WeekResult {
   profileUpdated: boolean;
   focusItems: number;
   focusUpdates: number;
+}
+
+/**
+ * Turn what the provider reported into the numbers a week is recorded with.
+ *
+ * A provider that reports its own cost wins: the Agent SDK knows the model mix a run
+ * actually used and the rates in force, which a local table cannot. Everything else is
+ * priced from lib/sdk/pricing.ts, and an unpriced model costs null rather than zero.
+ */
+function costOf(usage: AIUsage | null): Pick<WeekTiming, "tokens" | "estimatedCostUsd" | "model"> {
+  if (!usage) return { tokens: { input: 0, output: 0, cached: 0 }, estimatedCostUsd: null, model: "unknown" };
+
+  const tokens = { input: usage.inputTokens, output: usage.outputTokens, cached: usage.cachedInputTokens };
+  const estimatedCostUsd = usage.reportedCostUsd ?? estimateCostUsd({
+    model: usage.model,
+    inputTokens: usage.inputTokens,
+    outputTokens: usage.outputTokens,
+    cachedInputTokens: usage.cachedInputTokens,
+  });
+
+  return { tokens, estimatedCostUsd, model: usage.model };
+}
+
+/** Compact token counts so the column stays narrow: 56_231 reads as 56.2k. */
+function formatTokens(tokens: number): string {
+  if (tokens < 1000) return String(tokens);
+  return `${(tokens / 1000).toFixed(1)}k`;
+}
+
+/**
+ * Add up costs where some may be unknown.
+ *
+ * One unpriced model makes the whole total unknown. Treating it as zero would report a
+ * number that is definitely too low and looks authoritative.
+ */
+function sumCosts(costs: Array<number | null>): number | null {
+  if (costs.length === 0) return null;
+
+  let total = 0;
+  for (const cost of costs) {
+    if (cost === null) return null;
+    total += cost;
+  }
+  return total;
 }
 
 async function printReport(timings: WeekTiming[], results: WeekResult[]): Promise<void> {
@@ -178,7 +238,8 @@ async function printReport(timings: WeekTiming[], results: WeekResult[]): Promis
   const pad = (s: string | number, w: number) => String(s).padStart(w);
   const rows = results.map((r, i) => {
     const t = timings[i];
-    return `${r.weekId.padEnd(10)} | ${pad(r.jira, 4)} | ${pad(r.confluence, 4)} | ${pad(r.prs, 3)} | ${pad(r.reviews, 7)} | ${formatDuration(t.total)}`;
+    const tokens = `${formatTokens(t.tokens.input)}/${formatTokens(t.tokens.output)}`;
+    return `${r.weekId.padEnd(10)} | ${pad(r.jira, 4)} | ${pad(r.confluence, 4)} | ${pad(r.prs, 3)} | ${pad(r.reviews, 7)} | ${pad(formatDuration(t.total), 7)} | ${pad(tokens, 13)} | ${pad(formatCostUsd(t.estimatedCostUsd), 7)}`;
   });
 
   const totalJira = results.reduce((s, r) => s + r.jira, 0);
@@ -186,12 +247,16 @@ async function printReport(timings: WeekTiming[], results: WeekResult[]): Promis
   const totalPrs = results.reduce((s, r) => s + r.prs, 0);
   const totalRevs = results.reduce((s, r) => s + r.reviews, 0);
 
+  const totalTokensIn = timings.reduce((s, t) => s + t.tokens.input, 0);
+  const totalTokensOut = timings.reduce((s, t) => s + t.tokens.output, 0);
+  const totalCost = sumCosts(timings.map((t) => t.estimatedCostUsd));
+
   const lines = [
-    `Week       | Jira | Conf | PRs | Reviews | Time`,
-    `───────────┼──────┼──────┼─────┼─────────┼────────`,
+    `Week       | Jira | Conf | PRs | Reviews | Time    | Tokens in/out |    Cost`,
+    `───────────┼──────┼──────┼─────┼─────────┼─────────┼───────────────┼────────`,
     ...rows,
-    `───────────┼──────┼──────┼─────┼─────────┼────────`,
-    `Total      | ${pad(totalJira, 4)} | ${pad(totalConf, 4)} | ${pad(totalPrs, 3)} | ${pad(totalRevs, 7)} | ${formatDuration(totalTime)}`,
+    `───────────┼──────┼──────┼─────┼─────────┼─────────┼───────────────┼────────`,
+    `Total      | ${pad(totalJira, 4)} | ${pad(totalConf, 4)} | ${pad(totalPrs, 3)} | ${pad(totalRevs, 7)} | ${pad(formatDuration(totalTime), 7)} | ${pad(`${formatTokens(totalTokensIn)}/${formatTokens(totalTokensOut)}`, 13)} | ${pad(formatCostUsd(totalCost), 7)}`,
     ``,
     `Context updates: ${results.reduce((s, r) => s + r.memoryAdded + r.memoryRemoved, 0)} memory, ${results.filter((r) => r.impactLog).length} impact log, ${results.reduce((s, r) => s + r.workContextUpdates, 0)} work context, ${results.filter((r) => r.profileUpdated).length} profile, ${results.reduce((s, r) => s + r.focusItems + r.focusUpdates, 0)} focus`,
     ``,
@@ -211,6 +276,15 @@ async function printReport(timings: WeekTiming[], results: WeekResult[]): Promis
     const avgBrag = stats.reduce((s, r) => s + r.bragBook, 0) / stats.length;
     const avgCtx = stats.reduce((s, r) => s + r.contextUpdates, 0) / stats.length;
     lines.push(``, `Historical avg: fetch ${formatDuration(Math.round(avgFetch))}, brag ${formatDuration(Math.round(avgBrag))}, ctx ${formatDuration(Math.round(avgCtx))} (from ${stats.length} runs)`);
+
+    // Runs from before cost tracking have no tokens field, so they are counted separately
+    // rather than averaged in as zero.
+    const costed = stats.filter((r) => r.tokens !== undefined);
+    if (costed.length > 0) {
+      const spent = sumCosts(costed.map((r) => r.estimatedCostUsd ?? null));
+      const avgCost = spent === null ? null : spent / costed.length;
+      lines.push(`Historical spend: ${formatCostUsd(spent)} over ${costed.length} costed week(s), avg ${formatCostUsd(avgCost)}`);
+    }
   }
 
   p.note(lines.join("\n"), "Summary");
@@ -639,14 +713,24 @@ export async function runWorklog(opts: {
     );
     log(`AI query — provider: ${provider}, model: ${config.ai.model ?? "default"}, prompt: ${fullPrompt.length} chars`);
 
+    let usage: AIUsage | null = null;
     const output = await aiQueryStructured({
       prompt: fullPrompt,
       config,
       schema: bragBookOutputSchema,
       schemaName: "brag_book_update",
       log,
+      onUsage: (reported) => {
+        usage = reported;
+      },
     });
     log(`AI response: ${output.bragBookMarkdown.length} chars of markdown plus the vault updates`);
+
+    const weekCost = costOf(usage);
+    log(
+      `Tokens: ${weekCost.tokens.input} in (${weekCost.tokens.cached} cached) / ${weekCost.tokens.output} out, ` +
+      `est. ${formatCostUsd(weekCost.estimatedCostUsd)} on ${weekCost.model}`,
+    );
 
     const parsed = toBragBookResult(output);
     const { itemsToAdd, itemsToRemove, impactLogEntry, workContextUpdates, profileUpdate, focusItems, focusUpdates } = parsed;
@@ -705,14 +789,14 @@ export async function runWorklog(opts: {
     const weekTotal = Math.round(performance.now() - weekStart);
     p.log.success(`${wid} done in ${formatDuration(weekTotal)}`);
 
-    timings.push({ weekId: wid, fetch: fetchMs, bragBook: bragMs, contextUpdates: ctxMs, total: weekTotal });
+    timings.push({ weekId: wid, fetch: fetchMs, bragBook: bragMs, contextUpdates: ctxMs, total: weekTotal, ...weekCost });
     results.push({ weekId: wid, jira: issues.length, confluence: pages.length, prs: prs.length, reviews: reviews.length, memoryAdded: memoryResult.added + memoryResult.merged, memoryRemoved: memoryResult.removed, impactLog: impactResult.added + impactResult.merged > 0, workContextUpdates: workContextResult.added + workContextResult.merged, profileUpdated: profileResult.status === "written", focusItems: focusItems.length, focusUpdates: focusUpdates.length });
 
     progress.completedWeeks.push(wid);
     await saveProgress(progress);
   }
 
-  await appendStats(timings.map((t, i) => ({ weekId: t.weekId, date: new Date().toISOString(), fetch: t.fetch, bragBook: t.bragBook, contextUpdates: t.contextUpdates, total: t.total, counts: { jira: results[i].jira, confluence: results[i].confluence, prs: results[i].prs, reviews: results[i].reviews } })));
+  await appendStats(timings.map((t, i) => ({ weekId: t.weekId, date: new Date().toISOString(), fetch: t.fetch, bragBook: t.bragBook, contextUpdates: t.contextUpdates, total: t.total, counts: { jira: results[i].jira, confluence: results[i].confluence, prs: results[i].prs, reviews: results[i].reviews }, tokens: t.tokens, estimatedCostUsd: t.estimatedCostUsd, model: t.model })));
   await clearProgress();
   await printReport(timings, results);
 

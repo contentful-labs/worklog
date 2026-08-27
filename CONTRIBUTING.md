@@ -47,6 +47,7 @@ To test the full pipeline you'll need API tokens (Jira, GitHub) and an AI provid
 │       ├── vault.ts           # Vault paths and readers (profile, memory, brag books, team timeline)
 │       ├── vault-updates.ts   # Write memory/impact-log/work-context/profile/focus-tracking
 │       ├── text-similarity.ts # Normalized text and containment score used to spot repeats
+│       ├── pricing.ts         # Per-model token rates, for costing a week
 │       ├── prep.ts            # Prep types, defaults, prompt builder, output naming
 │       ├── doc-generators.ts  # Seed docs written by init (profile, work context, coach persona)
 │       ├── template.ts        # {{placeholder}} filling and config-derived context
@@ -65,6 +66,35 @@ To test the full pipeline you'll need API tokens (Jira, GitHub) and an AI provid
 ```
 
 Tests live next to the code in `__tests__/` folders (`lib/__tests__`, `lib/sdk/__tests__`, `commands/__tests__`) and run with vitest + msw for HTTP mocking.
+
+### The end-to-end harness
+
+`commands/__tests__/worklog.e2e.test.ts` runs one week of `runWorklog` over a temp vault.
+Everything except the AI provider and the three HTTP APIs is real: the prompt is built, both
+documents are written, and all five maintained files go through the writers that ship. Most
+of the bugs worth catching here -- a row appended under an archived heading, an item dropped,
+a focus status closing something it should not -- do not show up in a unit test.
+
+How it is wired, and why each piece has to be there:
+
+- **Temp `XDG_CONFIG_HOME`** holds `config.json` and `team-timeline.json`. `CONFIG_DIR`,
+  `STATS_PATH` and `TEAM_TIMELINE_PATH` are computed in `lib/config.ts` at module load, so
+  the env var has to be set *before* the import, hence `vi.resetModules()` and a dynamic
+  `await import("../worklog")`.
+- **Temp `XDG_CACHE_HOME`** is set even though nothing reads it yet. The moment anything
+  caches under it, an unset value writes into the developer's own `~/.cache` during a run.
+- **`vi.stubGlobal("Bun", ...)`** because vitest runs on node and the pipeline reads prompts
+  and writes stats through `Bun.file` / `Bun.write`.
+- **msw with `onUnhandledRequest: "error"`** for Jira, Confluence and GitHub, so a new fetch
+  fails the test rather than reaching the network.
+- **The AI provider is the only mocked module.** The fake still runs the caller's
+  `schema.parse`, because that parse is the real function's last act; a fake that skipped it
+  would be testing a contract the pipeline does not have.
+
+To extend it: add a field to `FAKE_OUTPUT` and assert the file it should reach. Keep the
+second run, because "regenerating a week changes nothing" is the property most of those bugs
+broke. Two known exceptions are pinned in the test itself: the work log carries a
+`**Generated:**` timestamp, and `focus-tracking.md` is not yet idempotent.
 
 ## Key concepts
 
