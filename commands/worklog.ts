@@ -420,18 +420,31 @@ async function promptForContext(weekNumber: number, year: number, contextFilePat
 
 // --- Credential resolution ---
 
-export function getEnvTokens(): { apiToken: string; githubToken: string } {
+/** Which systems a run is actually going to talk to. */
+export interface CredentialsNeeded {
+  atlassian: boolean;
+  github: boolean;
+}
+
+/**
+ * The tokens this run needs, and only those.
+ *
+ * A run that was told to read one source has no business demanding the credentials of
+ * another: `worklog refresh --source github` used to stop because there was no Atlassian
+ * token, which is a token it was never going to use.
+ */
+export function getEnvTokens(needed: CredentialsNeeded = { atlassian: true, github: true }): { apiToken: string; githubToken: string } {
   const apiToken = process.env.ATLASSIAN_API_TOKEN;
-  if (!apiToken) {
+  if (needed.atlassian && !apiToken) {
     p.log.error("ATLASSIAN_API_TOKEN not set. Run `worklog init` to set up credentials.\nOr generate manually at: https://id.atlassian.com/manage-profile/security/api-tokens");
     process.exit(1);
   }
   const githubToken = process.env.GITHUB_TOKEN;
-  if (!githubToken) {
+  if (needed.github && !githubToken) {
     p.log.error("GITHUB_TOKEN not set. Run `worklog init` to set up credentials.\nOr generate manually at: https://github.com/settings/tokens");
     process.exit(1);
   }
-  return { apiToken, githubToken };
+  return { apiToken: apiToken ?? "", githubToken: githubToken ?? "" };
 }
 
 // --- Brag book prompt builder ---
@@ -945,6 +958,13 @@ export async function runWorklog(opts: {
   const headers = buildHeaders(config, { atlassianApiToken: apiToken, githubToken });
 
   const ledger = await openLedger();
+  // Nothing may be generated from a ledger that cannot say what has already been written
+  // up; it would offer every week again and be unable to record that it had.
+  const blocked = ledger.unusable();
+  if (blocked) {
+    p.log.error(blocked);
+    process.exit(1);
+  }
   const sources = allSources();
   // One clock for the whole run: watermarks move to when it started, not when each
   // fetch happened to finish.
@@ -1009,6 +1029,15 @@ export async function runWorklog(opts: {
       s.stop(`${wid} skipped`);
       for (const problem of ledger.problems()) p.log.warn(problem);
       p.log.warn(`${wid} was not written: its cached events could not all be read. Fix or delete the file named above and run again.`);
+      continue;
+    }
+
+    // Same reasoning, different cause: a source that did not finish leaves a partial
+    // account of the week, and writing it up would make the missing part old news by the
+    // time it arrives.
+    if (collected.incompleteWeeks.has(wid)) {
+      s.stop(`${wid} skipped`);
+      p.log.warn(`${wid} was not written: a source did not finish reading it. What did arrive is kept, and the next run asks again.`);
       continue;
     }
 

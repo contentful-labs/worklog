@@ -811,7 +811,11 @@ describe("githubSource", () => {
     const since = new Date("2026-03-06T00:00:00Z");
     const scope = `|since:${since.toISOString()}`;
     const ctx = makeContext();
-    ctx.store.set(`https://api.github.com/repos/example-org/repo/pulls/42/reviews?per_page=100&page=1${scope}`, '"reviews-v1"');
+    const reviewsPage = `https://api.github.com/repos/example-org/repo/pulls/42/reviews?per_page=100&page=1${scope}`;
+    ctx.store.set(reviewsPage, '"reviews-v1"');
+    // How much that page held, which is what tells the walk it was the last one. An ETag
+    // on its own says "unchanged" and nothing about whether more pages follow.
+    ctx.store.set(`${reviewsPage}#rows`, "3");
     ctx.store.set(`https://api.github.com/repos/example-org/repo/pulls/42${scope}`, '"pr-v1"');
 
     const batch = await githubSource(() => NOW).fetchSince(since, [PR_URL], ctx);
@@ -893,12 +897,16 @@ describe("lifecycle events a week did not open in", () => {
     };
     server.use(
       http.post(`${BASE_URL}/rest/api/3/search/jql`, () => HttpResponse.json({ issues: [paged] })),
-      http.get(`${BASE_URL}/rest/api/3/issue/TEAM-1234/changelog`, () =>
-        HttpResponse.json({
-          values: [{ id: "h-2", created: "2026-03-05T10:00:00.000+0000", items: [{ field: "status", fromString: "In Progress", toString: "Done" }] }],
-          isLast: true,
-        }),
-      ),
+      http.get(`${BASE_URL}/rest/api/3/issue/TEAM-1234/changelog`, ({ request }) => {
+        // The real endpoint serves from the offset it is asked for. The embedded page in
+        // the search result is at an offset Jira chose, so the walk starts again at zero.
+        const startAt = Number(new URL(request.url).searchParams.get("startAt") ?? "0");
+        const all = [
+          { id: "h-1", created: "2026-03-04T10:00:00.000+0000", items: [{ field: "status", fromString: "To Do", toString: "In Progress" }] },
+          { id: "h-2", created: "2026-03-05T10:00:00.000+0000", items: [{ field: "status", fromString: "In Progress", toString: "Done" }] },
+        ];
+        return HttpResponse.json({ values: all.slice(startAt), startAt, total: all.length, isLast: true });
+      }),
     );
 
     const batch = await jiraSource(() => NOW).fetchWindow(window, makeContext());
@@ -998,13 +1006,14 @@ describe("reading a long history to the end", () => {
     };
     server.use(
       http.post(`${BASE_URL}/rest/api/3/search/jql`, () => HttpResponse.json({ issues: [many] })),
-      http.get(`${BASE_URL}/rest/api/3/issue/TEAM-1234/comment`, () =>
-        HttpResponse.json({
-          comments: [
-            { id: "c-2", created: "2026-03-05T11:30:00.000+0000", author: { accountId: ACCOUNT_ID }, body: { content: [{ content: [{ text: "Second." }] }] } },
-          ],
-        }),
-      ),
+      http.get(`${BASE_URL}/rest/api/3/issue/TEAM-1234/comment`, ({ request }) => {
+        const startAt = Number(new URL(request.url).searchParams.get("startAt") ?? "0");
+        const all = [
+          { id: "c-1", created: "2026-03-04T11:30:00.000+0000", author: { accountId: ACCOUNT_ID }, body: { content: [{ content: [{ text: "First." }] }] } },
+          { id: "c-2", created: "2026-03-05T11:30:00.000+0000", author: { accountId: ACCOUNT_ID }, body: { content: [{ content: [{ text: "Second." }] }] } },
+        ];
+        return HttpResponse.json({ comments: all.slice(startAt), startAt, total: all.length });
+      }),
     );
 
     const batch = await jiraSource(() => NOW).fetchWindow(window, makeContext());

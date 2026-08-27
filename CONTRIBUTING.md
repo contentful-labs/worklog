@@ -141,7 +141,10 @@ story about a finished ticket. Recording is idempotent, so re-fetching a week ma
 what is already there and writes nothing, and that is what lets `worklog refresh` know
 which weeks actually changed.
 
-**Known limits worth not rediscovering**: Jira has no comment-author search, so comment
+**Known limits worth not rediscovering**: A ledger whose `meta.json` cannot be read is
+refused outright rather than worked around — it is the record of which weeks have already
+been written up, and without it every week would be offered to the coach again with no way
+to record that it had. Jira has no comment-author search, so comment
 discovery reaches only tickets the user is assignee or reporter of, or that the ledger
 already tracks. GitHub's issue search describes a merged pull request as closed unless
 you read `pull_request.merged_at`; its review and issue-comment lists are served oldest
@@ -151,10 +154,13 @@ filtered by `authorId`.
 
 A week is written to the vault and then marked written in the cache, in that order, with
 nothing between the two. A crash in that gap leaves the week written and unmarked, so the
-next run offers its events to the model again. The consequence is bounded: the
+next run offers its events to the model again. The brag book itself is safe — the
 preservation gate means a regeneration can only add to a week's entry, never take from
-it, so the worst case is an achievement recorded twice — never one lost. Closing the gap
-entirely would need a transaction log, which is not worth its weight for that.
+it, so the worst it can do there is record an achievement twice. Focus tracking is not
+yet: a retried week ages open focus items a second time, so an item can be counted as
+reviewed twice for one real week and lapse early. Making focus aging idempotent per week
+is being fixed separately. Closing the write gap itself would need a transaction log,
+which is not worth its weight.
 
 **Research tools**: `lib/ai-tools.ts` defines six tools (Jira, Confluence, vault read/search) once, then adapts them to the Vercel AI SDK for OpenAI and to an in-process MCP server for the Claude Agent SDK. Both providers see the same tool names, which `prompts/weekly-brag-prompt.md` refers to directly.
 

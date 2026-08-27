@@ -35,10 +35,19 @@ import {
 } from "../lib/sdk/week-utils";
 import { loadConfig } from "../lib/config";
 import { createLogger } from "../lib/sdk/logger";
-import { generateWeek, getEnvTokens } from "./worklog";
+import { generateWeek, getEnvTokens, type CredentialsNeeded } from "./worklog";
 
 /** Where the team timeline lives, relative to the vault. Matches the weekly command. */
 const TEAM_TIMELINE_FILE = "team-timeline.json";
+
+/** Which systems a set of sources reads. Jira and Confluence are both Atlassian. */
+export function credentialsFor(sources: readonly Source[]): CredentialsNeeded {
+  const names = new Set(sources.map((source) => source.name));
+  return {
+    atlassian: names.has("jira") || names.has("confluence"),
+    github: names.has("github"),
+  };
+}
 
 export interface RefreshOptions {
   source?: string;
@@ -114,6 +123,8 @@ export interface RefreshRun {
   waiting: string[];
   /** Weeks in range that were not written because their stored events cannot be read. */
   skipped: string[];
+  /** Weeks in range that were not written because a source did not finish reading them. */
+  unfinished: string[];
 }
 
 /**
@@ -142,9 +153,14 @@ export async function refreshWeeks(deps: {
   // would call those events old, and the model would never hear about them.
   const owed = ledger.pendingWeeks();
   const damaged = new Set(ledger.unreadableWeeks());
-  const inRange = owed.filter((week) => asked.has(week) && !damaged.has(week));
+  // A week a source did not finish reading holds a partial account of itself. Writing it
+  // up would put that partial account in the vault and mark it written, and the part
+  // that never arrived would then be old news on the run that finally fetched it.
+  const partial = outcome.incompleteWeeks;
+  const inRange = owed.filter((week) => asked.has(week) && !damaged.has(week) && !partial.has(week));
   const waiting = owed.filter((week) => !asked.has(week));
   const skipped = owed.filter((week) => asked.has(week) && damaged.has(week));
+  const unfinished = owed.filter((week) => asked.has(week) && !damaged.has(week) && partial.has(week));
 
   const rewritten = new Set(inRange);
   const rows: WeekRow[] = weeks.map((week) => ({
@@ -173,7 +189,7 @@ export async function refreshWeeks(deps: {
   }
 
   await ledger.save();
-  return { rows, outcome, waiting, skipped };
+  return { rows, outcome, waiting, skipped, unfinished };
 }
 
 export async function runRefresh(opts: RefreshOptions): Promise<void> {
@@ -206,19 +222,29 @@ export async function runRefresh(opts: RefreshOptions): Promise<void> {
     process.exit(1);
   }
 
-  const { apiToken, githubToken } = getEnvTokens();
+  // Only what the selected sources will actually use. Asking for a GitHub-only refresh
+  // is not a reason to demand an Atlassian token, and vice versa.
+  const needed = credentialsFor(sources);
+  const { apiToken, githubToken } = getEnvTokens(needed);
   const headers = buildHeaders(config, { atlassianApiToken: apiToken, githubToken });
   const [atlassianAccountId, githubUsername] = await Promise.all([
-    getAccountId(config, headers).catch(() => ""),
-    getGitHubUsername(headers).catch(() => ""),
+    needed.atlassian ? getAccountId(config, headers).catch(() => "") : Promise.resolve(""),
+    needed.github ? getGitHubUsername(headers).catch(() => "") : Promise.resolve(""),
   ]);
 
   const ledger = await openLedger();
+  // Nothing may be generated from a ledger that cannot say what has already been written
+  // up; it would offer every week again and be unable to record that it had.
+  const blocked = ledger.unusable();
+  if (blocked) {
+    p.log.error(blocked);
+    process.exit(1);
+  }
   const spinner = p.spinner();
   spinner.start("Asking each source what has changed...");
 
   let collected = false;
-  const { rows, outcome, waiting, skipped } = await refreshWeeks({
+  const { rows, outcome, waiting, skipped, unfinished } = await refreshWeeks({
     ledger,
     sources,
     weeks,
@@ -273,6 +299,12 @@ export async function runRefresh(opts: RefreshOptions): Promise<void> {
     p.log.warn(
       `${skipped.length} week(s) have new activity but were not written because their cached events could not all be read: ` +
       `${skipped.join(", ")}. Fix or delete the files named above and run again.`,
+    );
+  }
+  if (unfinished.length > 0) {
+    p.log.warn(
+      `${unfinished.length} week(s) were not written because a source did not finish reading them: ${unfinished.join(", ")}. ` +
+      `What did arrive is kept, and the next run asks again.`,
     );
   }
   for (const warning of outcome.warnings) p.log.warn(warning);

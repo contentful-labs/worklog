@@ -44,6 +44,9 @@ export type Clock = () => Date;
 /** The `expand` that gets a Jira issue's changelog back with it. */
 const JIRA_CHANGELOG_EXPAND = "changelog";
 
+/** What Jira is asked for per page when a history is read from its own endpoint. */
+const JIRA_PAGE_SIZE = 100;
+
 /** Fields either fetch needs: what the issue is, when it moved, and what was said. */
 const JIRA_FIELDS = ["summary", "status", "created", "updated", "description", "comment"];
 
@@ -61,6 +64,9 @@ const CONFLUENCE_COMMENT_EXPAND = "container,history";
  * an incomplete read so the coverage it did not earn is not recorded.
  */
 const GITHUB_PAGE_LIMIT = 200;
+
+/** What GitHub is asked for per page, and therefore what "a full page" means below. */
+const GITHUB_PAGE_SIZE = 100;
 
 /**
  * A stop on walking a page's version history.
@@ -117,6 +123,8 @@ const commentPageSchema = z.object({
       })).optional(),
     }).optional(),
   })).default([]),
+  startAt: z.number().optional(),
+  total: z.number().optional(),
 });
 
 /** A page of an issue's changelog, from the endpoint that serves the rest of it. */
@@ -130,6 +138,8 @@ const changelogPageSchema = z.object({
       toString: z.string().nullish(),
     })).optional(),
   })).default([]),
+  startAt: z.number().optional(),
+  total: z.number().optional(),
   isLast: z.boolean().optional(),
 });
 
@@ -438,14 +448,19 @@ export function jiraSource(now: Clock = () => new Date()): Source {
    * backfill of an old week is looking for.
    */
   async function allHistories(issue: JiraIssueWithChangelog, ctx: SourceContext, batch: SourceBatch): Promise<JiraHistory[]> {
-    const first = issue.changelog?.histories ?? [];
-    const total = issue.changelog?.total ?? first.length;
-    if (total <= first.length) return first;
+    const embedded = issue.changelog?.histories ?? [];
+    const total = issue.changelog?.total ?? embedded.length;
+    if (total <= embedded.length) return embedded;
 
-    const histories = [...first];
+    // The embedded rows are a page, and a page has an offset. Jira does not promise it
+    // is zero, and treating it as zero meant continuing from the wrong place: asking for
+    // `startAt=50` after being handed rows 100-149 re-reads what we have and never
+    // fetches rows 0-49. The whole history is read from the start instead, which costs
+    // one extra page and cannot silently skip an interval.
+    const histories: JiraHistory[] = [];
     try {
       while (histories.length < total) {
-        const url = `${ctx.config.atlassian.url}/rest/api/3/issue/${issue.key}/changelog?startAt=${histories.length}&maxResults=100`;
+        const url = `${ctx.config.atlassian.url}/rest/api/3/issue/${issue.key}/changelog?startAt=${histories.length}&maxResults=${JIRA_PAGE_SIZE}`;
         const res = await fetch(url, { headers: headersOf(ctx).atlassian });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const page = changelogPageSchema.parse(await res.json());
@@ -455,6 +470,11 @@ export function jiraSource(now: Clock = () => new Date()): Source {
       }
     } catch (err) {
       partial(batch, ctx, `Could not read the rest of ${issue.key}'s history, some changes will be missing: ${String(err)}`);
+      return histories.length > 0 ? histories : embedded;
+    }
+
+    if (histories.length < total) {
+      partial(batch, ctx, `${issue.key} reports ${total} changes and only ${histories.length} could be read; the rest will be asked for again.`);
     }
     return histories;
   }
@@ -470,14 +490,17 @@ export function jiraSource(now: Clock = () => new Date()): Source {
     // SAFETY: JiraComment is the shared comment type plus the optional `id` and `author`
     // the API sends and `JiraIssue` does not declare. Every field is read through a
     // guard, so a response without one costs that comment and nothing else.
-    const first = (issue.fields.comment?.comments ?? []) as JiraComment[];
-    const total = issue.fields.comment?.total ?? first.length;
-    if (total <= first.length) return first;
+    const embedded = (issue.fields.comment?.comments ?? []) as JiraComment[];
+    const total = issue.fields.comment?.total ?? embedded.length;
+    if (total <= embedded.length) return embedded;
 
-    const comments = [...first];
+    // From the start, for the same reason as the changelog above: the embedded rows are
+    // a page at an offset Jira chose, and continuing from their length assumes it was
+    // zero.
+    const comments: JiraComment[] = [];
     try {
       while (comments.length < total) {
-        const url = `${ctx.config.atlassian.url}/rest/api/3/issue/${issue.key}/comment?startAt=${comments.length}&maxResults=100`;
+        const url = `${ctx.config.atlassian.url}/rest/api/3/issue/${issue.key}/comment?startAt=${comments.length}&maxResults=${JIRA_PAGE_SIZE}`;
         const res = await fetch(url, { headers: headersOf(ctx).atlassian });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const page = commentPageSchema.parse(await res.json());
@@ -486,6 +509,11 @@ export function jiraSource(now: Clock = () => new Date()): Source {
       }
     } catch (err) {
       partial(batch, ctx, `Could not read the rest of ${issue.key}'s comments, some will be missing: ${String(err)}`);
+      return comments.length > 0 ? comments : embedded;
+    }
+
+    if (comments.length < total) {
+      partial(batch, ctx, `${issue.key} reports ${total} comments and only ${comments.length} could be read; the rest will be asked for again.`);
     }
     return comments;
   }
@@ -965,17 +993,26 @@ function parsePrUrl(url: string): { repo: string; number: number } | undefined {
  * come back with the data, and the same PR can appear in two weeks: a stored ETag would
  * turn the second week's fetch into a 304 and silently lose its reviews.
  */
+/**
+ * Where an ETag is filed.
+ *
+ * Keyed by the watermark as well as the url. The response is filtered by `since`
+ * afterwards, so an ETag stored while scanning a recent week stands for "you have seen
+ * everything after last Tuesday" and nothing more. Replaying it against an older week's
+ * scan answers 304 and hides every event in between, for good.
+ */
+function conditionalKey(url: string, conditional: Date | false): string {
+  return conditional ? `${url}|since:${conditional.toISOString()}` : url;
+}
+
 async function conditionalGet(
   url: string,
   ctx: SourceContext,
   conditional: Date | false,
+  ignoreStored = false,
 ): Promise<{ status: number; body?: unknown }> {
-  // Keyed by the watermark as well as the url. The response is filtered by `since`
-  // afterwards, so an ETag stored while scanning a recent week stands for "you have
-  // seen everything after last Tuesday" and nothing more. Replaying it against an
-  // older week's scan answers 304 and hides every event in between, for good.
-  const key = conditional ? `${url}|since:${conditional.toISOString()}` : url;
-  const etag = conditional ? stateOf(ctx).get(key) : undefined;
+  const key = conditionalKey(url, conditional);
+  const etag = conditional && !ignoreStored ? stateOf(ctx).get(key) : undefined;
   const headers = new Headers(headersOf(ctx).github);
   // A stored ETag makes this request free when nothing has changed since last time.
   if (etag) headers.set("If-None-Match", etag);
@@ -987,6 +1024,35 @@ async function conditionalGet(
   const fresh = res.headers.get("etag");
   if (fresh && conditional) stateOf(ctx).set(key, fresh);
   return { status: res.status, body: await res.json() };
+}
+
+/**
+ * How many rows a page held last time it was read.
+ *
+ * A 304 says "unchanged" and sends no body, so without this the walk cannot tell a full
+ * page from the last one and has to guess. It used to guess "stop", which meant a page
+ * that failed after an earlier page succeeded was never requested again: the retry got
+ * a 304 on page one and went home.
+ */
+function rememberPageSize(url: string, conditional: Date | false, ctx: SourceContext, rows: number): void {
+  if (conditional) stateOf(ctx).set(`${conditionalKey(url, conditional)}#rows`, String(rows));
+}
+
+function lastPageSize(url: string, conditional: Date | false, ctx: SourceContext): number | undefined {
+  const stored = conditional ? stateOf(ctx).get(`${conditionalKey(url, conditional)}#rows`) : undefined;
+  return stored === undefined ? undefined : Number(stored);
+}
+
+/**
+ * Whether this page's stored ETag may be used.
+ *
+ * Only when we also know how many rows that page held. A 304 with no remembered size
+ * tells the walk nothing: it cannot say whether this was the last page, so it would have
+ * to keep asking to the cap. One unconditional request instead costs one call and
+ * teaches it the answer for next time.
+ */
+function mayUseStoredEtag(url: string, conditional: Date | false, ctx: SourceContext): boolean {
+  return lastPageSize(url, conditional, ctx) !== undefined;
 }
 
 export function githubSource(now: Clock = () => new Date()): Source {
@@ -1003,9 +1069,15 @@ export function githubSource(now: Clock = () => new Date()): Source {
       // Paged. GitHub sends thirty by default, and a long review conversation is exactly
       // the kind of week worth writing about.
       for (let page = 1; page <= GITHUB_PAGE_LIMIT; page++) {
-        const url = `https://api.github.com/repos/${repo}/pulls/${number}/reviews?per_page=100&page=${page}`;
-        const { status, body } = await conditionalGet(url, ctx, opts.conditional);
-        if (status === 304) return;
+        const url = `https://api.github.com/repos/${repo}/pulls/${number}/reviews?per_page=${GITHUB_PAGE_SIZE}&page=${page}`;
+        const { status, body } = await conditionalGet(url, ctx, opts.conditional, !mayUseStoredEtag(url, opts.conditional, ctx));
+        if (status === 304) {
+          // This page has not changed, so its reviews are already in the ledger — but the
+          // pages after it may never have been read at all, which is what happened when
+          // page two failed and page one's ETag outlived it.
+          if ((lastPageSize(url, opts.conditional, ctx) ?? 0) < GITHUB_PAGE_SIZE) return;
+          continue;
+        }
         if (status !== 200) {
           partial(batch, ctx, `Could not read reviews for ${repo}#${number}, they will be missing: HTTP ${status}`);
           return;
@@ -1014,6 +1086,7 @@ export function githubSource(now: Clock = () => new Date()): Source {
         // reads is optional on GitHubReview and guarded, so a shape change drops reviews
         // rather than throwing.
         const reviews = (Array.isArray(body) ? body : []) as GitHubReview[];
+        rememberPageSize(url, opts.conditional, ctx, reviews.length);
 
         for (const review of reviews) {
           if (review.user?.login !== githubUserOf(ctx)) continue;
@@ -1029,7 +1102,7 @@ export function githubSource(now: Clock = () => new Date()): Source {
           });
         }
 
-        if (reviews.length < 100) return;
+        if (reviews.length < GITHUB_PAGE_SIZE) return;
       }
       partial(batch, ctx, `${repo}#${number} has more reviews than one run will read; the newest of them are missing, because GitHub serves this list oldest first.`);
     } catch (err) {
@@ -1058,9 +1131,15 @@ export function githubSource(now: Clock = () => new Date()): Source {
       // it gets there.
       const from = opts.conditional ? `&since=${opts.conditional.toISOString()}` : "";
       for (let page = 1; page <= GITHUB_PAGE_LIMIT; page++) {
-        const url = `https://api.github.com/repos/${repo}/issues/${number}/comments?per_page=100&page=${page}${from}`;
-        const { status, body } = await conditionalGet(url, ctx, opts.conditional);
-        if (status === 304) return;
+        const url = `https://api.github.com/repos/${repo}/issues/${number}/comments?per_page=${GITHUB_PAGE_SIZE}&page=${page}${from}`;
+        const { status, body } = await conditionalGet(url, ctx, opts.conditional, !mayUseStoredEtag(url, opts.conditional, ctx));
+        if (status === 304) {
+          // This page has not changed, so its comments are already in the ledger — but the
+          // pages after it may never have been read at all, which is what happened when
+          // page two failed and page one's ETag outlived it.
+          if ((lastPageSize(url, opts.conditional, ctx) ?? 0) < GITHUB_PAGE_SIZE) return;
+          continue;
+        }
         if (status !== 200) {
           partial(batch, ctx, `Could not read comments on ${repo}#${number}, they will be missing: HTTP ${status}`);
           return;
@@ -1069,6 +1148,7 @@ export function githubSource(now: Clock = () => new Date()): Source {
         // read below is optional and guarded, so a shape change drops comments rather
         // than throwing.
         const comments = (Array.isArray(body) ? body : []) as GitHubIssueComment[];
+        rememberPageSize(url, opts.conditional, ctx, comments.length);
 
         for (const comment of comments) {
           if (comment.user?.login !== githubUserOf(ctx)) continue;
@@ -1084,7 +1164,7 @@ export function githubSource(now: Clock = () => new Date()): Source {
           });
         }
 
-        if (comments.length < 100) return;
+        if (comments.length < GITHUB_PAGE_SIZE) return;
       }
       partial(batch, ctx, `${repo}#${number} has more comments than one run will read; the newest of them are missing, because GitHub serves this list oldest first.`);
     } catch (err) {

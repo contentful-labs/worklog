@@ -317,6 +317,13 @@ export interface Ledger {
   unreadableWeeks(): string[];
   /** Anything unreadable found on disk, in the words the user should see. */
   problems(): string[];
+  /**
+   * Why this ledger cannot safely be used to write anything, or undefined when it can.
+   *
+   * Checked before generating any week. Unlike a single damaged week file, which costs
+   * that week, this is a state in which no week can be trusted.
+   */
+  unusable(): string | undefined;
   /** Things worth saying once, like a cache that had to be brought forward a version. */
   notices(): string[];
 
@@ -355,9 +362,23 @@ export async function openLedger(root: string = ledgerRoot()): Promise<Ledger> {
   const metaPath = join(root, "meta.json");
   const rawMeta = await readParsed(metaPath, z.unknown(), undefined);
   const parsedMeta = rawMeta.ok && rawMeta.value !== undefined ? metaSchema.safeParse(rawMeta.value) : undefined;
+  /**
+   * Why nothing may be written while the metadata is unreadable.
+   *
+   * The metadata is the record of what has already been written up. Without it every
+   * event the ledger holds looks new, so every week would be regenerated and added to,
+   * and the marker saying so could not be stored either — so the next run would do it
+   * again. Losing the reading positions is recoverable; a week's entry growing a copy of
+   * itself on every run is not.
+   */
+  let unusable: string | undefined;
   if (!rawMeta.ok || (parsedMeta && !parsedMeta.success)) {
     const why = rawMeta.ok ? "its contents are not the shape this version writes" : rawMeta.why;
-    problems.push(`${metaPath} could not be read because ${why}, so this run starts as if nothing had been fetched. The file is left alone.`);
+    problems.push(`${metaPath} could not be read because ${why}. The file is left alone.`);
+    unusable =
+      `${metaPath} could not be read because ${why}, and it is the record of which weeks have already been written up. ` +
+      `Running without it would offer every week's activity to the coach again, and could not record that it had. ` +
+      `Either repair that file, or delete ${root} entirely and let the next run fetch again.`;
     frozen.add(metaPath);
   }
   const meta = parsedMeta?.success ? parsedMeta.data : emptyMeta();
@@ -489,6 +510,10 @@ export async function openLedger(root: string = ledgerRoot()): Promise<Ledger> {
 
     problems() {
       return [...problems];
+    },
+
+    unusable() {
+      return unusable;
     },
 
     notices() {
@@ -681,6 +706,14 @@ export interface CollectionOutcome {
   weeksChanged: Set<string>;
   /** Events added, by week and then by source: the table the user reads. */
   perWeek: Map<string, Map<string, number>>;
+  /**
+   * Weeks a source did not finish reading.
+   *
+   * What did come back is filed, because it belongs where it belongs, but these weeks
+   * hold a partial account of themselves and must not be written up from it. They stay
+   * owed a write, and the next run asks again.
+   */
+  incompleteWeeks: Set<string>;
   warnings: string[];
 }
 
@@ -713,6 +746,7 @@ export async function collectIntoLedger(
   const perSource = new Map<string, SourceOutcome>();
   const weeksChanged = new Set<string>();
   const perWeek = new Map<string, Map<string, number>>();
+  const incompleteWeeks = new Set<string>();
   const warnings: string[] = [];
 
   for (const source of sources) {
@@ -765,6 +799,7 @@ export async function collectIntoLedger(
       // next time, and marking it would cost the part that did not load, for ever.
       if (batch.incomplete) {
         warnings.push(`${source.name} did not finish reading ${week.weekId}, so it will be asked again from the start next time.`);
+        incompleteWeeks.add(week.weekId);
         continue;
       }
 
@@ -790,6 +825,9 @@ export async function collectIntoLedger(
       // when the source says it did not finish: coverage it did not have is not coverage.
       if (batch.incomplete) {
         warnings.push(`${source.name} did not finish answering, so the weeks it was asked about keep their reading position and will be asked again.`);
+        // Which of them the missing part belonged to is exactly what we do not know, so
+        // all of them are held back rather than one guessed at.
+        for (const week of delta) incompleteWeeks.add(week.weekId);
       } else {
         const read = clamp(since, newest, now);
         for (const week of delta) ledger.setWatermark(source.name, week.weekId, read);
@@ -800,7 +838,7 @@ export async function collectIntoLedger(
     perSource.set(source.name, outcome);
   }
 
-  return { perSource, weeksChanged, perWeek, warnings };
+  return { perSource, weeksChanged, perWeek, incompleteWeeks, warnings };
 }
 
 /** No earlier than the range the query covered, and no later than when it was asked. */
