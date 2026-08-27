@@ -27,6 +27,9 @@ import {
   discoverWeeklyNotes,
   capOrganizationalNotes,
   condenseMemoryNotes,
+  windowImpactLog,
+  omitLargeFocusTables,
+  DEFAULT_IMPACT_WINDOW_WEEKS,
   DEFAULT_MEMORY_FULL_WEEKS,
   collectWorkTerms,
   rankVaultNotes,
@@ -474,10 +477,19 @@ export interface MemoryInputSizes {
   other: number;
 }
 
+/** What the prompt-only trims left out, reported so a thin section is never a mystery. */
+export interface PromptOmissions {
+  /** Tables replaced by a placeholder in the focus doc. */
+  focusDocTablesOmitted: number;
+  /** Impact rows dated before the window. */
+  impactRowsDropped: number;
+}
+
 export interface BuiltPrompt {
   prompt: string;
   sections: PromptSectionSizes;
   memoryInputs: MemoryInputSizes;
+  omissions: PromptOmissions;
 }
 
 function formatSizes(label: string, sizes: Readonly<Record<string, number>>): string {
@@ -493,6 +505,10 @@ export function formatPromptBreakdown(sections: PromptSectionSizes): string {
 
 export function formatMemoryBreakdown(memoryInputs: MemoryInputSizes): string {
   return formatSizes("Memory breakdown", { ...memoryInputs });
+}
+
+export function formatPromptOmissions(omissions: PromptOmissions): string {
+  return `Prompt omissions: ${omissions.focusDocTablesOmitted} focus doc table(s), ${omissions.impactRowsDropped} impact row(s) outside the window`;
 }
 
 export async function buildBragBookPrompt(
@@ -568,6 +584,23 @@ export async function buildBragBookPrompt(
     : "";
   const condensedMemory = condenseMemoryNotes(memoryContent, memoryFullSince);
 
+  // The focus doc is the engineer's own document and is carried whole, minus any tracking table
+  // large enough to be a spreadsheet rather than a priority list.
+  const trimmedFocusDoc = omitLargeFocusTables(focusDocContent);
+
+  // A year of impact rows answers the gap analysis the coach is asked for; older ones have
+  // already been promoted into a brag book.
+  // Both bounds come from the week being written up. The upper one is the history rule: a week
+  // may not be shown an achievement dated after it. `asOf` is the day the gap is measured from,
+  // which for the current week is today, so the current week reads exactly as it does now.
+  const now = new Date();
+  const weekEnd = weekInfo?.endDate ?? now;
+  const trimmedImpactLog = windowImpactLog(impactLogContent, {
+    since: weekInfo ? weeksBefore(weekInfo.startDate, DEFAULT_IMPACT_WINDOW_WEEKS).toISOString().split("T")[0] : "",
+    until: (weekInfo ? weekEnd : now).toISOString().split("T")[0],
+    asOf: weekEnd < now ? weekEnd : now,
+  });
+
   const generationContext = (() => {
     if (!weekInfo) return "";
     const teamEntry = getTeamForDate(timeline, weekInfo.startDate);
@@ -587,13 +620,13 @@ export async function buildBragBookPrompt(
     ["framing", "\n</engineer_profile>\n\n---\n\n<work_context>\n"],
     ["context", trimmedWorkContext],
     ["framing", "\n</work_context>\n\n---\n\n<impact_log>\n"],
-    ["impact", impactLogContent],
+    ["impact", trimmedImpactLog.content],
     ["framing", "\n</impact_log>\n\n---\n\n<current_memory>\n"],
     ["memory", condensedMemory.content],
     ["framing", "\n</current_memory>\n\n---\n\n<previous_brag_books>\n"],
     ["priorBrags", trimmedBragBooks],
     ["framing", "\n</previous_brag_books>\n\n---\n\n<focus_doc>\n"],
-    ["focusDoc", focusDocContent],
+    ["focusDoc", trimmedFocusDoc.content],
     ["framing", "\n</focus_doc>\n\n---\n\n<focus_history>\n"],
     ["focusArchives", trimmedFocusHistory],
     ["framing", "\n</focus_history>\n\n---\n\n<career_context>\n"],
@@ -618,7 +651,15 @@ export async function buildBragBookPrompt(
   for (const [name, text] of chunks) sections[name] += text.length;
 
   const { liveRows, olderRows, other } = condensedMemory.counts;
-  return { prompt, sections, memoryInputs: { liveRows, olderRows, other } };
+  return {
+    prompt,
+    sections,
+    memoryInputs: { liveRows, olderRows, other },
+    omissions: {
+      focusDocTablesOmitted: trimmedFocusDoc.omitted,
+      impactRowsDropped: trimmedImpactLog.dropped,
+    },
+  };
 }
 
 // --- Main worklog runner ---
@@ -802,7 +843,7 @@ export async function runWorklog(opts: {
     const bragStart = performance.now();
     s.start("Generating brag book...");
 
-    const { prompt: fullPrompt, sections: promptSections, memoryInputs } = await buildBragBookPrompt(
+    const { prompt: fullPrompt, sections: promptSections, memoryInputs, omissions } = await buildBragBookPrompt(
       markdown, previousBragBooks, workContextContent, memoryContent, profileContent,
       impactLogContent, coachPersona, focusDocContent, focusHistoryContent,
       careerContext, vaultNotes, openFocusItems, focusHistorySummary, reviewInfo, timeline, weekInfo, config
@@ -810,6 +851,7 @@ export async function runWorklog(opts: {
     log(`AI query — provider: ${provider}, model: ${config.ai.model ?? "default"}, prompt: ${fullPrompt.length} chars`);
     log(formatPromptBreakdown(promptSections));
     log(formatMemoryBreakdown(memoryInputs));
+    log(formatPromptOmissions(omissions));
 
     let usage: AIUsage | null = null;
     const output = await aiQueryStructured({

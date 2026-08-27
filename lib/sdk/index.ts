@@ -55,9 +55,13 @@ export {
   ticketPrefixesForWeek,
   containsIdentifier,
   DEFAULT_MEMORY_FULL_WEEKS,
+  DEFAULT_FOCUS_TABLE_ROW_CAP,
+  DEFAULT_IMPACT_WINDOW_WEEKS,
   DEFAULT_ORG_NOTE_CAP,
   DEFAULT_SINGLE_ARCHIVE_CAP,
   condenseMemoryNotes,
+  windowImpactLog,
+  omitLargeFocusTables,
   DEFAULT_VAULT_NOTE_CAP,
   DEFAULT_VAULT_NOTE_LINES,
 } from "./vault";

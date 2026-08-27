@@ -7,7 +7,11 @@ import type { Root, RootContent } from "mdast";
 import type { WorklogConfig } from "./types";
 import { weekIdForDate } from "./week-utils";
 import { canonicalText } from "./text-similarity";
-import { isTableSeparator, renderScannedRow, scanRow } from "./markdown-table";
+import { isTableSeparator, renderScannedRow, scanRow, splitRow } from "./markdown-table";
+import {
+  CURRENT_GAP_PREFIX, LAST_IMPACT_PREFIX, NO_GAP_RECORDED, NO_IMPACT_RECORDED,
+  gapText, isIsoDate,
+} from "./vault-updates";
 import { closesFence, isArchivedHeadingText, readFence, type Fence } from "./markdown-scan";
 import { contractHome } from "../config";
 
@@ -149,19 +153,6 @@ export const DEFAULT_MEMORY_FULL_WEEKS = 12;
 /** Which cell of `| Date | Item | Category | Notes |` holds the notes. */
 const MEMORY_NOTES_COLUMN = 3;
 
-function isIsoDate(value: string): boolean {
-  if (value.length !== 10) return false;
-  for (let i = 0; i < 10; i++) {
-    const char = value[i];
-    if (i === 4 || i === 7) {
-      if (char !== "-") return false;
-    } else if (char < "0" || char > "9") {
-      return false;
-    }
-  }
-  return true;
-}
-
 /** A memory row and what the prompt should do with it. */
 export interface MemoryRowCounts {
   /** Rows dated on or after the cutoff, carried whole. */
@@ -240,6 +231,260 @@ export function condenseMemoryNotes(content: string, fullSinceDate: string): Con
   counts.other += Math.max(0, lines.length - 1);
 
   return { content: lines.join("\n"), counts };
+}
+
+// --- Focus doc and impact log windows ---
+
+/** A markdown table found in a document, by line index. */
+interface TableBlock {
+  /** 0-based, inclusive. */
+  start: number;
+  /** 0-based, exclusive. */
+  end: number;
+  /** Absolute index of the separator row. */
+  separator: number;
+}
+
+/** `\r` when the file uses CRLF, so a line this module writes matches the ones around it. */
+function eolSuffix(line: string | undefined): string {
+  return line?.endsWith("\r") ? "\r" : "";
+}
+
+/**
+ * A table line, with up to three spaces of indentation stripped and the leading pipe supplied.
+ *
+ * GFM allows both a row without its outer pipes (`a | b`) and up to three spaces of indentation;
+ * a fourth space makes it an indented code block instead. Normalizing here means the writers'
+ * `isTableSeparator` and `scanRow` see the shape they already understand, rather than this file
+ * keeping a second copy of their rules.
+ */
+function normalizeTableLine(line: string): string | null {
+  let i = 0;
+  while (i < 3 && line[i] === " ") i++;
+  const body = line.slice(i);
+  if (body.length === 0 || body[0] === " " || body[0] === "\t") return null;
+  return body.startsWith("|") ? body : `|${body}`;
+}
+
+/** True for a line that could be part of a table: at least two cells once normalized. */
+function isTableLine(normalized: string): boolean {
+  return splitRow(normalized).length >= 2;
+}
+
+/**
+ * Every markdown table in the document, skipping anything inside a fenced block.
+ *
+ * A table starts at a header line immediately followed by a separator, and runs until the next
+ * such pair or the end of the run of table lines. Recording only the first separator in a run
+ * merged a small table into the large one directly above it, and the small one's rows went with
+ * it.
+ */
+function findTables(lines: readonly string[]): TableBlock[] {
+  const tables: TableBlock[] = [];
+  let open: Fence | null = null;
+  let current: TableBlock | null = null;
+  let previous = -1;
+
+  const close = (end: number) => {
+    if (current) {
+      tables.push({ ...current, end });
+      current = null;
+    }
+  };
+
+  for (const [i, line] of lines.entries()) {
+    const fence = readFence(line);
+    if (fence) {
+      if (!open) {
+        close(i);
+        previous = -1;
+        open = fence;
+        continue;
+      }
+      if (closesFence(open, fence)) {
+        open = null;
+        continue;
+      }
+    }
+    if (open) continue;
+
+    const normalized = normalizeTableLine(line);
+    if (normalized === null || !isTableLine(normalized)) {
+      close(i);
+      previous = -1;
+      continue;
+    }
+
+    // A separator one line below a header opens a table, wherever it sits in the run.
+    if (previous === i - 1 && isTableSeparator(normalized)) {
+      close(i - 1);
+      current = { start: i - 1, end: lines.length, separator: i };
+    }
+    previous = i;
+  }
+
+  close(lines.length);
+  return tables;
+}
+
+/** Above this many data rows, a focus doc table is a database rather than a priority list. */
+export const DEFAULT_FOCUS_TABLE_ROW_CAP = 20;
+
+export interface FocusDocTrim {
+  content: string;
+  /** How many tables were replaced by a placeholder. */
+  omitted: number;
+}
+
+/**
+ * Replace the large tables in the focus doc with a note saying how big they were.
+ *
+ * `My Focus.md` is the engineer's own document and the coach reads all of it, so it is carried
+ * whole. What the coach cannot use is a hundred-row tracking table someone keeps inside it: the
+ * priorities are in the prose and the headings, and the table is a spreadsheet that happens to
+ * live in a markdown file. Headings and prose survive untouched; only the rows go, and only in
+ * the prompt. The file on disk is never rewritten.
+ */
+export function omitLargeFocusTables(
+  content: string,
+  maxRows: number = DEFAULT_FOCUS_TABLE_ROW_CAP,
+): FocusDocTrim {
+  const lines = content.split("\n");
+  const placeholders = new Map<number, string>();
+  const removed = new Set<number>();
+  let omitted = 0;
+
+  for (const table of findTables(lines)) {
+    const rows = table.end - (table.separator + 1);
+    if (rows <= maxRows) continue;
+
+    omitted++;
+    placeholders.set(
+      table.start,
+      `_(table of ${rows} rows omitted from the coaching prompt)_${eolSuffix(lines[table.end - 1])}`,
+    );
+    for (let i = table.start; i < table.end; i++) removed.add(i);
+  }
+
+  if (omitted === 0) return { content, omitted };
+
+  const out: string[] = [];
+  for (const [i, line] of lines.entries()) {
+    const placeholder = placeholders.get(i);
+    if (placeholder !== undefined) out.push(placeholder);
+    if (!removed.has(i)) out.push(line);
+  }
+
+  return { content: out.join("\n"), omitted };
+}
+
+/** How far back the impact timeline reaches in the prompt. */
+export const DEFAULT_IMPACT_WINDOW_WEEKS = 52;
+
+export interface ImpactWindow {
+  /** Inclusive lower bound. Rows older than this are counted and left out. */
+  since: string;
+  /** Inclusive upper bound: the end of the week being written up. */
+  until: string;
+  /** The day the gap is measured from. The week's end, or today when that is sooner. */
+  asOf: Date;
+}
+
+export interface ImpactTrim {
+  content: string;
+  /** Rows older than the window, which the prompt reports as a count. */
+  dropped: number;
+  /** Rows dated after the week being written up, which had not happened yet. */
+  future: number;
+}
+
+interface ImpactStatus {
+  /** What `**Last significant impact:**` should say. */
+  impact: string;
+  /** What `**Current gap:**` should say. */
+  gap: string;
+}
+
+/** The status lines a prompt-side window has to recompute, since it changes what they describe. */
+function impactStatusFor(latest: string, asOf: Date): ImpactStatus {
+  if (latest.length === 0) return { impact: NO_IMPACT_RECORDED, gap: NO_GAP_RECORDED };
+  return { impact: latest, gap: gapText(latest, asOf) };
+}
+
+/**
+ * Narrow the impact timeline to the window a given week could see.
+ *
+ * Two bounds, not one. The lower bound is the diet: a year of rows answers the gap analysis the
+ * coach is asked for, and older achievements have already been promoted into a brag book, so they
+ * become a count. The upper bound is the history rule: regenerating an old week must not show it
+ * an achievement from two years after the fact, so anything dated past that week's end is removed
+ * without comment, because to that week it had not happened.
+ *
+ * The two status lines are recomputed rather than passed through, for the same reason. They are
+ * derived from the whole table and from today, so leaving them alone told a 2024 week what its
+ * author's last impact would eventually be. They are recomputed from every row dated on or before
+ * the week's end, including rows too old to be listed: an engineer whose last impact is fourteen
+ * months back has a fourteen-month gap, not "none recorded".
+ *
+ * The file on disk is untouched. The writers and the cleanup still see all of it.
+ */
+export function windowImpactLog(content: string, window: ImpactWindow): ImpactTrim {
+  const lines = content.split("\n");
+  const removed = new Set<number>();
+  const notes = new Map<number, string>();
+  let dropped = 0;
+  let future = 0;
+  let latest = "";
+
+  for (const table of findTables(lines)) {
+    let older = 0;
+    for (let i = table.separator + 1; i < table.end; i++) {
+      const normalized = normalizeTableLine(lines[i]);
+      const date = normalized === null ? "" : (scanRow(normalized).values[0] ?? "");
+      if (!isIsoDate(date)) continue;
+
+      if (date > window.until) {
+        removed.add(i);
+        future++;
+        continue;
+      }
+      // ISO dates sort as text, which is the only reason this is a string compare.
+      if (date > latest) latest = date;
+      if (date >= window.since) continue;
+
+      removed.add(i);
+      older++;
+    }
+    if (older === 0) continue;
+
+    dropped += older;
+    const eol = eolSuffix(lines[table.end - 1]);
+    // After the table, with a blank line, so it reads as its own paragraph rather than as a
+    // malformed row hanging off the end.
+    notes.set(table.end - 1, `${eol}\n_(${older} older entries not shown)_${eol}`);
+  }
+
+  const { impact, gap } = impactStatusFor(latest, window.asOf);
+  const out: string[] = [];
+
+  for (const [i, line] of lines.entries()) {
+    if (!removed.has(i)) out.push(restated(line, impact, gap));
+    const note = notes.get(i);
+    if (note !== undefined) out.push(note);
+  }
+
+  return { content: out.join("\n"), dropped, future };
+}
+
+/** Rewrite a status line in place, keeping its indentation and line ending. */
+function restated(line: string, impact: string, gap: string): string {
+  const trimmed = line.trimStart();
+  const indent = line.slice(0, line.length - trimmed.length);
+  const eol = eolSuffix(line);
+
+  if (trimmed.startsWith(LAST_IMPACT_PREFIX)) return `${indent}${LAST_IMPACT_PREFIX} ${impact}${eol}`;
+  if (trimmed.startsWith(CURRENT_GAP_PREFIX)) return `${indent}${CURRENT_GAP_PREFIX} ${gap}${eol}`;
+  return line;
 }
 
 // --- Prompt trimming ---
