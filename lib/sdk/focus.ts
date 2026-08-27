@@ -454,13 +454,42 @@ export function upgradeFocusFormat(content: string, keepSinceWeek: string = defa
   return { content: stampFormat(lapsedContent), lapsed };
 }
 
+/** How appendNote joins one note to the next. */
+const NOTE_SEPARATOR = "; ";
+
+/**
+ * Is `segment` already in `notes` as a whole note rather than part of one?
+ *
+ * Splitting the cell on every semicolon would work only for notes that contain none: a
+ * coach writing "Discussed API; waiting on review" has its boundary destroyed by the
+ * split and can never match itself. So the incoming note is matched whole, and only
+ * where a note can start and end: at the beginning of the cell or after a separator, and
+ * at the end of the cell or before one.
+ */
+function noteContainsSegment(notes: string, segment: string): boolean {
+  if (notes === segment) return true;
+
+  for (let from = 0; from + segment.length <= notes.length; ) {
+    const at = notes.indexOf(segment, from);
+    if (at === -1) return false;
+
+    const startsNote = at === 0 || (at >= NOTE_SEPARATOR.length && notes.startsWith(NOTE_SEPARATOR, at - NOTE_SEPARATOR.length));
+    const end = at + segment.length;
+    const endsNote = end === notes.length || notes.startsWith(NOTE_SEPARATOR, end);
+    if (startsNote && endsNote) return true;
+
+    from = at + 1;
+  }
+  return false;
+}
+
 /**
  * Add a note to a Notes cell, unless it is already there.
  *
  * Regenerating a week replays the same statuses, and without this the same sentence
- * accumulated on every run: `Paired once so far; Paired once so far`. The check is on
- * whole `; `-separated segments rather than a substring, so "Paired once" does not
- * suppress the later, different "Paired once more".
+ * accumulated on every run: `Paired once so far; Paired once so far`. Matching is on
+ * whole notes rather than a substring, so "Paired once" does not suppress the later,
+ * different "Paired once more".
  */
 function appendNote(notes: string, addition: string): string {
   const trimmed = notes.trim();
@@ -468,9 +497,8 @@ function appendNote(notes: string, addition: string): string {
   if (!trimmed) return incoming;
   if (!incoming) return trimmed;
 
-  const segments = trimmed.split(";").map((segment) => segment.trim());
-  if (segments.includes(incoming)) return trimmed;
-  return `${trimmed}; ${incoming}`;
+  if (noteContainsSegment(trimmed, incoming)) return trimmed;
+  return `${trimmed}${NOTE_SEPARATOR}${incoming}`;
 }
 
 /**
@@ -606,15 +634,19 @@ export function applyFocusUpdates(content: string, options: ApplyFocusOptions): 
     const trimmed = text.trim();
     if (!trimmed) continue;
 
-    const open = [...items, ...created].filter((item) => isOpenFocusStatus(item.status));
+    const all = [...items, ...created];
     const canonical = canonicalText(trimmed);
+
+    // A row from this same week already carries this commitment, whatever status it now
+    // holds. The run being repeated created it, or the coach named it twice in one batch,
+    // or this very run has just closed it. None of those is a repeat of an older
+    // commitment. Status is deliberately not consulted: checking only open rows let a
+    // completed one slip through and the week ended up with two contradictory copies.
+    if (all.some((item) => item.week === weekLabel && canonicalText(item.item) === canonical)) continue;
+
+    const open = all.filter((item) => isOpenFocusStatus(item.status));
     const existing = open.find((item) => canonicalText(item.item) === canonical);
     if (existing) {
-      // A row already carrying this week's label: either the run being repeated created
-      // it, or the coach named the same commitment twice in one batch. Neither is a
-      // repeat of an older commitment, so the row stands untouched and nothing counts.
-      if (existing.week === weekLabel) continue;
-
       // Re-raised word for word from an earlier week: keep one row, reset its clock, and
       // record the repeat.
       existing.reviews = 0;
@@ -629,7 +661,7 @@ export function applyFocusUpdates(content: string, options: ApplyFocusOptions): 
     if (near) nearDuplicates.push({ item: trimmed, candidateId: near.id });
 
     created.push({
-      id: nextId(weekLabel, [...items, ...created]),
+      id: nextId(weekLabel, all),
       week: weekLabel,
       item: trimmed,
       status: FOCUS_OPEN_STATUS,
