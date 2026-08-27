@@ -137,3 +137,43 @@ export function mergeBatches(batches: readonly SourceBatch[]): SourceBatch {
     warnings: batches.flatMap((batch) => batch.warnings),
   };
 }
+
+/**
+ * The fields every source agrees to put in a payload.
+ *
+ * Not a schema and not enforced: a payload is whatever the source knows, and only that
+ * source can read all of it. But the work log has to render items from every source
+ * side by side, so these few keys are the common ground it renders from, and a source
+ * that omits them renders as a bare id.
+ *
+ * Snapshots: `title` (what to call the item) and `url` (where to open it).
+ * Events: `text` (what was said or changed, already plain text), `from` and `to` (a
+ * transition), and `spotted` (true when the source could not learn when the change
+ * happened and dated it at the moment it was found).
+ */
+export const PAYLOAD_TITLE = "title";
+export const PAYLOAD_URL = "url";
+export const PAYLOAD_TEXT = "text";
+export const PAYLOAD_FROM = "from";
+export const PAYLOAD_TO = "to";
+export const PAYLOAD_SPOTTED = "spotted";
+
+/**
+ * Event kinds the work log knows how to phrase.
+ *
+ * A source may emit others and they still reach the model as prose; these are the ones
+ * with a sentence written for them.
+ */
+export const EVENT_KINDS = {
+  /** The item came into existence in this week. */
+  created: "created",
+  /** It was worked on, with no finer detail available. */
+  active: "active",
+  comment: "comment",
+  status: "status",
+  description: "description",
+  review: "review",
+  merged: "merged",
+  closed: "closed",
+  version: "version",
+} as const;

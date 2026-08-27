@@ -2,6 +2,8 @@ import type { WorklogConfig } from "./types";
 import type { JiraIssue, ConfluencePage, GitHubPR } from "../types";
 import type { PRReview, WeekInfo } from "./data-fetch";
 import { extractText, formatDate } from "../utils";
+import { eventsByItem, payloadString, type LedgerSnapshot } from "./ledger";
+import { PAYLOAD_FROM, PAYLOAD_SPOTTED, PAYLOAD_TEXT, PAYLOAD_TITLE, PAYLOAD_TO, PAYLOAD_URL, type SourceEvent } from "./sources";
 
 export function generateMarkdown(
   issues: JiraIssue[],
@@ -152,4 +154,122 @@ export function generateMarkdown(
   }
 
   return lines.join("\n");
+}
+
+/**
+ * The week's work log, written from the ledger.
+ *
+ * A week is the events whose timestamps fall inside it, and nothing else. That is the
+ * whole difference from `generateMarkdown` above, which described items as they stand
+ * today: a ticket opened in August and closed in September appears in August with what
+ * happened in August, and its closing appears in September. The coach reading this for
+ * a past week cannot narrate it from a later state, because a later state is not here.
+ *
+ * Each item is titled from the snapshot taken when it was first seen, so a title
+ * reworded since then does not travel back either.
+ */
+export function generateEventMarkdown(options: {
+  weekInfo: WeekInfo;
+  events: readonly SourceEvent[];
+  snapshotFor: (source: string, itemId: string) => LedgerSnapshot | undefined;
+  additionalContext: string;
+  config: WorklogConfig;
+  /** Today, for the "generated" stamp. Injectable so a test can pin it. */
+  now?: Date;
+}): string {
+  const { weekInfo, events, snapshotFor, additionalContext, now = new Date() } = options;
+  const start = weekInfo.startDate.toISOString().split("T")[0];
+  const end = weekInfo.endDate.toISOString().split("T")[0];
+
+  const lines: string[] = [];
+  lines.push("---");
+  lines.push("tags:");
+  lines.push("  - areas/work");
+  lines.push("  - areas/work/work-log");
+  lines.push("---");
+  lines.push("");
+  lines.push(`# Work Log - Week ${weekInfo.weekNumber}, ${weekInfo.year}`);
+  lines.push("");
+  lines.push(`**Period:** ${start} to ${end}`);
+  lines.push(`**Generated:** ${now.toISOString()}`);
+  lines.push("");
+  lines.push("This log holds what happened during the week above, dated by when it happened.");
+  lines.push("Work on these items outside this week belongs to the week it happened in.");
+  lines.push("");
+
+  const bySource = new Map<string, SourceEvent[]>();
+  for (const event of events) {
+    const forSource = bySource.get(event.source) ?? [];
+    forSource.push(event);
+    bySource.set(event.source, forSource);
+  }
+  const sources = [...bySource.keys()].sort();
+
+  lines.push("## Summary");
+  lines.push("");
+  lines.push("| Source | Items | Events |");
+  lines.push("|--------|-------|--------|");
+  for (const source of sources) {
+    const forSource = bySource.get(source) ?? [];
+    lines.push(`| ${source} | ${eventsByItem(forSource).size} | ${forSource.length} |`);
+  }
+  if (sources.length === 0) lines.push("| (nothing recorded) | 0 | 0 |");
+  lines.push("");
+
+  for (const source of sources) {
+    const forSource = bySource.get(source) ?? [];
+    const byItem = eventsByItem(forSource);
+    lines.push(`## ${source} (${byItem.size})`);
+    lines.push("");
+
+    for (const [itemId, itemEvents] of byItem) {
+      const snapshot = snapshotFor(source, itemId);
+      const title = snapshot ? payloadString(snapshot.payload, PAYLOAD_TITLE) : "";
+      const url = snapshot ? payloadString(snapshot.payload, PAYLOAD_URL) : "";
+
+      lines.push(`### ${itemId}${title ? ` - ${title}` : ""}`);
+      if (url) lines.push(`**Link:** ${url}`);
+      if (snapshot) lines.push(`**First seen:** ${snapshot.firstSeenAt.split("T")[0]}`);
+      lines.push("");
+      for (const event of itemEvents) lines.push(describeEvent(event));
+      lines.push("");
+    }
+  }
+
+  const spotted = events.filter((event) => event.payload[PAYLOAD_SPOTTED] === true).length;
+  if (spotted > 0) {
+    lines.push("## Dating");
+    lines.push("");
+    lines.push(
+      `${spotted} change${spotted === 1 ? "" : "s"} below carry no timestamp of their own, so they are dated ` +
+      "at the moment they were found rather than the moment they happened. They are marked *spotted*.",
+    );
+    lines.push("");
+  }
+
+  if (additionalContext.trim().length > 0) {
+    lines.push("## Additional Context");
+    lines.push("");
+    lines.push(additionalContext.trim());
+    lines.push("");
+  }
+
+  return lines.join("\n");
+}
+
+/** One event as a line the model can read without knowing which system it came from. */
+function describeEvent(event: SourceEvent): string {
+  const when = event.at.replace("T", " ").slice(0, 16);
+  const spotted = event.payload[PAYLOAD_SPOTTED] === true ? " *(spotted, not dated by the source)*" : "";
+  const from = payloadString(event.payload, PAYLOAD_FROM);
+  const to = payloadString(event.payload, PAYLOAD_TO);
+  const text = payloadString(event.payload, PAYLOAD_TEXT).replace(/\s+/g, " ").trim();
+
+  const detail = from || to
+    ? `${from || "?"} to ${to || "?"}`
+    : text.length > 0
+      ? text.length > 300 ? `${text.slice(0, 300)}...` : text
+      : "";
+
+  return `- **${when}** ${event.kind}${detail ? `: ${detail}` : ""}${spotted}`;
 }

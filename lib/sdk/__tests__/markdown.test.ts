@@ -1,5 +1,7 @@
 import { describe, it, expect } from "vitest";
-import { generateMarkdown } from "../markdown";
+import { generateMarkdown, generateEventMarkdown } from "../markdown";
+import type { LedgerSnapshot } from "../ledger";
+import type { SourceEvent } from "../sources";
 import type { WorklogConfig } from "../types";
 import type { JiraIssue, GitHubPR } from "../../types";
 import type { WeekInfo } from "../data-fetch";
@@ -140,5 +142,145 @@ describe("generateMarkdown", () => {
     expect(md).not.toContain("## Confluence Documents");
     expect(md).not.toContain("## GitHub Pull Requests");
     expect(md).not.toContain("## Additional Context");
+  });
+});
+
+const makeMarkdownConfig = (): WorklogConfig => config;
+
+describe("generateEventMarkdown", () => {
+  const weekInfo = (weekNumber: number, start: string, end: string): WeekInfo => ({
+    weekNumber,
+    year: 2026,
+    startDate: new Date(`${start}T00:00:00.000Z`),
+    endDate: new Date(`${end}T23:59:59.999Z`),
+    filename: `2026-W${weekNumber} Work Log.md`,
+  });
+
+  const ticket: LedgerSnapshot = {
+    source: "jira",
+    id: "TEAM-1234",
+    firstSeenAt: "2026-08-10T09:00:00.000Z",
+    payload: { title: "Search Revamp indexer", url: "https://example.atlassian.net/browse/TEAM-1234" },
+  };
+
+  const snapshotFor = (source: string, id: string) => (source === "jira" && id === "TEAM-1234" ? ticket : undefined);
+  const now = new Date("2026-09-07T10:00:00.000Z");
+
+  const opened: SourceEvent = {
+    source: "jira", kind: "created", itemId: "TEAM-1234", at: "2026-08-10T09:00:00.000Z", payload: {},
+  };
+  const laterComment: SourceEvent = {
+    source: "jira", kind: "comment", itemId: "TEAM-1234", at: "2026-08-31T11:00:00.000Z",
+    payload: { text: "Still flaky under load" }, id: "c-1",
+  };
+
+  it("shows a week only what happened in it", () => {
+    const august = generateEventMarkdown({
+      weekInfo: weekInfo(33, "2026-08-10", "2026-08-16"),
+      events: [opened],
+      snapshotFor,
+      additionalContext: "",
+      config: makeMarkdownConfig(),
+      now,
+    });
+
+    expect(august).toContain("### TEAM-1234 - Search Revamp indexer");
+    expect(august).toContain("created");
+    // The comment belongs to its own week and must not reach back into this one.
+    expect(august).not.toContain("Still flaky under load");
+  });
+
+  it("shows the later week the comment, still against the item it hangs off", () => {
+    const september = generateEventMarkdown({
+      weekInfo: weekInfo(36, "2026-08-31", "2026-09-06"),
+      events: [laterComment],
+      snapshotFor,
+      additionalContext: "",
+      config: makeMarkdownConfig(),
+      now,
+    });
+
+    expect(september).toContain("### TEAM-1234 - Search Revamp indexer");
+    expect(september).toContain("Still flaky under load");
+    expect(september).toContain("**2026-08-31 11:00** comment");
+    // Nothing about the week the ticket was opened in.
+    expect(september).not.toContain("created");
+  });
+
+  it("titles an item from the snapshot taken when it was first seen", () => {
+    const renamed = generateEventMarkdown({
+      weekInfo: weekInfo(36, "2026-08-31", "2026-09-06"),
+      events: [laterComment],
+      snapshotFor: () => ({ ...ticket, payload: { ...ticket.payload, title: "Search Revamp indexer" } }),
+      additionalContext: "",
+      config: makeMarkdownConfig(),
+      now,
+    });
+
+    expect(renamed).toContain("Search Revamp indexer");
+    expect(renamed).toContain("**First seen:** 2026-08-10");
+  });
+
+  it("says which changes carry no timestamp of their own", () => {
+    const markdown = generateEventMarkdown({
+      weekInfo: weekInfo(36, "2026-08-31", "2026-09-06"),
+      events: [{
+        source: "jira", kind: "description", itemId: "TEAM-1234", at: "2026-09-02T08:00:00.000Z",
+        payload: { spotted: true },
+      }],
+      snapshotFor,
+      additionalContext: "",
+      config: makeMarkdownConfig(),
+      now,
+    });
+
+    expect(markdown).toContain("*(spotted, not dated by the source)*");
+    expect(markdown).toContain("## Dating");
+  });
+
+  it("counts items and events per source", () => {
+    const markdown = generateEventMarkdown({
+      weekInfo: weekInfo(36, "2026-08-31", "2026-09-06"),
+      events: [
+        laterComment,
+        { source: "jira", kind: "status", itemId: "TEAM-1235", at: "2026-09-01T09:00:00.000Z", payload: { from: "Open", to: "Done" } },
+        { source: "github", kind: "merged", itemId: "https://example.com/pr/1", at: "2026-09-02T09:00:00.000Z", payload: {} },
+      ],
+      snapshotFor,
+      additionalContext: "",
+      config: makeMarkdownConfig(),
+      now,
+    });
+
+    expect(markdown).toContain("| github | 1 | 1 |");
+    expect(markdown).toContain("| jira | 2 | 2 |");
+    expect(markdown).toContain("Open to Done");
+  });
+
+  it("renders a week with nothing in it without pretending otherwise", () => {
+    const markdown = generateEventMarkdown({
+      weekInfo: weekInfo(36, "2026-08-31", "2026-09-06"),
+      events: [],
+      snapshotFor,
+      additionalContext: "",
+      config: makeMarkdownConfig(),
+      now,
+    });
+
+    expect(markdown).toContain("| (nothing recorded) | 0 | 0 |");
+  });
+
+  it("keeps the week's own context at the end", () => {
+    const markdown = generateEventMarkdown({
+      weekInfo: weekInfo(36, "2026-08-31", "2026-09-06"),
+      events: [laterComment],
+      snapshotFor,
+      additionalContext: "Was on call this week.",
+      config: makeMarkdownConfig(),
+      now,
+    });
+
+    expect(markdown).toContain("## Additional Context");
+    expect(markdown).toContain("Was on call this week.");
   });
 });
