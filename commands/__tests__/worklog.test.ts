@@ -293,12 +293,14 @@ describe("team attribution without a timeline file", () => {
     const configHome = join(tmp, "config");
     const vault = join(tmp, "vault");
     const previousConfigHome = process.env.XDG_CONFIG_HOME;
+    const previousCacheHome = process.env.XDG_CACHE_HOME;
     const previousAtlassian = process.env.ATLASSIAN_API_TOKEN;
     const previousGitHub = process.env.GITHUB_TOKEN;
 
     seedVault(vault);
     writeConfig(configHome, vault, { withTimeline: false });
     process.env.XDG_CONFIG_HOME = configHome;
+    process.env.XDG_CACHE_HOME = join(tmp, "cache");
     process.env.ATLASSIAN_API_TOKEN = "test-atlassian-token";
     process.env.GITHUB_TOKEN = "test-github-token";
 
@@ -310,10 +312,7 @@ describe("team attribution without a timeline file", () => {
     try {
       vi.resetModules();
       const { aiQueryStructured } = await import("../../lib/sdk/ai");
-      vi.mocked(aiQueryStructured).mockResolvedValue({
-        ...BAD_OUTPUT,
-        bragBookMarkdown: "# Brag Book - Week 09, 2026\n\n## Achievements\n\n- Shipped the thing",
-      });
+      vi.mocked(aiQueryStructured).mockResolvedValue({ ...BAD_OUTPUT, bragBookMarkdown: KEEPS_EXISTING });
 
       const { runWorklog } = await import("../worklog");
       await runWorklog({ week: WEEK, noPrompt: true, force: true, verbose: false });
@@ -326,6 +325,8 @@ describe("team attribution without a timeline file", () => {
     } finally {
       if (previousConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
       else process.env.XDG_CONFIG_HOME = previousConfigHome;
+      if (previousCacheHome === undefined) delete process.env.XDG_CACHE_HOME;
+      else process.env.XDG_CACHE_HOME = previousCacheHome;
       if (previousAtlassian === undefined) delete process.env.ATLASSIAN_API_TOKEN;
       else process.env.ATLASSIAN_API_TOKEN = previousAtlassian;
       if (previousGitHub === undefined) delete process.env.GITHUB_TOKEN;
