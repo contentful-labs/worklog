@@ -378,12 +378,39 @@ function mergeCell(
  * backslash again, so the cell would gain one every week it was merged into. Only what
  * is genuinely new gets escaped, and only once.
  */
+/**
+ * The duplicate's own text for the values being carried across.
+ *
+ * Reading a cell resolves the pipe and backslash escapes and nothing else, so putting
+ * the result back through `escapeCell` escapes what it left alone: an evidence cell
+ * holding an escaped asterisk came out of a fold with a second backslash. The
+ * fragments the duplicate wrote are appended exactly as it wrote them.
+ */
+function rawAdditions(
+  rawCell: string,
+  parsedCell: string,
+  additions: readonly string[],
+  style: MergeStyle,
+): string {
+  const raw = splitValues(rawCell, style);
+  const parsed = splitValues(parsedCell, style);
+  const wanted = new Set(additions);
+
+  const picked: string[] = [];
+  for (const [i, value] of parsed.entries()) {
+    // Falls back to escaping if the two ever disagree on where a value ends.
+    if (wanted.has(value)) picked.push(raw[i] ?? escapeCell(value));
+  }
+  return picked.join(style.joiner);
+}
+
 function mergeRowCells(
   row: string,
   incoming: readonly string[],
   column: number,
   style: MergeStyle,
   canonical?: Canonicalizer,
+  incomingRaw?: readonly string[],
 ): string | null {
   const scanned = scanRow(row);
   while (scanned.values.length <= column) {
@@ -395,7 +422,9 @@ function mergeRowCells(
   const additions = mergeValues(scanned.values[column], value, style, canonical);
   if (additions.length === 0) return null;
 
-  const escaped = escapeCell(additions.join(style.joiner));
+  const escaped = incomingRaw
+    ? rawAdditions(incomingRaw[column] ?? "", value, additions, style)
+    : escapeCell(additions.join(style.joiner));
   const source = scanned.raw[column].trimEnd();
   scanned.raw[column] = source.trim().length === 0 ? ` ${escaped} ` : `${source}${style.joiner}${escaped} `;
   scanned.values[column] = mergeCell(scanned.values[column], value, style, canonical);
@@ -1570,9 +1599,13 @@ function cleanBullets(
 
 /** Fold the given columns of a duplicate row into the row that survives it. */
 function foldRowCells(column: number, style: MergeStyle): FoldRecord {
-  // The duplicate is about to be deleted, so its cell has to be read the way the
-  // cleanup reads a record: a note that differs only in case is another note.
-  return (survivor, duplicate) => mergeRowCells(survivor, splitRow(duplicate), column, style, DELETE_IDENTITY);
+  // The duplicate is about to be deleted, so its cell is read the way the cleanup
+  // reads a record (a value differing only in case is another value) and written the
+  // way the duplicate wrote it.
+  return (survivor, duplicate) => {
+    const row = scanRow(duplicate);
+    return mergeRowCells(survivor, row.values, column, style, DELETE_IDENTITY, row.raw);
+  };
 }
 
 /** Fold a duplicate note's source into the note that survives it. */
@@ -1710,6 +1743,25 @@ async function writeFileAtomic(path: string, content: string): Promise<void> {
   await rename(temp, target);
 }
 
+/**
+ * True for a date cell that can begin an entry inside a joined row.
+ *
+ * Looser than `isIsoDate` on purpose, and only here: a hand-written row in a real
+ * vault is dated `2025-04`, and refusing the whole repair over a missing day left 38
+ * entries fused together. The month still has to be a real one, so `2026-13` is
+ * refused. The status lines keep using `isIsoDate`, since a gap cannot be measured
+ * from a month.
+ */
+function isEntryDate(value: string): boolean {
+  if (isIsoDate(value)) return true;
+  if (value.length !== 7 || value[4] !== "-") return false;
+  for (const i of [0, 1, 2, 3, 5, 6]) {
+    if (value[i] < "0" || value[i] > "9") return false;
+  }
+  const parsed = new Date(`${value}-01T00:00:00Z`);
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 7) === value;
+}
+
 interface UnjoinedRows {
   content: string;
   unjoined: number;
@@ -1755,7 +1807,7 @@ function unjoinImpactRows(content: string, width: number): UnjoinedRows {
       continue;
     }
 
-    const startsAnEntry = (k: number) => isIsoDate(row.values[k * width] ?? "");
+    const startsAnEntry = (k: number) => isEntryDate(row.values[k * width] ?? "");
     const entries = cells / width;
     if (!Number.isInteger(entries) || !Array.from({ length: entries }, (_, k) => k).every(startsAnEntry)) {
       unjoinSkipped.push(cells);

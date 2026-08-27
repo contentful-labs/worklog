@@ -4043,3 +4043,102 @@ describe("the writer never lands inside an existing row", () => {
     expect(lines.every((line) => splitRow(line).length <= 5)).toBe(true);
   });
 });
+
+describe("escapes inside a joined row that is then deduplicated", () => {
+  const joinedWith = (first: string, second: string) => `# Impact Log
+
+## Impact Timeline
+
+| Date | Achievement | Scope | Core Value | Evidence |
+|------|-------------|-------|------------|----------|
+| 2026-01-08 | second | Team | Own It | ${first} | 2026-01-08 | second | Team | Own It | ${second} |
+
+**Last significant impact:** 2026-01-08
+**Current gap:** None - recent entry added
+`;
+
+  const cases: Array<[string, string, string]> = [
+    ["an escaped asterisk", "\\*a\\*", "\\*b\\*"],
+    ["a doubled backslash", "C:\\\\one", "C:\\\\two"],
+    ["an escaped pipe", "a \\| b", "c \\| d"],
+  ];
+
+  for (const [label, first, second] of cases) {
+    it(`carries ${label} across a fold exactly as written`, async () => {
+      const path = join(tmpDir, "impact-log.md");
+      await writeFile(path, joinedWith(first, second));
+
+      // The two entries are the same record, so the split is followed by a collapse
+      // that folds the second one's evidence into the first.
+      const result = await migrateVaultRecordsFile(path, "impact-log", new Date(2026, 0, 9));
+      expect(result).toMatchObject({ unjoined: 1, duplicates: 1 });
+
+      const content = await readFile(path, "utf-8");
+      expect(content).toContain(`| ${first}, ${second} |`);
+
+      const row = content.split("\n").find((line) => line.includes("second")) ?? "";
+      expect(splitRow(row)).toHaveLength(5);
+    });
+  }
+
+  it("is byte-identical on a rerun", async () => {
+    const path = join(tmpDir, "impact-log.md");
+    await writeFile(path, joinedWith("\\*a\\*", "\\*b\\*"));
+    const now = new Date(2026, 0, 9);
+
+    await migrateVaultRecordsFile(path, "impact-log", now);
+    const repaired = await readFile(path, "utf-8");
+
+    expect(await migrateVaultRecordsFile(path, "impact-log", now)).toBeNull();
+    expect(await readFile(path, "utf-8")).toBe(repaired);
+  });
+});
+
+describe("entries a hand-written row dated by month", () => {
+  it("splits a row whose entries start with a year and month", async () => {
+    const path = join(tmpDir, "impact-log.md");
+    await writeFile(path, `# Impact Log
+
+## Impact Timeline
+
+| Date | Achievement | Scope | Core Value | Evidence |
+|------|-------------|-------|------------|----------|
+| 2026-01-15 | third | Team | Own It | X | 2025-04 | hand written | Team | Own It | Y | 2026-01-01 | first | Team | Own It | Z |
+
+**Last significant impact:** 2026-01-15
+**Current gap:** None - recent entry added
+`);
+
+    const result = await migrateVaultRecordsFile(path, "impact-log", new Date(2026, 0, 16));
+
+    expect(result).toMatchObject({ unjoined: 2, unjoinSkipped: [] });
+    const content = await readFile(path, "utf-8");
+    expect(content).toContain("| 2025-04 | hand written | Team | Own It | Y |");
+    expect(content).toContain("| 2026-01-15 | third | Team | Own It | X |");
+    expect(content).toContain("| 2026-01-01 | first | Team | Own It | Z |");
+    // A month cannot date the timeline, so the newest full date still does.
+    expect(content).toContain("**Last significant impact:** 2026-01-15");
+  });
+
+  it("still refuses a month that does not exist", async () => {
+    const path = join(tmpDir, "impact-log.md");
+    const file = `# Impact Log
+
+## Impact Timeline
+
+| Date | Achievement | Scope | Core Value | Evidence |
+|------|-------------|-------|------------|----------|
+| 2026-01-15 | third | Team | Own It | X | 2026-13 | mis-dated | Team | Own It | Y |
+
+**Last significant impact:** 2026-01-15
+**Current gap:** None - recent entry added
+`;
+    await writeFile(path, file);
+
+    const result = await migrateVaultRecordsFile(path, "impact-log", new Date(2026, 0, 16));
+
+    expect(result?.unjoined ?? 0).toBe(0);
+    expect(result?.unjoinSkipped ?? []).toEqual([10]);
+    expect(await readFile(path, "utf-8")).toBe(file);
+  });
+});
