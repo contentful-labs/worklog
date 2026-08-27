@@ -1174,6 +1174,20 @@ describe("findTables through the trims", () => {
     expect(content).not.toContain("Tracked 0");
   });
 
+  it("leaves a four-space indented table alone, since that is a code block", () => {
+    // Stripping a fourth space turns an indented code block into a table. It also shifts every
+    // cell along by one, which is why the impact trim did not notice: its date column moved.
+    const code = [
+      "    | Item | Status |",
+      "    |---|---|",
+      ...Array.from({ length: 25 }, (_, i) => `    | Tracked ${i} | open |`),
+    ].join("\n");
+    const { content, omitted } = omitLargeFocusTables(code, 20);
+
+    expect(omitted).toBe(0);
+    expect(content).toBe(code);
+  });
+
   it("omits a table indented by up to three spaces", () => {
     const indented = [
       "   | Item | Status |",
