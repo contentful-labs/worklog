@@ -1795,6 +1795,16 @@ function unjoinImpactRows(content: string, width: number): UnjoinedRows {
   if (!table) return { content, unjoined: 0, unjoinSkipped: [] };
 
   const rowEnd = Math.min(table.rowEnd, scope);
+
+  // The damage signs itself: the 1.x insert left the row's own leading pipe behind on
+  // a line of its own, once per entry it swallowed. Counted before the placeholder
+  // pass removes them, that count is the proof a split is a repair rather than a
+  // guess, and it is what separates this from a row whose cells simply contain pipes.
+  let barePipes = 0;
+  for (let i = table.rowStart; i < rowEnd; i++) {
+    if (lines[i].trim() === "|") barePipes++;
+  }
+
   const repaired: string[] = [];
   const unjoinSkipped: number[] = [];
   let unjoined = 0;
@@ -1809,7 +1819,10 @@ function unjoinImpactRows(content: string, width: number): UnjoinedRows {
 
     const startsAnEntry = (k: number) => isEntryDate(row.values[k * width] ?? "");
     const entries = cells / width;
-    if (!Number.isInteger(entries) || !Array.from({ length: entries }, (_, k) => k).every(startsAnEntry)) {
+    const looksJoined =
+      Number.isInteger(entries) && Array.from({ length: entries }, (_, k) => k).every(startsAnEntry);
+    // A row of N entries can only have come from N-1 lost inserts.
+    if (!looksJoined || barePipes !== entries - 1) {
       unjoinSkipped.push(cells);
       repaired.push(lines[i]);
       continue;
