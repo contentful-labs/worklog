@@ -139,6 +139,14 @@ export interface RecordResult {
    * which are the weeks, and the only weeks, that need writing again.
    */
   perWeek: Map<string, number>;
+  /**
+   * Weeks whose events were thrown away because their file cannot be rewritten.
+   *
+   * The caller has to know: a fetch that was partly refused must not be allowed to leave
+   * an ETag behind saying it succeeded, or the next fetch is answered 304 and the refused
+   * events are never offered again.
+   */
+  refusedWeeks: string[];
 }
 
 /** An item as first seen, with the source that saw it. */
@@ -351,8 +359,19 @@ export interface Ledger {
   watermarkFor(source: string, weekId: string): Date | undefined;
   /** Whether this source has done its first whole-window fetch for a week. */
   hasWindow(source: string, weekId: string): boolean;
-  /** This source's own persisted state. Writes are kept until `save`. */
+  /**
+   * This source's own persisted state.
+   *
+   * Writes are held in a buffer, not applied. An ETag is a claim to have already seen
+   * something, and it is only true once the events that came with it are filed: a fetch
+   * whose events were refused must not leave one behind, or the next fetch is answered
+   * 304 and what was refused is never offered again.
+   */
   stateFor(source: string): SourceState;
+  /** The events that came with this source's buffered state are filed. Keep it. */
+  commitState(source: string): void;
+  /** They were not. Throw the buffered state away so the next fetch asks in full. */
+  discardState(source: string): void;
 
   /** Weeks holding events their work log has not been told about, oldest first. */
   pendingWeeks(): string[];
@@ -503,6 +522,9 @@ export async function openLedger(root: string = ledgerRoot()): Promise<Ledger> {
   // what it is called now, so the record of what has been written up survives the change.
   if (storedVersion < LEDGER_VERSION) migrateWrittenKeys(meta.written, events);
 
+  /** Per source, state written during a fetch whose events are not yet safely filed. */
+  const pendingState = new Map<string, Map<string, string>>();
+
   const dirtyWeeks = new Set<string>();
   const dirtySources = new Set<string>();
   let dirtyMeta = storedVersion < LEDGER_VERSION;
@@ -552,12 +574,13 @@ export async function openLedger(root: string = ledgerRoot()): Promise<Ledger> {
 
     stateFor(source) {
       const store = sourceMeta(meta, source).state;
+      const buffered = pendingState.get(source) ?? new Map<string, string>();
+      pendingState.set(source, buffered);
       return {
-        get: (key) => store[key],
+        get: (key) => buffered.get(key) ?? store[key],
         set: (key, value) => {
-          if (store[key] === value) return;
-          store[key] = value;
-          dirtyMeta = true;
+          if ((buffered.get(key) ?? store[key]) === value) return;
+          buffered.set(key, value);
         },
       };
     },
@@ -617,7 +640,7 @@ export async function openLedger(root: string = ledgerRoot()): Promise<Ledger> {
 
       if (!isSafeSourceName(source)) {
         problems.push(`Ignored everything from a source calling itself "${source}": a source name may only contain a-z, 0-9, dash and underscore.`);
-        return { addedEvents, addedSnapshots, perWeek };
+        return { addedEvents, addedSnapshots, perWeek, refusedWeeks: [] };
       }
 
       const bySource = snapshots.get(source) ?? {};
@@ -663,7 +686,23 @@ export async function openLedger(root: string = ledgerRoot()): Promise<Ledger> {
         problems.push(`Events for ${weekId} were fetched and thrown away, because ${join(eventsDir, `${weekId}.json`)} cannot be read and so cannot be added to. They will be fetched again once it is repaired or deleted.`);
       }
 
-      return { addedEvents, addedSnapshots, perWeek };
+      return { addedEvents, addedSnapshots, perWeek, refusedWeeks: [...refused].sort() };
+    },
+
+    commitState(source) {
+      const buffered = pendingState.get(source);
+      if (!buffered || buffered.size === 0) return;
+      const store = sourceMeta(meta, source).state;
+      for (const [key, value] of buffered) {
+        if (store[key] === value) continue;
+        store[key] = value;
+        dirtyMeta = true;
+      }
+      buffered.clear();
+    },
+
+    discardState(source) {
+      pendingState.get(source)?.clear();
     },
 
     markWindow(source, weekId) {
@@ -874,7 +913,16 @@ export async function collectIntoLedger(
     /** The newest thing this source reported, whether or not the ledger already had it. */
     let newest: string | undefined;
 
-    const file = (batch: SourceBatch) => {
+    /**
+     * File one fetch's answer, and decide what its state was worth.
+     *
+     * A source writes ETags and cursors while it fetches, and every one of them is a
+     * claim to have already seen something. That claim only becomes true when the events
+     * that came with it are safely stored: if any were refused, keeping the ETag would
+     * have the next fetch answered 304 and the refused events never offered again. So
+     * the state is kept when everything was filed and thrown away when it was not.
+     */
+    const file = (batch: SourceBatch): boolean => {
       for (const event of batch.events) newest = laterOf(newest, event.at);
       for (const snapshot of batch.snapshots) newest = laterOf(newest, snapshot.firstSeenAt);
 
@@ -888,6 +936,13 @@ export async function collectIntoLedger(
         perWeek.set(week, bySource);
       }
       warnings.push(...batch.warnings);
+
+      if (result.refusedWeeks.length > 0) {
+        ledger.discardState(source.name);
+        return false;
+      }
+      ledger.commitState(source.name);
+      return true;
     };
 
     // A week whose stored events cannot be rewritten is one whose newly fetched events

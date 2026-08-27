@@ -298,6 +298,98 @@ function nodeText(node: RootContent): string {
   return "";
 }
 
+/** The markers the prompt wraps the coaching session in. */
+const COACHING_OPEN = "<!-- COACHING_SESSION -->";
+const COACHING_CLOSE = "<!-- /COACHING_SESSION -->";
+
+/**
+ * What a week's entry records, split into the two parts a regeneration must keep.
+ *
+ * Achievement lines and coaching headings are checked against the same parts of the new
+ * document, not against the document as a whole. A line taken out of the achievements
+ * and mentioned in passing in the coaching prose is gone from the list someone will read
+ * next year, and a check for the text anywhere would call that fine.
+ */
+export interface EntryRecord {
+  achievements: string[];
+  coachingHeadings: CoachingHeading[];
+}
+
+/** A coaching heading: what it is compared by, and how it was written. */
+export interface CoachingHeading {
+  /** Normalised, so bolding it or ending it with a colon is not a different heading. */
+  key: string;
+  /** As it appears in the document, so a refusal can quote it back. */
+  text: string;
+}
+
+/**
+ * Read an entry the same way the validator reads one.
+ *
+ * Through remark, and matching headings by the same normalisation, because the two have
+ * to agree about what an achievements section is. They did not: the validator accepted
+ * `## **Achievements**`, `## Achievements:`, closing hashes and setext underlining,
+ * while this looked for the literal string `## achievements` — so a document written any
+ * of those ways passed validation with its achievements section invisible to the gate,
+ * and every achievement in it could be dropped without a word.
+ */
+export function bragBookEntry(markdown: string): EntryRecord {
+  const tree = unified().use(remarkParse).use(remarkFrontmatter).parse(markdown);
+  const lines = markdown.split("\n");
+
+  const achievements: string[] = [];
+  const coachingHeadings: CoachingHeading[] = [];
+  let inCoaching = false;
+
+  for (const [index, node] of tree.children.entries()) {
+    if (node.type === "html") {
+      const value = node.value.trim();
+      if (value === COACHING_OPEN) inCoaching = true;
+      else if (value === COACHING_CLOSE) inCoaching = false;
+      continue;
+    }
+    if (node.type !== "heading") continue;
+
+    if (inCoaching) {
+      if (node.depth === 3) {
+        const line = lines[(node.position?.start.line ?? 1) - 1] ?? nodeText(node);
+        coachingHeadings.push({ key: normalizeHeading(nodeText(node)), text: line.trim() });
+      }
+      continue;
+    }
+
+    const heading = normalizeHeading(nodeText(node));
+    if (heading !== "achievements" && heading !== "achievement") continue;
+    achievements.push(...sectionLines(tree.children, index, node.depth, lines));
+  }
+
+  return { achievements, coachingHeadings };
+}
+
+/**
+ * The written lines of a section, as they appear in the document.
+ *
+ * The source rather than the parsed text, so the failure can quote the achievement back
+ * exactly as someone wrote it, and so a bullet is compared with a bullet.
+ */
+function sectionLines(nodes: RootContent[], index: number, depth: number, lines: string[]): string[] {
+  const start = nodes[index].position?.end.line ?? 0;
+  let end = lines.length;
+  for (let i = index + 1; i < nodes.length; i++) {
+    const node = nodes[i];
+    // The next heading of this rank or shallower closes the section — and so does the
+    // start of the coaching block, whose own `###` headings are deeper and would
+    // otherwise be read as part of the achievements above them.
+    const closes = (node.type === "heading" && node.depth <= depth)
+      || (node.type === "html" && node.value.trim() === COACHING_OPEN);
+    if (closes) {
+      end = (node.position?.start.line ?? end) - 1;
+      break;
+    }
+  }
+  return lines.slice(start, end).map((line) => line.trim()).filter((line) => line.length > 0);
+}
+
 /** Models end a heading with a colon often enough that it should not fail a week. */
 function normalizeHeading(text: string): string {
   let end = text.length;

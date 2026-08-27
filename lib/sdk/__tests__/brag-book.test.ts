@@ -8,7 +8,9 @@ import {
 } from "../brag-book";
 import { updateMemory } from "../vault-updates";
 import { escapeCell, renderRow } from "../markdown-table";
-import { bragBookOutputSchema, isFocusItemId, type BragBookOutput } from "../brag-book-schema";
+import {
+  bragBookMarkdownProblem, bragBookOutputSchema, isFocusItemId, type BragBookOutput,
+} from "../brag-book-schema";
 
 const MARKDOWN = "# Brag Book - Week 09, 2026\n\n## Achievements\n\n- Shipped auth";
 
@@ -728,5 +730,66 @@ describe("moving an achievement instead of keeping it", () => {
       "- Cut search indexing from 40 minutes to 6.\n- Shipped the query parser rewrite.",
     );
     expect(firstDroppedLine(existing, added)).toBeUndefined();
+  });
+});
+
+describe("an achievements heading the validator accepts", () => {
+  /** The body is the same in every case; only the heading changes. */
+  function entry(heading: string): string {
+    return [
+      "# Brag Book - Week 36, 2026",
+      "",
+      heading,
+      "",
+      "- Cut search indexing from 40 minutes to 6.",
+      "",
+      "<!-- COACHING_SESSION -->",
+      "### What went well",
+      "",
+      "You said no to the extra scope.",
+      "<!-- /COACHING_SESSION -->",
+    ].join("\n");
+  }
+
+  /** The same document with the achievement gone, which is what must be refused. */
+  function stripped(heading: string): string {
+    return entry(heading).replace("- Cut search indexing from 40 minutes to 6.", "- Only the new thing.");
+  }
+
+  it.each([
+    ["plain", "## Achievements"],
+    ["bolded", "## **Achievements**"],
+    ["with a colon", "## Achievements:"],
+    ["with closing hashes", "## Achievements ##"],
+    ["indented three spaces", "   ## Achievements"],
+    ["singular", "## Achievement"],
+    ["at another depth", "# Achievements"],
+    ["underlined instead of hashed", "Achievements\n------------"],
+  ])("is read by the gate as well: %s", (_name, heading) => {
+    // The trigger: the validator accepts every one of these as an achievements section,
+    // and the gate recognised only the literal `## Achievements`. A book written any
+    // other way passed validation with its achievements invisible to the gate, so every
+    // one of them could be dropped without a word.
+    expect(bragBookMarkdownProblem(entry(heading))).toBeNull();
+    expect(firstDroppedLine(entry(heading), stripped(heading)))
+      .toBe("- Cut search indexing from 40 minutes to 6.");
+    expect(firstDroppedLine(entry(heading), entry(heading))).toBeUndefined();
+  });
+
+  it("still notices a dropped achievement when the two documents write the heading differently", () => {
+    // A model that reformats the heading has not removed anything by doing so, and one
+    // that reformats it while dropping a line has.
+    expect(firstDroppedLine(entry("## Achievements"), entry("## **Achievements**"))).toBeUndefined();
+    expect(firstDroppedLine(entry("## Achievements"), stripped("## Achievements:")))
+      .toBe("- Cut search indexing from 40 minutes to 6.");
+  });
+
+  it("reads a coaching heading however it is written", () => {
+    const existing = entry("## Achievements");
+    const reworded = existing.replace("### What went well", "### **What went well**:");
+    // Bolding and a colon are the same heading; a different heading is a dropped one.
+    expect(firstDroppedLine(existing, reworded)).toBeUndefined();
+    expect(firstDroppedLine(existing, existing.replace("### What went well", "### Something else")))
+      .toBe("### What went well");
   });
 });

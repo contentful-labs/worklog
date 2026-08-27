@@ -1,5 +1,6 @@
 import {
   MAX_NEW_FOCUS_ITEMS,
+  bragBookEntry,
   bragBookMarkdownProblem,
   validFocusStatusSchema,
   validImpactLogEntrySchema,
@@ -91,56 +92,6 @@ export function validateBragBookMarkdown(markdown: string): void {
 }
 
 /**
- * What a week's entry records, split into the two parts a regeneration must keep.
- *
- * Achievement lines and coaching headings are checked against the same parts of the new
- * document, not against the document as a whole. A line that has been taken out of the
- * achievements and mentioned in passing in the coaching prose is gone from the list
- * someone will read next year, and a check for the text anywhere would call that fine.
- */
-interface EntryRecord {
-  achievements: string[];
-  coachingHeadings: string[];
-}
-
-const COACHING_OPEN = "<!-- COACHING_SESSION -->";
-const COACHING_CLOSE = "<!-- /COACHING_SESSION -->";
-
-function readEntry(document: string): EntryRecord {
-  const achievements: string[] = [];
-  const coachingHeadings: string[] = [];
-
-  let inAchievements = false;
-  let inCoaching = false;
-
-  for (const raw of document.split("\n")) {
-    const line = raw.trim();
-
-    if (line === COACHING_OPEN) {
-      inCoaching = true;
-      continue;
-    }
-    if (line === COACHING_CLOSE) {
-      inCoaching = false;
-      continue;
-    }
-
-    if (inCoaching) {
-      if (line.startsWith("### ")) coachingHeadings.push(line);
-      continue;
-    }
-
-    if (line.startsWith("## ")) {
-      inAchievements = line.toLowerCase() === "## achievements";
-      continue;
-    }
-    if (inAchievements && line.length > 0) achievements.push(line);
-  }
-
-  return { achievements, coachingHeadings };
-}
-
-/**
  * The first thing the new document drops, or nothing if it drops nothing.
  *
  * Regenerating a week adds to its entry; it never removes. The prompt says so, but a
@@ -149,15 +100,15 @@ function readEntry(document: string): EntryRecord {
  * replace a month of achievements with one line, atomically and irreversibly.
  */
 export function firstDroppedLine(existing: string, next: string): string | undefined {
-  const before = readEntry(existing);
-  const after = readEntry(next);
+  const before = bragBookEntry(existing);
+  const after = bragBookEntry(next);
 
   const kept = new Set(after.achievements);
   const dropped = before.achievements.find((line) => !kept.has(line));
   if (dropped !== undefined) return dropped;
 
-  const headings = new Set(after.coachingHeadings);
-  return before.coachingHeadings.find((line) => !headings.has(line));
+  const headings = new Set(after.coachingHeadings.map((heading) => heading.key));
+  return before.coachingHeadings.find((heading) => !headings.has(heading.key))?.text;
 }
 
 /**

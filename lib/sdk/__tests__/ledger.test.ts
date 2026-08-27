@@ -8,6 +8,7 @@ import {
   openLedger, ledgerRoot, eventsByItem, insidePath, isSafeSourceName, newEvents, renderable,
   collectIntoLedger, weekWindow,
 } from "../ledger";
+import type { Ledger } from "../ledger";
 import type { Source, SourceBatch, SourceContext } from "../sources";
 
 let root: string;
@@ -182,7 +183,10 @@ describe("what is written to disk", () => {
       events: [{ source: "jira", kind: "comment", itemId: "TEAM-1234", at: "2026-08-31T11:00:00.000Z", payload: {}, id: "c-1" }],
     }), seenAt);
     first.setWatermark("jira", "2026-W36", seenAt);
+    // A source's state is buffered until the events it was written alongside are filed,
+    // which is what the collector confirms before committing it.
     first.stateFor("github").set("etag:pr-1", "W/\"abc\"");
+    first.commitState("github");
     await first.save();
 
     const second = await openLedger(root);
@@ -959,5 +963,102 @@ describe("a week left half-read by a run that is over", () => {
 
     const third = await openLedger(root);
     expect(third.incompleteWeeks()).toEqual([]);
+  });
+});
+
+describe("a source that remembers what it has already seen", () => {
+  const week = (weekId: string, start: string, end: string) => ({
+    weekId,
+    window: { start: new Date(`${start}T00:00:00.000Z`), end: new Date(`${end}T23:59:59.999Z`) },
+  });
+
+  const found = {
+    source: "github", kind: "review", itemId: "https://github.com/example-org/repo/pull/7",
+    at: "2026-09-01T09:00:00.000Z", payload: {}, id: "r-1",
+  };
+
+  /**
+   * Stands in for a conditional fetch: it stores an ETag, and once it has one it answers
+   * with nothing, the way a 304 does.
+   */
+  function conditionalSource(asked: string[]): Source {
+    const answer = (ctx: SourceContext): SourceBatch => {
+      const state = ctx.state;
+      if (!state) throw new Error("this test needs the ledger's state");
+      if (state.get("etag") === "v2") {
+        asked.push("304");
+        return { snapshots: [], events: [], warnings: [] };
+      }
+      asked.push("200");
+      state.set("etag", "v2");
+      return { snapshots: [], events: [found], warnings: [] };
+    };
+    return {
+      name: "github",
+      isAvailable: async () => ({ ok: true }),
+      fetchWindow: async (_window, ctx) => answer(ctx),
+      fetchSince: async (_since, _ids, ctx) => answer(ctx),
+    };
+  }
+
+  const ctxFor = (ledger: Ledger) => (source: Source): SourceContext => ({
+    // SAFETY: this fake source reads nothing from config; a real one is handed a real
+    // config by the command, and this test is about the ledger, not about it.
+    config: {} as SourceContext["config"],
+    state: ledger.stateFor(source.name),
+  });
+
+  it("does not keep an ETag for a fetch whose events were refused", async () => {
+    // The trigger: the week's file is corrupt, so the fetched event is thrown away — but
+    // the ETag the fetch stored says it has already been seen. Repair the file and the
+    // next fetch is answered 304, and the event is never offered again.
+    const weeks = [week("2026-W36", "2026-08-31", "2026-09-06")];
+    const asked: string[] = [];
+
+    // A healthy first run, so the week has a file of its own.
+    const seed = await openLedger(root);
+    seed.record("github", batch({
+      events: [{ ...found, id: "r-0", at: "2026-08-31T09:00:00.000Z" }],
+    }), seenAt);
+    seed.markWritten("2026-W36");
+    await seed.save();
+
+    // Somebody edits the week's file into something this version cannot read.
+    const path = join(root, "events", "2026-W36.json");
+    const healthy = await readFile(path, "utf-8");
+    await writeFile(path, JSON.stringify([...JSON.parse(healthy), { source: "github", kind: 7 }], null, 2), "utf-8");
+
+    const damaged = await openLedger(root);
+    await collectIntoLedger(damaged, [conditionalSource(asked)], weeks, ctxFor(damaged), new Date("2026-09-07T10:00:00.000Z"));
+    await damaged.save();
+
+    expect(asked).toEqual(["200"]);
+    // The ETag was thrown away with the events it came with.
+    const afterDamage = await openLedger(root);
+    expect(afterDamage.stateFor("github").get("etag")).toBeUndefined();
+
+    // The user repairs the file, and the event is asked for again.
+    await writeFile(path, healthy, "utf-8");
+    const repaired = await openLedger(root);
+    await collectIntoLedger(repaired, [conditionalSource(asked)], weeks, ctxFor(repaired), new Date("2026-09-07T11:00:00.000Z"));
+    await repaired.save();
+
+    expect(asked).toEqual(["200", "200"]);
+    expect(repaired.eventsForWeek("2026-W36").map((event) => event.id).sort()).toEqual(["r-0", "r-1"]);
+  });
+
+  it("keeps the ETag when everything it fetched was filed", async () => {
+    const weeks = [week("2026-W36", "2026-08-31", "2026-09-06")];
+    const asked: string[] = [];
+
+    const first = await openLedger(root);
+    await collectIntoLedger(first, [conditionalSource(asked)], weeks, ctxFor(first), new Date("2026-09-07T10:00:00.000Z"));
+    await first.save();
+
+    const second = await openLedger(root);
+    expect(second.stateFor("github").get("etag")).toBe("v2");
+    await collectIntoLedger(second, [conditionalSource(asked)], weeks, ctxFor(second), new Date("2026-09-07T11:00:00.000Z"));
+
+    expect(asked).toEqual(["200", "304"]);
   });
 });
