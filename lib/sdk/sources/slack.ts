@@ -28,7 +28,7 @@
  */
 
 import { execFile } from "node:child_process";
-import { lstat, mkdtemp, realpath, rm } from "node:fs/promises";
+import { mkdtemp, realpath, rmdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -343,69 +343,44 @@ function keepOwnPublic(messages: SlackMessage[], config: WorklogConfig): OwnPubl
 const CWD_PREFIX = "worklog-slack-";
 
 /**
- * Enough of an `lstat` to tell whether a path is still the same directory later. A path string
- * is not identity: it can be swapped for a symlink between the two calls.
- */
-interface DirIdentity {
-  dev: number;
-  ino: number;
-}
-
-async function directoryIdentity(path: string): Promise<DirIdentity | null> {
-  const stats = await lstat(path);
-  // lstat does not follow the link, so a retargeted path shows up here rather than silently
-  // resolving to whatever it now points at. The isDirectory test is belt and braces: a symlink
-  // has its own inode and so already fails the dev/ino comparison. Kept because this guards an
-  // rm -rf and the intent should be readable without working that out.
-  return stats.isDirectory() ? { dev: stats.dev, ino: stats.ino } : null;
-}
-
-/**
  * Run something with a working directory that has nothing in it. Claude Code discovers project
  * settings, CLAUDE.md and memory by walking up from its cwd, so the child is given a directory
  * where there is nothing to find.
  *
- * Cleanup is an `rm -rf`, so it only ever runs against the exact directory this function
- * created: the temp root is resolved with `realpath` first, and the directory's dev/ino are
- * recorded at creation and checked again before removal. Anything else, including the path
- * having become a symlink, is left alone with a warning. This function once deleted a whole
- * working tree during a mutation test, which is the only reason any of that is here.
+ * Cleanup is `rmdir`, never a recursive remove. Any check on a path followed by a delete of that
+ * path is two operations, and another process running as this user can swap the directory
+ * between them; a recursive delete would then take the replacement with it. `rmdir` closes that
+ * off by construction: it refuses a directory with anything in it, and it never descends. The
+ * worst a swap can do is remove an empty directory someone else put there. An earlier version of
+ * this function deleted a whole working tree during a mutation test, which is why the delete is
+ * now the weakest one that does the job.
  *
- * Neither failure is fatal. Slack is an optional source: it may decline to run, but it may not
- * take the week's Jira, Confluence and GitHub data down with it.
+ * Failure is never fatal. Slack is an optional source: it may decline to run, and it may leave a
+ * directory behind, but it may not take the week's Jira, Confluence and GitHub data down with it.
  */
 export async function withEmptyCwd<T>(
   body: (cwd: string) => Promise<T>,
   onWarning: (message: string) => void,
 ): Promise<T> {
+  // The real temp root, so the path handed to the child is the one it will report for itself.
   const root = await realpath(tmpdir());
   const cwd = await mkdtemp(join(root, CWD_PREFIX));
-  const created = await directoryIdentity(cwd);
 
   try {
     return await body(cwd);
   } finally {
-    await removeIfUnchanged(cwd, created, onWarning);
+    await removeEmptyDir(cwd, onWarning);
   }
 }
 
-async function removeIfUnchanged(
-  cwd: string,
-  created: DirIdentity | null,
-  onWarning: (message: string) => void,
-): Promise<void> {
+async function removeEmptyDir(cwd: string, onWarning: (message: string) => void): Promise<void> {
   try {
-    const current = await directoryIdentity(cwd);
-    if (!created || !current || current.dev !== created.dev || current.ino !== created.ino) {
-      onWarning(`Left ${cwd} in place: it is no longer the directory worklog created.`);
-      return;
-    }
-    await rm(cwd, { recursive: true, force: true });
+    await rmdir(cwd);
   } catch (err) {
     const failure = thrownSchema.parse(err);
-    // The directory being gone already is not a problem worth telling anyone about.
+    // Already gone is not a problem worth telling anyone about.
     if (failure.code === "ENOENT") return;
-    onWarning(`Could not remove the temporary directory ${cwd}: ${describeError(failure)}`);
+    onWarning(`Left ${cwd} in place, it could not be removed: ${describeError(failure)}`);
   }
 }
 

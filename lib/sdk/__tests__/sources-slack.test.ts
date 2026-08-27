@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -505,7 +505,7 @@ describe("slack source time budget", () => {
 
 describe("withEmptyCwd", () => {
   // The real TMPDIR is redirected rather than the directory factory being injected: production
-  // code must have no seam a caller could hand a path to, because the cleanup is an rm -rf.
+  // code must have no seam a caller could hand a path to.
   let sandbox = "";
   let originalTmpdir: string | undefined;
 
@@ -535,39 +535,27 @@ describe("withEmptyCwd", () => {
     expect(warnings).toEqual([]);
   });
 
-  it("leaves a same-prefix decoy alone: only the directory it created is removed", async () => {
-    // A name that would satisfy a prefix check but is not the directory this call made.
-    const decoy = mkdtempSync(join(sandbox, "worklog-slack-"));
-
-    await withEmptyCwd(async () => undefined, () => {});
-
-    expect(existsSync(decoy)).toBe(true);
-  });
-
-  it("refuses to remove the path once it has been retargeted at a symlink", async () => {
-    const treasure = join(sandbox, "treasure");
-    mkdirSync(treasure);
+  it("leaves a directory that is not empty, with a warning, rather than deleting its contents", async () => {
+    // Cleanup is rmdir, so anything the child left behind survives and is reported. A recursive
+    // delete here is what a directory swap between the check and the delete would exploit.
     const warnings: string[] = [];
     let seen = "";
 
     await withEmptyCwd(async (cwd) => {
       seen = cwd;
-      // Swap the directory for a symlink pointing somewhere that must survive.
-      rmSync(cwd, { recursive: true, force: true });
-      symlinkSync(treasure, cwd);
+      writeFileSync(join(cwd, "left-behind.txt"), "keep me");
     }, (message) => warnings.push(message));
 
-    expect(lstatSync(seen).isSymbolicLink()).toBe(true);
-    expect(existsSync(treasure)).toBe(true);
-    expect(warnings.join(" ")).toContain("no longer the directory worklog created");
+    expect(existsSync(join(seen, "left-behind.txt"))).toBe(true);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("could not be removed");
   });
 
   it("keeps the body's result when cleanup cannot run", async () => {
     const warnings: string[] = [];
 
     const result = await withEmptyCwd(async (cwd) => {
-      rmSync(cwd, { recursive: true, force: true });
-      symlinkSync(sandbox, cwd);
+      mkdirSync(join(cwd, "nested"));
       return "kept";
     }, (message) => warnings.push(message));
 
@@ -575,11 +563,27 @@ describe("withEmptyCwd", () => {
     expect(warnings).toHaveLength(1);
   });
 
+  it("touches nothing outside the directory it made", async () => {
+    // A sibling with the same prefix, and a directory a symlink in the cwd points at: neither is
+    // reachable from an rmdir of the cwd itself.
+    const sibling = mkdtempSync(join(sandbox, "worklog-slack-"));
+    const treasure = join(sandbox, "treasure");
+    mkdirSync(treasure);
+    writeFileSync(join(treasure, "keep.txt"), "keep me");
+
+    await withEmptyCwd(async (cwd) => {
+      symlinkSync(treasure, join(cwd, "link-to-treasure"));
+    }, () => {});
+
+    expect(existsSync(sibling)).toBe(true);
+    expect(existsSync(join(treasure, "keep.txt"))).toBe(true);
+  });
+
   it("says nothing when the directory is already gone", async () => {
     const warnings: string[] = [];
 
     await withEmptyCwd(async (cwd) => {
-      rmSync(cwd, { recursive: true, force: true });
+      rmdirSync(cwd);
     }, (message) => warnings.push(message));
 
     expect(warnings).toEqual([]);
