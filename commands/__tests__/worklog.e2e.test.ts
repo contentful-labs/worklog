@@ -126,6 +126,8 @@ const FAKE_OUTPUT: BragBookOutput = {
     "",
     "## Achievements",
     "",
+    // The week already recorded this, and a regeneration adds rather than replaces.
+    "- The previous run's work",
     "- **2026-03-05** Shipped cursor pagination for search results",
     "",
     "## Week in Review",
@@ -216,8 +218,10 @@ function setUp(): Harness {
     }),
   );
 
-  // Seeded so a forced regeneration has something to destroy. Without these the negative
-  // test could only prove that new files were not created, which is a weaker claim.
+  // Seeded so a forced regeneration has something it could destroy. Without these the
+  // negative test could only prove that new files were not created, which is a weaker
+  // claim — and the positive test could not show that a forced run keeps what the week
+  // already recorded rather than replacing it.
   writeFileSync(join(vault, `${WEEK} Brag Book.md`), SENTINEL_BRAG_BOOK);
   writeFileSync(join(vault, `${WEEK} Work Log.md`), SENTINEL_WORK_LOG);
 
