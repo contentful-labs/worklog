@@ -484,6 +484,30 @@ function noteContainsSegment(notes: string, segment: string): boolean {
 }
 
 /**
+ * How a counted review is recorded: `reviewed 2026-W36`, one note among the others.
+ *
+ * The Notes cell is the only per-row storage that does not need a new column, and the
+ * trail reads as what it is: the weeks this item was put in front of the coach and went
+ * unanswered, which is the same thing the lapse note already says out loud. At most
+ * `lapseAfter` of these can accumulate before the item closes.
+ */
+const REVIEW_MARKER_PREFIX = "reviewed ";
+
+function reviewMarker(weekLabel: string): string {
+  return `${REVIEW_MARKER_PREFIX}${weekLabel}`;
+}
+
+/**
+ * Has this week's review of the row already been counted?
+ *
+ * Matched as a whole note rather than a substring, so a coach writing "reviewed 2026-W3"
+ * in prose cannot suppress the marker for 2026-W36, and vice versa.
+ */
+function hasReviewMarker(notes: string, weekLabel: string): boolean {
+  return noteContainsSegment(notes.trim(), reviewMarker(weekLabel));
+}
+
+/**
  * Add a note to a Notes cell, unless it is already there.
  *
  * Regenerating a week replays the same statuses, and without this the same sentence
@@ -625,6 +649,12 @@ export function applyFocusUpdates(content: string, options: ApplyFocusOptions): 
     // injects the item that same week created, and counting that as an unanswered review
     // meant three runs of one week lapsed the commitment the week itself had set.
     if (target.week === weekLabel) continue;
+
+    // One week is one review, however many times it is generated. Retrying a week after a
+    // crash, or regenerating a later one, used to age every open item again, so an item
+    // could reach lapsed having actually been put in front of the coach once.
+    if (hasReviewMarker(target.notes, weekLabel)) continue;
+    target.notes = appendNote(target.notes, reviewMarker(weekLabel));
 
     target.reviews++;
     if (target.reviews >= lapseAfter) {
