@@ -4221,3 +4221,91 @@ ${"|\n".repeat(barePipes)}${row}
     expect(rows.every((row) => splitRow(row).length === 5)).toBe(true);
   });
 });
+
+describe("only the row the lost inserts point at", () => {
+  const impactLog = (rows: string[]) => `# Impact Log
+
+## Impact Timeline
+
+| Date | Achievement | Scope | Core Value | Evidence |
+|------|-------------|-------|------------|----------|
+${rows.join("\n")}
+
+**Last significant impact:** 2026-01-15
+**Current gap:** None - recent entry added
+`;
+
+  // Ten cells, with a date-looking fragment where a second entry would start: what the
+  // 1.x writer produced from an evidence string the model wrote with pipes in it.
+  const WIDE_EVIDENCE = "| 2026-01-20 | fourth | Team | Own It | X | 2025-04 | PR-2 | dashboard | 20% | rollout note |";
+  const JOINED_PAIR = "| 2026-01-15 | third | Team | Own It | X | 2026-01-01 | first | Team | Own It | Z |";
+
+  it("splits the damaged row and reports the wide one beside it", async () => {
+    const path = join(tmpDir, "impact-log.md");
+    await writeFile(path, impactLog(["|", JOINED_PAIR, WIDE_EVIDENCE]));
+
+    const result = await migrateVaultRecordsFile(path, "impact-log", new Date(2026, 0, 21));
+
+    // One lost insert, so one entry recovered, and nothing invented from the other row.
+    expect(result).toMatchObject({ unjoined: 1, unjoinSkipped: [10] });
+
+    const content = await readFile(path, "utf-8");
+    expect(content).toContain("| 2026-01-15 | third | Team | Own It | X |");
+    expect(content).toContain("| 2026-01-01 | first | Team | Own It | Z |");
+    expect(content).toContain(WIDE_EVIDENCE);
+    // Its tail is a substring of the row itself, so the test is whether a row was
+    // fabricated from it, not whether the text appears.
+    expect(content.split("\n")).not.toContain("| 2025-04 | PR-2 | dashboard | 20% | rollout note |");
+  });
+
+  it("splits nothing when the lost inserts are not against the wide row", async () => {
+    const path = join(tmpDir, "impact-log.md");
+    // A row of its own sits between the run and the wide row, so this is not the shape
+    // the bug leaves and the run says nothing about that row.
+    const file = impactLog(["| 2026-01-10 | second | Team | Own It | Y |", "|", JOINED_PAIR]);
+    await writeFile(path, file);
+
+    const result = await migrateVaultRecordsFile(path, "impact-log", new Date(2026, 0, 21));
+
+    expect(result?.unjoined ?? 0).toBe(0);
+    expect(result?.unjoinSkipped ?? []).toEqual([10]);
+    expect(await readFile(path, "utf-8")).toContain(JOINED_PAIR);
+  });
+
+  it("splits nothing when the run is broken by another row", async () => {
+    const path = join(tmpDir, "impact-log.md");
+    await writeFile(path, impactLog(["|", "| 2026-01-10 | second | Team | Own It | Y |", "|", JOINED_PAIR]));
+
+    const result = await migrateVaultRecordsFile(path, "impact-log", new Date(2026, 0, 21));
+
+    // The run is one pipe long and the row after it is an ordinary row, so the wide
+    // row further down is nobody's business.
+    expect(result?.unjoined ?? 0).toBe(0);
+    expect(result?.unjoinSkipped ?? []).toEqual([10]);
+  });
+});
+
+describe("a duplicate that lists the same evidence twice", () => {
+  it("carries that value across once", async () => {
+    const path = join(tmpDir, "impact-log.md");
+    await writeFile(path, `# Impact Log
+
+## Impact Timeline
+
+| Date | Achievement | Scope | Core Value | Evidence |
+|------|-------------|-------|------------|----------|
+|
+| 2026-01-08 | second | Team | Own It | A | 2026-01-08 | second | Team | Own It | B, B |
+
+**Last significant impact:** 2026-01-08
+**Current gap:** None - recent entry added
+`);
+
+    const result = await migrateVaultRecordsFile(path, "impact-log", new Date(2026, 0, 9));
+
+    expect(result).toMatchObject({ unjoined: 1, duplicates: 1 });
+    const content = await readFile(path, "utf-8");
+    expect(content).toContain("| A, B |");
+    expect(content).not.toContain("B, B");
+  });
+});

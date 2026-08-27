@@ -398,8 +398,10 @@ function rawAdditions(
 
   const picked: string[] = [];
   for (const [i, value] of parsed.entries()) {
+    // Consumed, not just matched: a duplicate row that lists the same value twice
+    // would otherwise append it twice, though the merge decided on it once.
     // Falls back to escaping if the two ever disagree on where a value ends.
-    if (wanted.has(value)) picked.push(raw[i] ?? escapeCell(value));
+    if (wanted.delete(value)) picked.push(raw[i] ?? escapeCell(value));
   }
   return picked.join(style.joiner);
 }
@@ -1796,14 +1798,15 @@ function unjoinImpactRows(content: string, width: number): UnjoinedRows {
 
   const rowEnd = Math.min(table.rowEnd, scope);
 
-  // The damage signs itself: the 1.x insert left the row's own leading pipe behind on
-  // a line of its own, once per entry it swallowed. Counted before the placeholder
-  // pass removes them, that count is the proof a split is a repair rather than a
-  // guess, and it is what separates this from a row whose cells simply contain pipes.
-  let barePipes = 0;
-  for (let i = table.rowStart; i < rowEnd; i++) {
-    if (lines[i].trim() === "|") barePipes++;
-  }
+  // The damage signs itself, and in one shape only: every 1.x insert went in directly
+  // under the separator, so the file shows a run of the leading pipes it left behind
+  // and then, immediately after them, the row that swallowed their entries. Nothing
+  // else in the table is a candidate, whatever its cells look like: a run counted
+  // table-wide would let one real loss license the splitting of an unrelated row.
+  let afterRun = table.rowStart;
+  while (afterRun < rowEnd && lines[afterRun].trim() === "|") afterRun++;
+  const lostInserts = afterRun - table.rowStart;
+  const joinedIdx = lostInserts > 0 && afterRun < rowEnd ? afterRun : -1;
 
   const repaired: string[] = [];
   const unjoinSkipped: number[] = [];
@@ -1821,8 +1824,8 @@ function unjoinImpactRows(content: string, width: number): UnjoinedRows {
     const entries = cells / width;
     const looksJoined =
       Number.isInteger(entries) && Array.from({ length: entries }, (_, k) => k).every(startsAnEntry);
-    // A row of N entries can only have come from N-1 lost inserts.
-    if (!looksJoined || barePipes !== entries - 1) {
+    // The row the run points at, holding exactly the entries the run accounts for.
+    if (i !== joinedIdx || !looksJoined || entries !== lostInserts + 1) {
       unjoinSkipped.push(cells);
       repaired.push(lines[i]);
       continue;
