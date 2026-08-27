@@ -620,6 +620,12 @@ export function applyFocusUpdates(content: string, options: ApplyFocusOptions): 
   for (const id of reviewedIds) {
     const target = byId.get(id);
     if (!target || !isOpenFocusStatus(target.status) || answeredIds.has(id)) continue;
+
+    // The week that made a commitment is not also a review of it. Regenerating a week
+    // injects the item that same week created, and counting that as an unanswered review
+    // meant three runs of one week lapsed the commitment the week itself had set.
+    if (target.week === weekLabel) continue;
+
     target.reviews++;
     if (target.reviews >= lapseAfter) {
       target.status = FOCUS_LAPSED_STATUS;

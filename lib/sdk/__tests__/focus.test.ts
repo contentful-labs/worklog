@@ -242,6 +242,48 @@ describe("applyFocusUpdates", () => {
     expect(second.content).toContain("| 2026-W10.1 | 2026-W10 | Ship fix | completed | 0 | done |");
   });
 
+  it("does not age the commitment the week being regenerated created", () => {
+    // The item is open by the time a rerun reads the file, so the rerun injects it and
+    // gets no answer. Counting that as an unanswered review lapsed the commitment after
+    // three runs of one week.
+    const created = applyFocusUpdates(base, {
+      reviewedIds: [], updates: [], newItems: ["Ship fix"], weekLabel: "2026-W10",
+    });
+    expect(created.content).toContain("| 2026-W10.1 | 2026-W10 | Ship fix | pending | 0 |");
+
+    let content = created.content;
+    for (let run = 0; run < 3; run++) {
+      const rerun = applyFocusUpdates(content, {
+        reviewedIds: ["2026-W10.1"], updates: [], newItems: ["Ship fix"], weekLabel: "2026-W10",
+      });
+      expect(rerun.lapsed).toBe(0);
+      content = rerun.content;
+    }
+
+    expect(content).toContain("| 2026-W10.1 | 2026-W10 | Ship fix | pending | 0 |");
+    expect(content).not.toContain("lapsed");
+  });
+
+  it("still lapses an unanswered commitment once later weeks review it", () => {
+    // The accountability mechanism itself is unchanged: two later reviews still close it.
+    const created = applyFocusUpdates(base, {
+      reviewedIds: [], updates: [], newItems: ["Ship fix"], weekLabel: "2026-W10",
+    });
+
+    const week11 = applyFocusUpdates(created.content, {
+      reviewedIds: ["2026-W10.1"], updates: [], newItems: [], weekLabel: "2026-W11",
+    });
+    expect(week11.lapsed).toBe(0);
+    expect(week11.content).toContain("| 2026-W10.1 | 2026-W10 | Ship fix | pending | 1 |");
+
+    const week12 = applyFocusUpdates(week11.content, {
+      reviewedIds: ["2026-W10.1"], updates: [], newItems: [], weekLabel: "2026-W12",
+    });
+    expect(week12.lapsed).toBe(1);
+    expect(week12.content).toContain("| 2026-W10.1 | 2026-W10 | Ship fix | lapsed | 2 |");
+    expect(week12.content).toContain("lapsed after 2 reviews without follow-through");
+  });
+
   it("counts a restatement only when the row it matches is from an earlier week", () => {
     const first = applyFocusUpdates(base, {
       reviewedIds: [], updates: [], newItems: ["Add regression coverage"], weekLabel: "2026-W10",
