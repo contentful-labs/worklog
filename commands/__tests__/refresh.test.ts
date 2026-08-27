@@ -574,3 +574,52 @@ describe("which credentials a refresh actually needs", () => {
     }
   });
 });
+
+describe("a week another source left half-read", () => {
+  const halfRead: SourceBatch = {
+    snapshots: [],
+    events: [{
+      source: "github", kind: "review", itemId: "https://github.com/example-org/repo/pull/7",
+      at: "2026-09-01T09:00:00.000Z", payload: {}, id: "r-1",
+    }],
+    warnings: ["page two would not load"],
+    incomplete: true,
+  };
+
+  function source(name: string, batch: SourceBatch): Source {
+    return {
+      name,
+      isAvailable: async () => ({ ok: true }),
+      fetchWindow: async () => batch,
+      fetchSince: async () => batch,
+    };
+  }
+
+  beforeEach(async () => {
+    await mkdir(vault, { recursive: true });
+  });
+
+  it("is still held back by a later run that only reads a different source", async () => {
+    // The trigger: GitHub's page two fails for this week, then the user runs
+    // `refresh --source jira --week W`. That run finds nothing incomplete of its own, so
+    // without a memory of the first one it writes the week up from half of GitHub.
+    const first = await runOnce(source("github", halfRead));
+    expect(first.written).toEqual([]);
+    expect(first.unfinished).toEqual(["2026-W36"]);
+
+    const jiraOnly = await runOnce(source("jira", oneComment));
+
+    expect(jiraOnly.written).toEqual([]);
+    expect(jiraOnly.unfinished).toEqual(["2026-W36"]);
+  });
+
+  it("is written once the source that fell short catches up", async () => {
+    await runOnce(source("github", halfRead));
+
+    const whole: SourceBatch = { ...halfRead, warnings: [], incomplete: undefined };
+    const second = await runOnce(source("github", whole));
+
+    expect(second.unfinished).toEqual([]);
+    expect(second.written.map((week) => week.weekId)).toEqual(["2026-W36"]);
+  });
+});

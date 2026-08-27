@@ -855,3 +855,109 @@ describe("a source that says it did not finish", () => {
     expect(asked).toEqual([firstRun.toISOString(), firstRun.toISOString()]);
   });
 });
+
+describe("metadata that exists but says nothing", () => {
+  async function seed(contents: string): Promise<void> {
+    await mkdir(root, { recursive: true });
+    await writeFile(join(root, "meta.json"), contents, "utf-8");
+  }
+
+  it.each([
+    ["a file of no bytes at all", ""],
+    ["a file of whitespace", "\n  \n"],
+    ["an object with nothing in it", "{}"],
+    ["an object missing the sources it is supposed to describe", '{"version": 3}'],
+  ])("is damage rather than a fresh install: %s", async (_name, contents) => {
+    // The trigger: any of these satisfies a schema made entirely of defaults, so the run
+    // reads as a first install — and then every event already on disk looks unwritten,
+    // and the whole history goes back to the coach.
+    await seed(contents);
+
+    const ledger = await openLedger(root);
+
+    expect(ledger.unusable()).toContain("meta.json");
+    expect(ledger.unusable()).toContain("delete");
+  });
+
+  it("is still a fresh install when there is no file", async () => {
+    const ledger = await openLedger(root);
+    expect(ledger.unusable()).toBeUndefined();
+  });
+});
+
+describe("two things that share a number", () => {
+  it("are both kept, because an id is only an id of one kind of thing", async () => {
+    // The trigger: GitHub numbers reviews and issue comments separately, so review 42 and
+    // comment 42 on the same pull request are different things. Keying on the id alone
+    // made the second of them a duplicate of the first and dropped it.
+    const ledger = await openLedger(root);
+    const at = "2026-08-31T11:00:00.000Z";
+    const result = ledger.record("github", batch({
+      events: [
+        { source: "github", kind: "review", itemId: "https://github.com/example-org/repo/pull/7", at, payload: {}, id: "42" },
+        { source: "github", kind: "comment", itemId: "https://github.com/example-org/repo/pull/7", at, payload: {}, id: "42" },
+      ],
+    }), seenAt);
+
+    expect(result.addedEvents).toBe(2);
+    expect(ledger.eventsForWeek("2026-W36").map((event) => event.kind).sort()).toEqual(["comment", "review"]);
+  });
+
+  it("still matches a genuine repeat of the same event", async () => {
+    const ledger = await openLedger(root);
+    const event = {
+      source: "github", kind: "review", itemId: "https://github.com/example-org/repo/pull/7",
+      at: "2026-08-31T11:00:00.000Z", payload: {}, id: "42",
+    };
+    ledger.record("github", batch({ events: [event] }), seenAt);
+    const again = ledger.record("github", batch({ events: [event] }), seenAt);
+
+    expect(again.addedEvents).toBe(0);
+  });
+});
+
+describe("a cache written before event keys named the kind", () => {
+  it("keeps knowing which weeks have already been written up", async () => {
+    // The trigger: bumping the key format makes every stored key stale, so a week that
+    // was written up looks untold and the coach is handed its events a second time. The
+    // events are still on disk, and each one knows both names.
+    const event = {
+      source: "github", kind: "review", itemId: "https://github.com/example-org/repo/pull/7",
+      at: "2026-08-31T11:00:00.000Z", payload: {}, id: "42",
+    };
+    await mkdir(join(root, "events"), { recursive: true });
+    await writeFile(join(root, "events", "2026-W36.json"), JSON.stringify([event], null, 2), "utf-8");
+    await writeFile(join(root, "meta.json"), JSON.stringify({
+      version: 2,
+      sources: { github: { windows: { "2026-W36": "2026-09-07T10:00:00.000Z" }, state: {} } },
+      // How version 2 wrote it: the source and the id, and nothing about the kind.
+      written: { "2026-W36": ["github|42"] },
+    }), "utf-8");
+
+    const ledger = await openLedger(root);
+
+    expect(ledger.unwrittenEvents("2026-W36")).toEqual([]);
+    expect(ledger.pendingWeeks()).toEqual([]);
+    expect(ledger.notices()[0]).toContain("older version");
+  });
+});
+
+describe("a week left half-read by a run that is over", () => {
+  it("is remembered on disk, so another source's run still declines to write it", async () => {
+    // The trigger: GitHub's page two fails for W, then `refresh --source jira --week W`.
+    // The second run finds nothing incomplete of its own and would write W from the half
+    // of GitHub that did arrive.
+    const first = await openLedger(root);
+    first.markIncomplete("github", "2026-W36");
+    await first.save();
+
+    const second = await openLedger(root);
+    expect(second.incompleteWeeks()).toEqual(["2026-W36"]);
+
+    second.clearIncomplete("github", "2026-W36");
+    await second.save();
+
+    const third = await openLedger(root);
+    expect(third.incompleteWeeks()).toEqual([]);
+  });
+});

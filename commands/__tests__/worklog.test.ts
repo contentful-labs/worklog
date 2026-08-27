@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -525,6 +525,72 @@ describe("a ledger whose metadata cannot be read", () => {
       expect(vi.mocked(aiQueryStructured)).not.toHaveBeenCalled();
       expect(readFileSync(join(vault, `${WEEK} Brag Book.md`), "utf8")).toBe(EXISTING_BRAG_BOOK);
       expect(readFileSync(join(vault, `${WEEK} Work Log.md`), "utf8")).toBe(EXISTING_WORK_LOG);
+    } finally {
+      if (previousConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
+      else process.env.XDG_CONFIG_HOME = previousConfigHome;
+      if (previousCacheHome === undefined) delete process.env.XDG_CACHE_HOME;
+      else process.env.XDG_CACHE_HOME = previousCacheHome;
+      if (previousAtlassian === undefined) delete process.env.ATLASSIAN_API_TOKEN;
+      else process.env.ATLASSIAN_API_TOKEN = previousAtlassian;
+      if (previousGitHub === undefined) delete process.env.GITHUB_TOKEN;
+      else process.env.GITHUB_TOKEN = previousGitHub;
+      exit.mockRestore();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("a corrupt ledger and a vault that still needs migrating", () => {
+  it("stops before it has rewritten anything in the vault", async () => {
+    // The trigger: invalid meta.json plus a legacy weekly document with no frontmatter.
+    // Running the migrations first rewrites the document and leaves a backup behind, and
+    // only then does the run stop — so a user who has to go and repair the cache finds
+    // their vault already changed by a run that did nothing else.
+    const tmp = mkdtempSync(join(tmpdir(), "worklog-order-migrate-"));
+    const configHome = join(tmp, "config");
+    const cacheHome = join(tmp, "cache");
+    const vault = join(tmp, "vault");
+    const previousConfigHome = process.env.XDG_CONFIG_HOME;
+    const previousCacheHome = process.env.XDG_CACHE_HOME;
+    const previousAtlassian = process.env.ATLASSIAN_API_TOKEN;
+    const previousGitHub = process.env.GITHUB_TOKEN;
+
+    seedVault(vault);
+    writeConfig(configHome, vault);
+    // A weekly document from before frontmatter existed.
+    const legacy = join(vault, "2026-W08 Work Log.md");
+    const legacyContent = "# Work Log - Week 08, 2026\n\nSomething that happened.\n";
+    writeFileSync(legacy, legacyContent);
+
+    mkdirSync(join(cacheHome, "worklog", "ledger"), { recursive: true });
+    writeFileSync(join(cacheHome, "worklog", "ledger", "meta.json"), "{ not json");
+
+    process.env.XDG_CONFIG_HOME = configHome;
+    process.env.XDG_CACHE_HOME = cacheHome;
+    process.env.ATLASSIAN_API_TOKEN = "test-atlassian-token";
+    process.env.GITHUB_TOKEN = "test-github-token";
+
+    vi.stubGlobal("Bun", {
+      write: async (path: string, content: string) => writeFileSync(path, content),
+      file: (path: string) => ({ text: async () => readFileSync(path, "utf8") }),
+    });
+
+    const exited: number[] = [];
+    const exit = vi.spyOn(process, "exit").mockImplementation((code) => {
+      exited.push(Number(code ?? 0));
+      throw new Error("process.exit");
+    });
+
+    try {
+      vi.resetModules();
+      const { runWorklog } = await import("../worklog");
+
+      await expect(runWorklog({ week: WEEK, noPrompt: true, force: true, verbose: false })).rejects.toThrow("process.exit");
+
+      expect(exited).toEqual([1]);
+      // The legacy document is exactly as it was, and no backup was left beside it.
+      expect(readFileSync(legacy, "utf8")).toBe(legacyContent);
+      expect(readdirSync(vault).filter((name) => name.includes("backup") || name.endsWith(".bak"))).toEqual([]);
     } finally {
       if (previousConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
       else process.env.XDG_CONFIG_HOME = previousConfigHome;
