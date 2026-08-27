@@ -264,10 +264,25 @@ function sectionHasContent(nodes: RootContent[], index: number, depth: number): 
       if (node.depth <= depth) return false;
       continue;
     }
-    // An HTML comment or a horizontal rule is structure the template carries, not work.
-    if (node.type === "html" || node.type === "thematicBreak") continue;
-    if (nodeText(node).trim() !== "") return true;
+    if (hasVisibleText(node)) return true;
   }
+  return false;
+}
+
+/**
+ * Does this node put any of the week's words on the page?
+ *
+ * Only text, inline code and code blocks count, and only when they are not blank. An
+ * `html` node is the template's own scaffolding, such as the COACHING_SESSION marker or
+ * a `<!-- nothing to report -->` comment, and it is skipped at every depth: a list item
+ * or blockquote wrapping nothing but a comment is still an empty section.
+ */
+function hasVisibleText(node: RootContent): boolean {
+  if (node.type === "html") return false;
+  if (node.type === "text" || node.type === "inlineCode" || node.type === "code") {
+    return node.value.trim() !== "";
+  }
+  if ("children" in node) return node.children.some(hasVisibleText);
   return false;
 }
 

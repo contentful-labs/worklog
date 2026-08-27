@@ -1732,7 +1732,7 @@ function nextBackupPath(path: string): string {
  * link is resolved first and the target's mode carried over, so the file the user set up
  * is still the file they have afterwards.
  */
-async function writeFileAtomic(path: string, content: string): Promise<void> {
+export async function writeFileAtomic(path: string, content: string): Promise<void> {
   const link = await lstat(path).catch(() => null);
   const target = link?.isSymbolicLink() ? await realpath(path) : path;
   const existing = await stat(target).catch(() => null);

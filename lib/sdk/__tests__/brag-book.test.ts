@@ -131,9 +131,24 @@ describe("validateBragBookMarkdown", () => {
     );
   });
 
-  it("does not count template structure as content", () => {
-    const structureOnly = "## Achievements\n\n<!-- nothing to report -->\n\n---\n\n## Stats\n\n- 0";
-    expect(() => validateBragBookMarkdown(structureOnly)).toThrow(/achievements section is empty/);
+  it.each([
+    ["a bare comment", "<!-- nothing to report -->\n\n---"],
+    ["a comment inside a list item", "- <!-- nothing to report -->"],
+    ["a comment inside a blockquote", "> <!-- nothing to report -->"],
+    ["a comment nested two deep", "> - <!-- nothing to report -->"],
+  ])("does not count %s as content", (_name, body) => {
+    // html is scaffolding at every depth, not just at the top of the section.
+    expect(() => validateBragBookMarkdown(`## Achievements\n\n${body}\n\n## Stats\n\n- 0`)).toThrow(
+      /achievements section is empty/,
+    );
+  });
+
+  it.each([
+    ["a list item", "- Shipped auth"],
+    ["a blockquote", "> Shipped auth, see TEAM-1234"],
+    ["a list item beside a comment", "- <!-- note -->\n- Shipped auth"],
+  ])("counts %s as content", (_name, body) => {
+    expect(() => validateBragBookMarkdown(`## Achievements\n\n${body}`)).not.toThrow();
   });
 
   it("accepts the line the prompt asks for when the week was quiet", () => {
@@ -178,6 +193,11 @@ describe("toBragBookResult refuses to overwrite a real brag book", () => {
   it.each([
     ["a blank document", "\n \n", /empty brag book/],
     ["a bare heading", "# Brag Book - Week 09, 2026\n\n## Achievements", /achievements section is empty/],
+    [
+      "a section holding only a comment",
+      "# Brag Book - Week 09, 2026\n\n## Achievements\n\n- <!-- nothing -->",
+      /achievements section is empty/,
+    ],
   ])("leaves an existing entry untouched when the model returns %s", async (_name, markdown, problem) => {
     const path = join(tmpDir, "2026-W09 Brag Book.md");
     await writeFile(path, EXISTING, "utf-8");

@@ -63,6 +63,7 @@ import {
   migrateFocusTrackingFile,
   migrateVaultRecordsFile,
   isIsoDate,
+  writeFileAtomic,
 } from "../lib/sdk/vault-updates";
 import { createLogger } from "../lib/sdk/logger";
 
@@ -653,12 +654,15 @@ export async function runWorklog(opts: {
     const bragMs = Math.round(performance.now() - bragStart);
     s.stop(`Brag book generated in ${formatDuration(bragMs)}`);
 
-    // The week is validated now, so both documents land together.
+    // The week is validated now, so both documents land. Each write is atomic, and the
+    // brag book goes first: it is the record that cannot be rebuilt without another
+    // generation, so a failure there must leave the previous week intact, while a failure
+    // on the work log leaves a brag book that is already correct.
     const bragBookPath = `${paths.vault}/${wid} Brag Book.md`;
-    await Bun.write(workLogPath, markdown);
-    await Bun.write(bragBookPath, bragBookContent);
-    log(`Work log written: ${workLogPath} (${markdown.length} chars)`);
+    await writeFileAtomic(bragBookPath, bragBookContent);
     log(`Brag book written: ${bragBookPath} (${bragBookContent.length} chars)`);
+    await writeFileAtomic(workLogPath, markdown);
+    log(`Work log written: ${workLogPath} (${markdown.length} chars)`);
     lastBragBookPath = bragBookPath;
     lastBragBookContent = bragBookContent;
 

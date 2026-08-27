@@ -15,6 +15,12 @@ vi.mock("../../lib/sdk/data-fetch", () => ({
   fetchDataForWeek: async () => ({ issues: [], pages: [], prs: [], reviews: [], teamSprintItems: [] }),
 }));
 
+// Only writeFileAtomic is stood in for, so the rest of the vault writers stay real.
+vi.mock("../../lib/sdk/vault-updates", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../lib/sdk/vault-updates")>();
+  return { ...actual, writeFileAtomic: vi.fn(actual.writeFileAtomic) };
+});
+
 vi.mock("@clack/prompts", () => ({
   intro: vi.fn(),
   outro: vi.fn(),
@@ -130,6 +136,67 @@ describe("runWorklog write ordering", () => {
       expect(readFileSync(join(vault, `${WEEK} Work Log.md`), "utf8")).toBe(EXISTING_WORK_LOG);
       expect(readFileSync(join(vault, `${WEEK} Brag Book.md`), "utf8")).toBe(EXISTING_BRAG_BOOK);
     } finally {
+      if (previousConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
+      else process.env.XDG_CONFIG_HOME = previousConfigHome;
+      if (previousAtlassian === undefined) delete process.env.ATLASSIAN_API_TOKEN;
+      else process.env.ATLASSIAN_API_TOKEN = previousAtlassian;
+      if (previousGitHub === undefined) delete process.env.GITHUB_TOKEN;
+      else process.env.GITHUB_TOKEN = previousGitHub;
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("leaves both originals intact when the brag book write fails", async () => {
+    let realWrite: ((path: string, content: string) => Promise<void>) | undefined;
+    let restoreWrite = () => {};
+    const tmp = mkdtempSync(join(tmpdir(), "worklog-order-fail-"));
+    const configHome = join(tmp, "config");
+    const vault = join(tmp, "vault");
+    const previousConfigHome = process.env.XDG_CONFIG_HOME;
+    const previousAtlassian = process.env.ATLASSIAN_API_TOKEN;
+    const previousGitHub = process.env.GITHUB_TOKEN;
+
+    seedVault(vault);
+    writeConfig(configHome, vault);
+    process.env.XDG_CONFIG_HOME = configHome;
+    process.env.ATLASSIAN_API_TOKEN = "test-atlassian-token";
+    process.env.GITHUB_TOKEN = "test-github-token";
+
+    vi.stubGlobal("Bun", {
+      write: async (path: string, content: string) => writeFileSync(path, content),
+      file: (path: string) => ({ text: async () => readFileSync(path, "utf8") }),
+    });
+
+    try {
+      vi.resetModules();
+      const { aiQueryStructured } = await import("../../lib/sdk/ai");
+      vi.mocked(aiQueryStructured).mockResolvedValue({
+        ...BAD_OUTPUT,
+        bragBookMarkdown: "# Brag Book - Week 09, 2026\n\n## Achievements\n\n- Shipped the thing",
+      });
+
+      // The brag book is written first, so failing it must leave the work log alone too.
+      // vi.clearAllMocks keeps implementations, so the real one is put back below.
+      const { writeFileAtomic: mocked } = await import("../../lib/sdk/vault-updates");
+      realWrite = vi.mocked(mocked).getMockImplementation();
+      restoreWrite = () => {
+        if (realWrite) vi.mocked(mocked).mockImplementation(realWrite);
+      };
+      vi.mocked(mocked).mockImplementation(async (path: string, content: string) => {
+        if (path.endsWith("Brag Book.md")) throw new Error("simulated disk failure");
+        // Every other write is real, so a work log written before the failure would show.
+        if (realWrite) await realWrite(path, content);
+      });
+
+      const { runWorklog } = await import("../worklog");
+      await expect(
+        runWorklog({ week: WEEK, noPrompt: true, force: true, verbose: false }),
+      ).rejects.toThrow(/simulated disk failure/);
+
+      expect(readFileSync(join(vault, `${WEEK} Work Log.md`), "utf8")).toBe(EXISTING_WORK_LOG);
+      expect(readFileSync(join(vault, `${WEEK} Brag Book.md`), "utf8")).toBe(EXISTING_BRAG_BOOK);
+    } finally {
+      restoreWrite();
       if (previousConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
       else process.env.XDG_CONFIG_HOME = previousConfigHome;
       if (previousAtlassian === undefined) delete process.env.ATLASSIAN_API_TOKEN;

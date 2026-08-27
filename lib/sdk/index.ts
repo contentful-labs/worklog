@@ -108,6 +108,7 @@ export type {
 export {
   updateMemory, updateImpactLog, updateWorkContext, updateProfile,
   updateFocusTracking, migrateFocusTrackingFile, migrateVaultRecordsFile, isPlaceholder, isIsoDate,
+  writeFileAtomic,
 } from "./vault-updates";
 
 // Data fetching
