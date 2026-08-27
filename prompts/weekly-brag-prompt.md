@@ -241,7 +241,10 @@ tags:
 ### Focus for Next Week
 
 1-2 concrete, actionable suggestions based on THIS week's context.
-Reference actual projects, tickets, or patterns. Generic advice is useless.
+
+Every suggestion must name one artifact from this week's work log: a ticket key, a pull request, a Confluence page, or a Slack thread. A suggestion with nothing to point at is generic advice, and generic advice is useless.
+
+Do not restate something already listed in `open_focus_items`. The engineer wrote those down and can read them. If the best thing to say next week is an item that is already open, say nothing new here and return its status in `focusStatuses` instead.
 
 If the work log includes a "Team Sprint Items" section, use it to ground suggestions in what the team is actually working on. Suggest items the engineer could pick up, contribute to, or stay aware of — even if not directly assigned to them.
 
