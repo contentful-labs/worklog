@@ -141,6 +141,18 @@ describe("summarizeArchivedFocusDocs", () => {
     expect(summary).toContain("**Dropped** the second spike");
   });
 
+  it("does not also carry a closed item as though it were still open", () => {
+    const summary = summarizeArchivedFocusDocs(ARCHIVED_FOCUS);
+    const carriedAt = summary.indexOf("## Open items carried across archived focus docs");
+
+    expect(carriedAt).toBeGreaterThan(-1);
+    // remark runs here without the GFM plugin, so a ticked box arrives as literal `[x]` text
+    // rather than as `checked`. Reading it wrong files a finished item as a stale one.
+    expect(summary.slice(carriedAt)).not.toContain("Ship the rollout");
+    expect(summary.slice(carriedAt)).not.toContain("Rewrite the importer");
+    expect(summary.slice(carriedAt)).not.toContain("Wrote the RFC");
+  });
+
   it("carries open items into one compact list instead of repeating them", () => {
     const summary = summarizeArchivedFocusDocs(ARCHIVED_FOCUS);
 
