@@ -8,8 +8,9 @@ import {
   type VaultNote,
 } from "../../lib/sdk/vault";
 import type { TeamTimeline } from "../../lib/sdk/vault";
+import { selectOpenFocusItems, summarizeFocusHistory, DEFAULT_INJECT_CAP } from "../../lib/sdk/focus";
 import {
-  config, timeline, weekInfo, previousBragBooks, workContextContent, focusDocContent,
+  config, timeline, weekInfo, focusTrackingContent, previousBragBooks, workContextContent, focusDocContent,
   focusHistoryContent, memoryContent, profileContent, impactLogContent, coachPersona,
   careerContext, workLogContent, vaultNotes, vaultNotesBefore,
 } from "./prompt-fixtures";
@@ -20,6 +21,10 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+/** What the weekly command derives from `focus-tracking.md` before calling the builder. */
+const openFocusItems = selectOpenFocusItems(focusTrackingContent, DEFAULT_INJECT_CAP);
+const focusHistorySummary = summarizeFocusHistory(focusTrackingContent, "2026-W01");
+
 async function buildPrompt() {
   // vitest runs on node, and the builder reads the prompt templates through Bun.file.
   vi.stubGlobal("Bun", { file: (path: string) => ({ text: async () => readFileSync(path, "utf8") }) });
@@ -29,7 +34,7 @@ async function buildPrompt() {
   return buildBragBookPrompt(
     workLogContent, previousBragBooks, workContextContent, memoryContent, profileContent,
     impactLogContent, coachPersona, focusDocContent, focusHistoryContent, careerContext,
-    vaultNotes, [], "", null, timeline, weekInfo, config,
+    vaultNotes, openFocusItems, focusHistorySummary, null, timeline, weekInfo, config,
   );
 }
 
@@ -158,11 +163,32 @@ describe("brag book prompt size", () => {
     const { prompt, sections } = await buildPrompt();
 
     expect(Object.keys(sections).sort()).toEqual([
-      "career", "context", "focus", "framing", "impact", "memory", "notes",
-      "persona", "priorBrags", "profile", "template", "worklog",
+      "career", "context", "focusArchives", "focusDoc", "focusHistorySummary", "focusOpenItems",
+      "framing", "impact", "memory", "notes", "persona", "priorBrags", "profile", "template",
+      "worklog",
     ]);
 
     const total = Object.values(sections).reduce((sum, n) => sum + n, 0);
     expect(total).toBe(prompt.length);
+  });
+
+  it("accounts for every character of the memory section", async () => {
+    const { sections, memoryInputs } = await buildPrompt();
+    const total = memoryInputs.liveRows + memoryInputs.olderRows + memoryInputs.other;
+
+    expect(total).toBe(sections.memory);
+    expect(memoryInputs.liveRows).toBeGreaterThan(0);
+    expect(memoryInputs.olderRows).toBeGreaterThan(0);
+  });
+
+  it("never carries the focus-tracking table, only what the coach acts on", async () => {
+    const { prompt, sections } = await buildPrompt();
+
+    // 410 rows in the file; ten commitments and one tally line reach the prompt.
+    expect(focusTrackingContent.length).toBeGreaterThan(50_000);
+    expect(sections.focusOpenItems).toBeLessThan(2_000);
+    expect(sections.focusHistorySummary).toBeLessThan(200);
+    expect(prompt).not.toContain("Notes on commitment 0");
+    expect(prompt).not.toContain("Focus commitment 0,");
   });
 });

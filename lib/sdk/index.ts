@@ -54,7 +54,10 @@ export {
   rankVaultNotes,
   ticketPrefixesForWeek,
   containsIdentifier,
+  DEFAULT_MEMORY_FULL_WEEKS,
   DEFAULT_ORG_NOTE_CAP,
+  DEFAULT_SINGLE_ARCHIVE_CAP,
+  condenseMemoryNotes,
   DEFAULT_VAULT_NOTE_CAP,
   DEFAULT_VAULT_NOTE_LINES,
 } from "./vault";

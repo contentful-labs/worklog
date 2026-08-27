@@ -8,6 +8,8 @@ import {
   summarizeArchivedFocusDocs,
   summarizePreviousBragBooks,
   ticketPrefixesForWeek,
+  condenseMemoryNotes,
+  DEFAULT_SINGLE_ARCHIVE_CAP,
   DEFAULT_ORG_NOTE_CAP,
   DEFAULT_VAULT_NOTE_CAP,
   type TeamTimelineEntry,
@@ -587,5 +589,130 @@ describe("containsIdentifier", () => {
     ["TEAM-123", "", false],
   ])("%s contains %s: %s", (haystack, needle, expected) => {
     expect(containsIdentifier(haystack, needle)).toBe(expected);
+  });
+});
+
+function memoryTable(rows: Array<{ date: string; item: string; notes: string }>): string {
+  return [
+    "# Memory",
+    "",
+    "## Core Team",
+    "",
+    "| Date | Item | Category | Notes |",
+    "|---|---|---|---|",
+    ...rows.map((r) => `| ${r.date} | ${r.item} | Category | ${r.notes} |`),
+  ].join("\n");
+}
+
+describe("condenseMemoryNotes", () => {
+  const table = memoryTable([
+    { date: "2026-03-10", item: "Recent contribution", notes: "Long notes about the recent one" },
+    { date: "2025-11-02", item: "Older contribution", notes: "Long notes about the older one" },
+  ]);
+
+  it("keeps every row, because the coach graduates items by quoting them", () => {
+    const { content } = condenseMemoryNotes(table, "2026-01-01");
+    const rows = content.split("\n").filter((line) => line.startsWith("| 20"));
+
+    expect(rows).toHaveLength(2);
+    expect(content).toContain("Recent contribution");
+    expect(content).toContain("Older contribution");
+  });
+
+  it("keeps the Item text of an older row byte for byte", () => {
+    const exact = memoryTable([
+      { date: "2025-11-02", item: "Shipped the `search` revamp \\| phase two", notes: "notes" },
+    ]);
+    const { content } = condenseMemoryNotes(exact, "2026-01-01");
+
+    expect(content).toContain("Shipped the `search` revamp \\| phase two");
+  });
+
+  it("drops the Notes cell of a row older than the window", () => {
+    const { content } = condenseMemoryNotes(table, "2026-01-01");
+
+    expect(content).toContain("Long notes about the recent one");
+    expect(content).not.toContain("Long notes about the older one");
+  });
+
+  it("keeps the column count so the table still parses", () => {
+    const { content } = condenseMemoryNotes(table, "2026-01-01");
+    const older = content.split("\n").find((line) => line.includes("Older contribution")) ?? "";
+
+    expect(older.split("|")).toHaveLength(6);
+  });
+
+  it("counts what it did, so the breakdown can report it", () => {
+    const { counts } = condenseMemoryNotes(table, "2026-01-01");
+
+    expect(counts.liveRows).toBeGreaterThan(0);
+    expect(counts.olderRows).toBeGreaterThan(0);
+  });
+
+  it("leaves rows alone when nothing is older than the window", () => {
+    const { content, counts } = condenseMemoryNotes(table, "2020-01-01");
+
+    expect(content).toBe(table);
+    expect(counts.olderRows).toBe(0);
+  });
+
+  it("ignores the header, the separator and a row with no date", () => {
+    const odd = memoryTable([{ date: "not-a-date", item: "No date", notes: "kept" }]);
+    const { content } = condenseMemoryNotes(odd, "2026-01-01");
+
+    expect(content).toContain("| Date | Item | Category | Notes |");
+    expect(content).toContain("kept");
+  });
+
+  it("does not touch a table inside a fenced block", () => {
+    const fenced = ["```md", "| 2020-01-01 | Example | Category | example notes |", "```"].join("\n");
+    const { content } = condenseMemoryNotes(fenced, "2026-01-01");
+
+    expect(content).toBe(fenced);
+  });
+});
+
+describe("summarizeArchivedFocusDocs one-off cap", () => {
+  function archives(repeated: number, oneOffs: number): string {
+    const shared = Array.from({ length: repeated }, (_, i) => `- Repeated item ${i}`);
+    const singles = Array.from({ length: oneOffs }, (_, i) => `- One-off item ${i}`);
+    return [
+      "### Focus Doc archived 2026-03-01",
+      "",
+      ...shared,
+      ...singles,
+      "",
+      "---",
+      "",
+      "### Focus Doc archived 2026-02-01",
+      "",
+      ...shared,
+    ].join("\n");
+  }
+
+  it("never drops an item that survived more than one version", () => {
+    const summary = summarizeArchivedFocusDocs(archives(40, 0), 5);
+
+    for (let i = 0; i < 40; i++) {
+      expect(summary).toContain(`- Repeated item ${i} _(first seen 2026-02-01, last seen 2026-03-01)_`);
+    }
+  });
+
+  it("caps the one-offs and says how many it left out", () => {
+    const summary = summarizeArchivedFocusDocs(archives(2, 30), 5);
+
+    expect(summary).toContain("- One-off item 0 _(seen in 2026-03-01)_");
+    expect(summary).not.toContain("- One-off item 29");
+    expect(summary).toContain("25 item(s) that appeared in only one archived version are not listed.");
+  });
+
+  it("keeps the stale signal even when the one-offs are capped", () => {
+    const summary = summarizeArchivedFocusDocs(archives(3, 30), 5);
+
+    expect(summary).toContain("- Repeated item 2 _(first seen 2026-02-01, last seen 2026-03-01)_");
+  });
+
+  it("says nothing about omissions when everything fits", () => {
+    expect(summarizeArchivedFocusDocs(archives(2, 3), DEFAULT_SINGLE_ARCHIVE_CAP)).not.toContain("not listed");
   });
 });
