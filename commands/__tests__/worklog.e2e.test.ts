@@ -409,7 +409,7 @@ describe("one week end to end", () => {
     }
   });
 
-  it("repeats the same week without drifting, bar two documented exceptions", async () => {
+  it("repeats the same week without drifting, bar the work log timestamp", async () => {
     const harness = setUp();
 
     try {
@@ -421,10 +421,8 @@ describe("one week end to end", () => {
       await second.runWorklog({ ...RUN });
       const afterTwo = { records: readRecords(harness.vault), generated: readGenerated(harness.vault) };
 
-      // The record files the writers dedupe: byte for byte.
-      for (const file of ["memory", "impactLog", "workContext", "profile"] as const) {
-        expect(afterTwo.records[file], `${file} drifted on the second run`).toBe(afterOne.records[file]);
-      }
+      // Every maintained file, byte for byte.
+      expect(afterTwo.records).toEqual(afterOne.records);
       expect(afterTwo.generated.bragBook).toBe(afterOne.generated.bragBook);
 
       // generateMarkdown stamps the work log with the moment it ran, so that line alone
@@ -436,20 +434,10 @@ describe("one week end to end", () => {
       expect(afterTwo.records.focusTracking).not.toContain("Paired once so far; Paired once so far");
       expect(afterTwo.records.focusTracking).not.toContain("restated");
 
-      // KNOWN DEFECT, one row. The commitment run one created is open by the time run two
-      // reads the file, so run two shows it to the coach as an outstanding item and ages
-      // it for going unanswered. Regenerating the same week three times therefore lapses
-      // the commitment that week itself created. lib/sdk/focus.ts applies its same-week
-      // rule to restatement but not to the aging loop that feeds on reviewedIds.
-      // Pinned rather than asserted away, so whoever fixes it sees this test go red.
-      const ownItem = (file: string) => file.split("\n").find((line) => line.includes(`${WEEK}.1`));
-      expect(ownItem(afterOne.records.focusTracking)).toContain("| pending | 0 |");
-      expect(ownItem(afterTwo.records.focusTracking)).toContain("| pending | 1 |");
-
-      // Nothing else in the file moved.
-      const withoutOwnItem = (file: string) =>
-        file.split("\n").filter((line) => !line.includes(`${WEEK}.1`)).join("\n");
-      expect(withoutOwnItem(afterTwo.records.focusTracking)).toBe(withoutOwnItem(afterOne.records.focusTracking));
+      // Including the commitment this week created, which a rerun used to age for going
+      // unanswered: the week that made it is not a review of it.
+      expect(afterTwo.records.focusTracking).toBe(afterOne.records.focusTracking);
+      expect(afterTwo.records.focusTracking).toContain(`| ${WEEK}.1 | ${WEEK} | Add regression coverage for cursor pagination | pending | 0 |`);
     } finally {
       harness.cleanup();
     }
