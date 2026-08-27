@@ -58,6 +58,7 @@ import {
   toBragBookResult,
   parseReviewCycle,
   ensureBragBookFrontmatter,
+  validatePreserved,
 } from "../lib/sdk/brag-book";
 import { bragBookOutputSchema } from "../lib/sdk/brag-book-schema";
 import {
@@ -765,6 +766,9 @@ export async function generateWeek(input: WeekGenerationInput): Promise<WeekGene
   const parsed = toBragBookResult(output);
   const { itemsToAdd, itemsToRemove, impactLogEntry, workContextUpdates, profileUpdate, focusItems, focusUpdates } = parsed;
   const bragBookContent = ensureBragBookFrontmatter(parsed.bragBookContent);
+  // Amending a week may add to it and may not take anything out of it. Checked here,
+  // before any write, so a week that would have lost an achievement keeps the one it had.
+  if (amend) validatePreserved(amend.existingBragBook, bragBookContent);
   const bragMs = Math.round(performance.now() - bragStart);
   s.stop(`Brag book generated in ${formatDuration(bragMs)}`);
 
@@ -1009,6 +1013,10 @@ export async function runWorklog(opts: {
     log(`Work log built: ${workLogPath} (${markdown.length} chars, not yet written)`);
 
     const week = await generateWeek({ weekInfo, wid, workLog: markdown, workLogPath, config, paths, timeline, log, spinner: s });
+    // The week is on disk, so it is no longer owed a write. Left unsaid, the next
+    // refresh would find it still pending and regenerate a week nothing had changed in.
+    ledger.markWritten(wid);
+    await ledger.save();
     lastBragBookPath = week.bragBookPath;
     lastBragBookContent = week.bragBookContent;
 

@@ -30,7 +30,9 @@ import { generateEventMarkdown } from "../lib/sdk/markdown";
 import { allSources } from "../lib/sdk/source-adapters";
 import { sourceContext, type Source, type SourceContext, type SourceEvent } from "../lib/sdk/sources";
 import { buildVaultPaths, getCurrentTeam, readTeamTimeline } from "../lib/sdk/vault";
-import { formatDuration, getWeekEnd, getWeekNumber, getWeekStart, weekId } from "../lib/sdk/week-utils";
+import {
+  formatDuration, getWeekEnd, getWeekNumber, getWeekStart, weekId, weekIdForDate,
+} from "../lib/sdk/week-utils";
 import { loadConfig } from "../lib/config";
 import { createLogger } from "../lib/sdk/logger";
 import { generateWeek, getEnvTokens } from "./worklog";
@@ -63,11 +65,13 @@ export function weeksInRange(from: Date, to: Date): CollectionWeek[] {
   const cursor = new Date(from);
 
   while (cursor <= to) {
-    const week = getWeekNumber(cursor);
-    const year = cursor.getUTCFullYear();
-    const id = weekId(week, year);
+    // Through the ISO helper, not by pairing a week number with a calendar year. The
+    // last days of December belong to the first week of the next ISO year, and pairing
+    // them by hand gives 2025-W01: a week whose range starts in 2024.
+    const id = weekIdForDate(cursor);
     if (!weeks.some((existing) => existing.weekId === id)) {
-      weeks.push(weekWindow(id, getWeekStart(week, year), getWeekEnd(week, year)));
+      const info = weekInfoFor(id);
+      weeks.push(weekWindow(id, info.startDate, info.endDate));
     }
     cursor.setUTCDate(cursor.getUTCDate() + 7);
   }
@@ -106,6 +110,8 @@ export interface WeekToWrite {
 export interface RefreshRun {
   rows: WeekRow[];
   outcome: CollectionOutcome;
+  /** Weeks that still need writing but fall outside the range this run covered. */
+  waiting: string[];
 }
 
 /**
@@ -131,16 +137,20 @@ export async function refreshWeeks(deps: {
 
   const outcome = await collectIntoLedger(ledger, sources, weeks, contextFor, now);
 
-  // A delta can turn up an event belonging to a week nobody asked about. It is filed,
-  // because it belongs there, but this run does not go and rewrite that week.
-  const changed = [...outcome.weeksChanged].filter((week) => before.has(week)).sort();
-  const rewritten = new Set(changed);
+  // Everything owed a write, not only what this run happened to find. A delta answers
+  // with events from any week, and a week whose events changed while nobody was looking
+  // at it stays owed until it is written: the next run would dedupe those events away
+  // and the vault would keep a stale week for good.
+  const owed = ledger.pendingWeeks();
+  const inRange = owed.filter((week) => before.has(week));
+  const waiting = owed.filter((week) => !before.has(week));
+  const rewritten = new Set(inRange);
   const rows: WeekRow[] = weeks.map((week) => ({
     weekId: week.weekId,
     regenerated: rewritten.has(week.weekId),
   }));
 
-  for (const weekId of changed) {
+  for (const weekId of inRange) {
     const weekInfo = weekInfoFor(weekId);
     const events = ledger.eventsForWeek(weekId);
     const workLog = generateEventMarkdown({
@@ -152,10 +162,13 @@ export async function refreshWeeks(deps: {
 
     const added = newEvents(before.get(weekId) ?? [], events);
     await writeWeek({ weekId, weekInfo, workLog, newMaterial: describeForPrompt(added) });
+    // Only now. A week that was not written — because the run stopped, or because the
+    // generation refused — is still owed one on the next run.
+    ledger.markWritten(weekId);
   }
 
   await ledger.save();
-  return { rows, outcome };
+  return { rows, outcome, waiting };
 }
 
 export async function runRefresh(opts: RefreshOptions): Promise<void> {
@@ -200,7 +213,7 @@ export async function runRefresh(opts: RefreshOptions): Promise<void> {
   spinner.start("Asking each source what has changed...");
 
   let collected = false;
-  const { rows, outcome } = await refreshWeeks({
+  const { rows, outcome, waiting } = await refreshWeeks({
     ledger,
     sources,
     weeks,
@@ -245,7 +258,14 @@ export async function runRefresh(opts: RefreshOptions): Promise<void> {
 
   if (!collected) spinner.stop(`Collected from ${sources.length} source(s)`);
 
+  for (const problem of ledger.problems()) p.log.warn(problem);
   for (const warning of outcome.warnings) p.log.warn(warning);
+  if (waiting.length > 0) {
+    p.log.warn(
+      `${waiting.length} week(s) outside this range have new activity and still need writing: ${waiting.join(", ")}. ` +
+      `Run \`worklog refresh --since\` far enough back to include them.`,
+    );
+  }
   for (const [name, result] of outcome.perSource) {
     if (result.unavailable) p.log.warn(`${name} was skipped: ${result.unavailable}`);
   }
@@ -305,20 +325,53 @@ function printTable(rows: readonly WeekRow[], outcome: CollectionOutcome): void 
   p.log.message(`Time per source: ${timings.join(", ")}`);
 }
 
+/**
+ * `--since`, if it is a day that exists.
+ *
+ * The format check is not enough on its own: `2026-02-31` matches it, and `new Date`
+ * rolls it forward to March 3 without complaint. Round-tripping the parsed date back to
+ * a string is what catches a day that was never on the calendar.
+ */
+export function parseSince(value: string): string {
+  const failure = new Error("--since must be a real date in YYYY-MM-DD form, for example 2026-01-31");
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) throw failure;
+
+  const parsed = new Date(`${value}T00:00:00.000Z`);
+  if (Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== value) throw failure;
+  return value;
+}
+
+/**
+ * `--week`, if that week exists in that year.
+ *
+ * Most ISO years have 52 weeks and some have 53, so the bound is the year's own last
+ * week rather than a fixed number: asking for 2026-W53 should fail, and 2026-W99 should
+ * not quietly become a range in 2027.
+ */
+export function parseWeek(value: string): string {
+  const match = /^(\d{4})-W(\d{1,2})$/.exec(value);
+  if (!match) throw new Error("--week must be in YYYY-WNN form, for example 2026-W06");
+
+  const year = Number.parseInt(match[1], 10);
+  const week = Number.parseInt(match[2], 10);
+  const last = weeksInYear(year);
+  if (week < 1 || week > last) {
+    throw new Error(`--week must be between ${year}-W01 and ${weekId(last, year)}; ${value} is not a week of ${year}`);
+  }
+  return weekId(week, year);
+}
+
+/** 52, or 53 in a long year. December 28 is always in the last ISO week of its year. */
+function weeksInYear(year: number): number {
+  return getWeekNumber(new Date(Date.UTC(year, 11, 28)));
+}
+
 export function makeRefreshCommand(): Command {
   return new Command("refresh")
     .description("Pick up what has changed since the last run and update only the weeks it belongs to")
     .option("--source <name>", "Only refresh one source (jira, confluence, github)")
-    .option("--since <YYYY-MM-DD>", "Refresh weeks from this date. Defaults to the current team's start date.", (v) => {
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(v) || Number.isNaN(new Date(v).getTime())) {
-        throw new Error("--since must be a valid YYYY-MM-DD date");
-      }
-      return v;
-    })
-    .option("--week <YYYY-WNN>", "Refresh a single week", (v) => {
-      if (!/^\d{4}-W\d{1,2}$/.test(v)) throw new Error("--week must be in YYYY-WNN format (e.g. 2026-W06)");
-      return v;
-    })
+    .option("--since <YYYY-MM-DD>", "Refresh weeks from this date. Defaults to the current team's start date.", parseSince)
+    .option("--week <YYYY-WNN>", "Refresh a single week", parseWeek)
     .option("-v, --verbose", "Show detailed logs", false)
     .action(async (opts: RefreshOptions) => {
       await runRefresh(opts);

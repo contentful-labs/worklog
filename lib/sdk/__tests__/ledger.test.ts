@@ -50,7 +50,7 @@ describe("an empty ledger", () => {
   it("opens on a directory that does not exist", async () => {
     const ledger = await openLedger(root);
     expect(ledger.weeks()).toEqual([]);
-    expect(ledger.watermark("jira")).toBeUndefined();
+    expect(ledger.watermarkFor("jira", "2026-W35")).toBeUndefined();
     expect(ledger.hasWindow("jira", "2026-W35")).toBe(false);
     expect(existsSync(root)).toBe(false);
   });
@@ -155,14 +155,18 @@ describe("what is written to disk", () => {
       events: [{ source: "jira", kind: "created", itemId: "TEAM-1234", at: "2026-08-10T09:00:00.000Z", payload: {} }],
     }), seenAt);
     ledger.markWindow("jira", "2026-W33");
-    ledger.setWatermark("jira", seenAt);
+    ledger.setWatermark("jira", "2026-W33", seenAt);
     await ledger.save();
 
     expect(await readdir(join(root, "events"))).toEqual(["2026-W33.json"]);
     expect(await readdir(join(root, "snapshots"))).toEqual(["jira.json"]);
 
     const meta = JSON.parse(await readFile(join(root, "meta.json"), "utf-8"));
-    expect(meta).toMatchObject({ version: 1, sources: { jira: { fetchedAt: seenAt.toISOString(), windows: ["2026-W33"] } } });
+    expect(meta).toMatchObject({
+      version: 2,
+      sources: { jira: { windows: { "2026-W33": seenAt.toISOString() } } },
+      pendingWeeks: ["2026-W33"],
+    });
 
     // Readable by a person, which is half the reason it is JSON on disk.
     expect(await readFile(join(root, "events", "2026-W33.json"), "utf-8")).toContain('\n  {\n    "source": "jira"');
@@ -174,7 +178,7 @@ describe("what is written to disk", () => {
       snapshots: [ticket],
       events: [{ source: "jira", kind: "comment", itemId: "TEAM-1234", at: "2026-08-31T11:00:00.000Z", payload: {}, id: "c-1" }],
     }), seenAt);
-    first.setWatermark("jira", seenAt);
+    first.setWatermark("jira", "2026-W36", seenAt);
     first.stateFor("github").set("etag:pr-1", "W/\"abc\"");
     await first.save();
 
@@ -182,7 +186,7 @@ describe("what is written to disk", () => {
     expect(second.eventsForWeek("2026-W36")).toHaveLength(1);
     expect(second.snapshot("jira", "TEAM-1234")?.id).toBe("TEAM-1234");
     expect(second.knownItemIds("jira")).toEqual(["TEAM-1234"]);
-    expect(second.watermark("jira")?.toISOString()).toBe(seenAt.toISOString());
+    expect(second.watermarkFor("jira", "2026-W36")?.toISOString()).toBe(seenAt.toISOString());
     expect(second.stateFor("github").get("etag:pr-1")).toBe("W/\"abc\"");
   });
 
@@ -194,7 +198,8 @@ describe("what is written to disk", () => {
 
     const first = await openLedger(root);
     first.record("jira", events, seenAt);
-    first.setWatermark("jira", seenAt);
+    first.setWatermark("jira", "2026-W36", seenAt);
+    first.markWritten("2026-W36");
     await first.save();
 
     const before = await Promise.all(
@@ -203,7 +208,7 @@ describe("what is written to disk", () => {
 
     const second = await openLedger(root);
     second.record("jira", events, seenAt);
-    second.setWatermark("jira", seenAt);
+    second.setWatermark("jira", "2026-W36", seenAt);
     await second.save();
 
     const after = await Promise.all(

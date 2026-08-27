@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -93,6 +93,15 @@ function writeConfig(configHome: string, vault: string, options: { withTimeline?
     }),
   );
 }
+
+// Jira's expanded search posts to the API directly rather than through the mocked
+// module, so the network is closed off here too. An empty week is all this file needs:
+// what is under test is what runWorklog does with the model's answer.
+beforeEach(() => {
+  vi.stubGlobal("fetch", async () =>
+    new Response(JSON.stringify({ issues: [] }), { status: 200, headers: { "content-type": "application/json" } }),
+  );
+});
 
 afterEach(() => {
   vi.unstubAllGlobals();

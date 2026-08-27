@@ -91,6 +91,61 @@ export function validateBragBookMarkdown(markdown: string): void {
 }
 
 /**
+ * The lines of a week's entry that a regeneration is not allowed to lose.
+ *
+ * Every non-blank line of `## Achievements`, and every `### ` heading anywhere in the
+ * document. Those headings are what the coaching section is made of, and an achievement
+ * is a line someone wrote down about a week that has already happened.
+ */
+function linesToKeep(document: string): string[] {
+  const keep: string[] = [];
+  let inAchievements = false;
+
+  for (const raw of document.split("\n")) {
+    const line = raw.trim();
+
+    if (line.startsWith("## ")) inAchievements = line.toLowerCase() === "## achievements";
+    if (line.startsWith("### ")) {
+      keep.push(line);
+      continue;
+    }
+    if (inAchievements && line.length > 0 && !line.startsWith("## ")) keep.push(line);
+  }
+
+  return keep;
+}
+
+/**
+ * The first thing the new document drops, or nothing if it drops nothing.
+ *
+ * Regenerating a week adds to its entry; it never removes. The prompt says so, but a
+ * prompt is a request and this is the week's only record: a model that answers with a
+ * structurally perfect document containing only the new material would otherwise
+ * replace a month of achievements with one line, atomically and irreversibly.
+ */
+export function firstDroppedLine(existing: string, next: string): string | undefined {
+  return linesToKeep(existing).find((line) => !next.includes(line));
+}
+
+/**
+ * Refuse to write a regenerated week that lost something.
+ *
+ * Named so the failure says what is missing. "The model returned a shorter document"
+ * would leave the reader to work out which of forty lines went, from a file that no
+ * longer contains it.
+ */
+export function validatePreserved(existing: string, next: string): void {
+  const dropped = firstDroppedLine(existing, next);
+  if (dropped === undefined) return;
+
+  throw new Error(
+    `Refusing to write the brag book: the regenerated week drops "${dropped}", which the existing entry records. ` +
+    `Nothing was written to the vault. A refresh adds to a week, it never rewrites it; re-run the week, and if it ` +
+    `repeats, the prompt's amend instructions and the model are out of step.`,
+  );
+}
+
+/**
  * Turn the model's schema-constrained output into the shape the vault writers consume.
  *
  * The writers still speak in rendered markdown rows, so memory items are rendered here

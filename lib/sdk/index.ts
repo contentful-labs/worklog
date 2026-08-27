@@ -75,7 +75,10 @@ export { generateMarkdown, generateEventMarkdown } from "./markdown";
 
 // Brag book result
 export type { BragBookResult, ReviewInfo } from "./brag-book";
-export { toBragBookResult, validateBragBookMarkdown, parseReviewCycle, ensureBragBookFrontmatter } from "./brag-book";
+export {
+  toBragBookResult, validateBragBookMarkdown, parseReviewCycle, ensureBragBookFrontmatter,
+  validatePreserved, firstDroppedLine,
+} from "./brag-book";
 
 // Brag book output schema
 export type { BragBookOutput, MemoryItem, MemoryGraduation, FocusStatus } from "./brag-book-schema";
@@ -159,6 +162,7 @@ export type {
 export type { RenderablePayload, CacheEnv } from "./ledger";
 export {
   openLedger, ledgerRoot, weekWindow, collectIntoLedger, eventsByItem, newEvents, renderable,
+  isSafeSourceName,
 } from "./ledger";
 export { allSources, jiraSource, confluenceSource, githubSource } from "./source-adapters";
 

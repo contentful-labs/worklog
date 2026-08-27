@@ -16,9 +16,11 @@
  * query of a source is allowed to fail the whole call.
  */
 
+import { z } from "zod";
+
 import type { ConfluencePage, GitHubPR, JiraIssue } from "../types";
 import { extractText } from "../utils";
-import { fetchGitHubPRs, fetchJiraIssues, searchConfluence, type FetchHeaders } from "./data-fetch";
+import { fetchGitHubPRs, searchConfluence, type FetchHeaders } from "./data-fetch";
 import {
   EVENT_KINDS,
   PAYLOAD_FROM,
@@ -29,6 +31,7 @@ import {
   type Source,
   type SourceBatch,
   type SourceContext,
+  type SourceEvent,
   type SourceState,
   type SourceWindow,
 } from "./sources";
@@ -40,18 +43,29 @@ export type Clock = () => Date;
 /** The `expand` that gets a Jira issue's changelog back with it. */
 const JIRA_CHANGELOG_EXPAND = "changelog";
 
-/** Fields a delta fetch needs: what changed, and what was said. */
-const JIRA_DELTA_FIELDS = ["summary", "status", "created", "updated", "description", "comment"];
+/** Fields either fetch needs: what the issue is, when it moved, and what was said. */
+const JIRA_FIELDS = ["summary", "status", "created", "updated", "description", "comment"];
 
 const CONFLUENCE_PAGE_EXPAND = "space,history,history.lastUpdated,history.createdBy,version";
 
 /** The comment CQL asks for `container`; `history` is what carries the comment's own date. */
 const CONFLUENCE_COMMENT_EXPAND = "container,history";
 
+/** How far back through a page's version history one delta will walk. */
+const CONFLUENCE_VERSION_PAGES = 4;
+
 // --- shapes the shared types don't name -------------------------------------------
 
-/** A Jira comment, plus the id the shared type omits and the ledger uses to dedupe. */
-type JiraComment = NonNullable<NonNullable<JiraIssue["fields"]["comment"]>["comments"]>[number] & { id?: string };
+/**
+ * A Jira comment, plus what the shared type omits.
+ *
+ * `id` is what the ledger dedupes on, and `author` is how a comment of the user's own is
+ * told apart from a colleague's on the same ticket.
+ */
+type JiraComment = NonNullable<NonNullable<JiraIssue["fields"]["comment"]>["comments"]>[number] & {
+  id?: string;
+  author?: { accountId?: string };
+};
 
 interface JiraChangelogItem {
   field?: string;
@@ -59,10 +73,30 @@ interface JiraChangelogItem {
   toString?: string | null;
 }
 
-/** Only present when the search was asked to expand it. */
+interface JiraHistory {
+  id?: string;
+  created?: string;
+  items?: JiraChangelogItem[];
+}
+
+/** Only present when the search was asked to expand it, and only its first page. */
 type JiraIssueWithChangelog = JiraIssue & {
-  changelog?: { histories?: Array<{ id?: string; created?: string; items?: JiraChangelogItem[] }> };
+  changelog?: { total?: number; histories?: JiraHistory[] };
 };
+
+/** A page of an issue's changelog, from the endpoint that serves the rest of it. */
+const changelogPageSchema = z.object({
+  values: z.array(z.object({
+    id: z.string().optional(),
+    created: z.string().optional(),
+    items: z.array(z.object({
+      field: z.string().optional(),
+      fromString: z.string().nullish(),
+      toString: z.string().nullish(),
+    })).optional(),
+  })).default([]),
+  isLast: z.boolean().optional(),
+});
 
 interface ConfluenceContainer {
   id: string;
@@ -80,6 +114,13 @@ interface ConfluenceCommentDetail {
 
 /** A page with its version number, which is the system's own id for a version event. */
 type ConfluencePageDetail = ConfluencePage & { version?: { number?: number } };
+
+/** One entry in a page's version history. */
+interface ConfluenceVersion {
+  number?: number;
+  createdAt?: string;
+  message?: string;
+}
 
 interface GitHubReview {
   id: number;
@@ -296,6 +337,93 @@ export function allSources(): Source[] {
 }
 
 export function jiraSource(now: Clock = () => new Date()): Source {
+  /**
+   * Every changelog entry for an issue, following the pages when there are more.
+   *
+   * A search returns only the first page of an issue's changelog. An issue with a long
+   * history would silently lose its oldest transitions, which are exactly the ones a
+   * backfill of an old week is looking for.
+   */
+  async function allHistories(issue: JiraIssueWithChangelog, ctx: SourceContext, batch: SourceBatch): Promise<JiraHistory[]> {
+    const first = issue.changelog?.histories ?? [];
+    const total = issue.changelog?.total ?? first.length;
+    if (total <= first.length) return first;
+
+    const histories = [...first];
+    try {
+      while (histories.length < total) {
+        const url = `${ctx.config.atlassian.url}/rest/api/3/issue/${issue.key}/changelog?startAt=${histories.length}&maxResults=100`;
+        const res = await fetch(url, { headers: headersOf(ctx).atlassian });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const page = changelogPageSchema.parse(await res.json());
+        if (page.values.length === 0) break;
+        histories.push(...page.values);
+        if (page.isLast) break;
+      }
+    } catch (err) {
+      warn(batch, ctx, `Could not read the rest of ${issue.key}'s history, some changes will be missing: ${String(err)}`);
+    }
+    return histories;
+  }
+
+  /** Status and description changes, each dated when the change was made. */
+  function changelogEvents(key: string, histories: readonly JiraHistory[], keep: (at: Instant) => boolean): SourceEvent[] {
+    const events: SourceEvent[] = [];
+    for (const history of histories) {
+      const at = instant(history.created);
+      if (!at || !keep(at)) continue;
+      for (const item of history.items ?? []) {
+        if (item.field === "status") {
+          events.push({
+            source: "jira",
+            kind: EVENT_KINDS.status,
+            itemId: key,
+            at: at.iso,
+            id: history.id ? `${history.id}:status` : undefined,
+            payload: { [PAYLOAD_FROM]: transitionValue(item.fromString), [PAYLOAD_TO]: transitionValue(item.toString) },
+          });
+        } else if (item.field === "description") {
+          events.push({
+            source: "jira",
+            kind: EVENT_KINDS.description,
+            itemId: key,
+            at: at.iso,
+            id: history.id ? `${history.id}:description` : undefined,
+            payload: { [PAYLOAD_TEXT]: transitionValue(item.toString) },
+          });
+        }
+      }
+    }
+    return events;
+  }
+
+  /**
+   * Comments the user wrote, and only those.
+   *
+   * A ticket assigned to you collects other people's comments, and a work log that
+   * counts them as your week's evidence is describing somebody else's work.
+   */
+  function commentEvents(issue: JiraIssue, ctx: SourceContext, keep: (at: Instant) => boolean): SourceEvent[] {
+    const events: SourceEvent[] = [];
+    // SAFETY: JiraComment is the shared comment type plus the optional `id` and `author`
+    // the API sends and `JiraIssue` does not declare. Every field is read through a
+    // guard below, so a response without one costs that comment and nothing else.
+    for (const comment of (issue.fields.comment?.comments ?? []) as JiraComment[]) {
+      if (comment.author?.accountId !== accountIdOf(ctx)) continue;
+      const at = instant(comment.created);
+      if (!at || !keep(at)) continue;
+      events.push({
+        source: "jira",
+        kind: EVENT_KINDS.comment,
+        itemId: issue.key,
+        at: at.iso,
+        id: comment.id,
+        payload: { [PAYLOAD_TEXT]: extractText(comment.body) },
+      });
+    }
+    return events;
+  }
+
   return {
     name: "jira",
 
@@ -310,7 +438,11 @@ export function jiraSource(now: Clock = () => new Date()): Source {
       const email = ctx.config.atlassian.email;
       const jql = `(assignee = "${email}" OR reporter = "${email}") AND updated >= "${isoDate(window.start)}" AND updated <= "${isoDate(window.end)}" ORDER BY updated DESC`;
 
-      const issues = await fetchJiraIssues(ctx.config, headersOf(ctx), jql);
+      // With the changelog, because an issue's own `updated` is one date and its history
+      // is many. An issue created in one week and moved to Done in another has to report
+      // both to the weeks they happened in, not one blurred entry to whichever week the
+      // search happened to match.
+      const issues = await fetchJiraIssuesExpanded(ctx.config, headersOf(ctx), jql, JIRA_FIELDS, JIRA_CHANGELOG_EXPAND);
       logOf(ctx)(`jira: ${issues.length} issue(s) updated in the window`);
 
       for (const issue of issues) {
@@ -327,21 +459,9 @@ export function jiraSource(now: Clock = () => new Date()): Source {
           batch.events.push({ source: "jira", kind: EVENT_KINDS.created, itemId: issue.key, at: created.iso, payload: {} });
         }
 
-        // SAFETY: JiraComment is the shared comment type plus an optional `id`, which
-        // the API sends and `JiraIssue` does not declare. Every field is read through a
-        // guard below, so a response without one costs that comment and nothing else.
-        for (const comment of (issue.fields.comment?.comments ?? []) as JiraComment[]) {
-          const at = instant(comment.created);
-          if (!at || !inWindow(at, window)) continue;
-          batch.events.push({
-            source: "jira",
-            kind: EVENT_KINDS.comment,
-            itemId: issue.key,
-            at: at.iso,
-            id: comment.id,
-            payload: { [PAYLOAD_TEXT]: extractText(comment.body) },
-          });
-        }
+        const histories = await allHistories(issue, ctx, batch);
+        batch.events.push(...changelogEvents(issue.key, histories, (at) => inWindow(at, window)));
+        batch.events.push(...commentEvents(issue, ctx, (at) => inWindow(at, window)));
 
         // Nothing datable happened inside the window, but the search says the issue moved,
         // so record that much: at `updated` when that lands in the window, otherwise at the
@@ -363,14 +483,20 @@ export function jiraSource(now: Clock = () => new Date()): Source {
     },
 
     async fetchSince(since, itemIds, ctx) {
-      if (itemIds.length === 0) return emptyBatch();
-
       const batch = emptyBatch();
       const spottedAt = now().toISOString();
       const known = new Set(itemIds);
-      const jql = `key in (${itemIds.join(", ")}) AND updated > "${jqlDateTime(since)}"`;
+      const email = ctx.config.atlassian.email;
 
-      const issues = await fetchJiraIssuesExpanded(ctx.config, headersOf(ctx), jql, JIRA_DELTA_FIELDS, JIRA_CHANGELOG_EXPAND);
+      // Two questions in one query. The known ids catch changes to work already being
+      // tracked; the assignee/reporter half is what finds an issue that did not exist
+      // when the week was first fetched. Without it a ticket created after the first run
+      // is invisible for ever, because it is in nobody's list of known ids.
+      const mine = `assignee = "${email}" OR reporter = "${email}"`;
+      const scope = itemIds.length > 0 ? `(${mine} OR key in (${itemIds.join(", ")}))` : `(${mine})`;
+      const jql = `${scope} AND updated > "${jqlDateTime(since)}"`;
+
+      const issues = await fetchJiraIssuesExpanded(ctx.config, headersOf(ctx), jql, JIRA_FIELDS, JIRA_CHANGELOG_EXPAND);
       logOf(ctx)(`jira: ${issues.length} issue(s) changed since ${since.toISOString()}`);
 
       for (const issue of issues) {
@@ -382,47 +508,16 @@ export function jiraSource(now: Clock = () => new Date()): Source {
             firstSeenAt: spottedAt,
             payload: jiraSnapshotPayload(issue, ctx.config),
           });
-        }
 
-        for (const history of issue.changelog?.histories ?? []) {
-          const at = instant(history.created);
-          if (!at || !after(at, since)) continue;
-          for (const item of history.items ?? []) {
-            if (item.field === "status") {
-              batch.events.push({
-                source: "jira",
-                kind: EVENT_KINDS.status,
-                itemId: issue.key,
-                at: at.iso,
-                id: history.id ? `${history.id}:status` : undefined,
-                payload: { [PAYLOAD_FROM]: transitionValue(item.fromString), [PAYLOAD_TO]: transitionValue(item.toString) },
-              });
-            } else if (item.field === "description") {
-              batch.events.push({
-                source: "jira",
-                kind: EVENT_KINDS.description,
-                itemId: issue.key,
-                at: at.iso,
-                id: history.id ? `${history.id}:description` : undefined,
-                payload: { [PAYLOAD_TEXT]: transitionValue(item.toString) },
-              });
-            }
+          const created = instant(issue.fields.created);
+          if (created && after(created, since)) {
+            batch.events.push({ source: "jira", kind: EVENT_KINDS.created, itemId: issue.key, at: created.iso, payload: {} });
           }
         }
 
-        // SAFETY: as above, the shared type's comments plus the id the API sends.
-        for (const comment of (issue.fields.comment?.comments ?? []) as JiraComment[]) {
-          const at = instant(comment.created);
-          if (!at || !after(at, since)) continue;
-          batch.events.push({
-            source: "jira",
-            kind: EVENT_KINDS.comment,
-            itemId: issue.key,
-            at: at.iso,
-            id: comment.id,
-            payload: { [PAYLOAD_TEXT]: extractText(comment.body) },
-          });
-        }
+        const histories = await allHistories(issue, ctx, batch);
+        batch.events.push(...changelogEvents(issue.key, histories, (at) => after(at, since)));
+        batch.events.push(...commentEvents(issue, ctx, (at) => after(at, since)));
       }
 
       return batch;
@@ -440,7 +535,92 @@ function confluenceUrl(config: WorklogConfig, links: { webui?: string } | undefi
   return `${config.atlassian.url}/wiki${links?.webui ?? ""}`;
 }
 
+/** A page of a page's version history, from the v2 API that serves all of them. */
+const versionPageSchema = z.object({
+  results: z.array(z.object({
+    number: z.number().optional(),
+    createdAt: z.string().optional(),
+    authorId: z.string().optional(),
+    message: z.string().optional(),
+  })).default([]),
+  _links: z.object({ next: z.string().optional() }).optional(),
+});
+
 export function confluenceSource(now: Clock = () => new Date()): Source {
+  /**
+   * Every version of a page, newest first, following the pages of them.
+   *
+   * The search only ever hands back the current version. A page edited four times
+   * between two runs would report one edit, on the day of the last one, and the three
+   * weeks the other edits belong to would never hear about them.
+   */
+  async function versionsOf(pageId: string, ctx: SourceContext, batch: SourceBatch): Promise<ConfluenceVersion[]> {
+    const versions: ConfluenceVersion[] = [];
+    let path: string | undefined = `/wiki/api/v2/pages/${pageId}/versions?limit=50&sort=-modified-date`;
+
+    try {
+      // Bounded: a page with a very long history is not worth an unbounded walk, and the
+      // versions that matter for a delta are the recent ones this sort puts first.
+      for (let page = 0; path && page < CONFLUENCE_VERSION_PAGES; page++) {
+        const res = await fetch(`${ctx.config.atlassian.url}${path}`, { headers: headersOf(ctx).atlassian });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const parsed = versionPageSchema.parse(await res.json());
+        versions.push(...parsed.results);
+        path = parsed._links?.next;
+      }
+    } catch (err) {
+      warn(batch, ctx, `Could not read the version history of Confluence page ${pageId}, some edits will be missing: ${String(err)}`);
+    }
+    return versions;
+  }
+
+  /** Comments the user wrote, as events against the page they hang off. */
+  async function commentBatch(
+    cql: string,
+    ctx: SourceContext,
+    batch: SourceBatch,
+    known: Set<string>,
+    spottedAt: string,
+    keep: (at: Instant | undefined) => boolean,
+  ): Promise<void> {
+    // Comments are supplementary: a page's own history is still worth having without them.
+    let comments: ConfluenceCommentDetail[] = [];
+    try {
+      comments = await searchConfluence<ConfluenceCommentDetail>(ctx.config, headersOf(ctx), cql, CONFLUENCE_COMMENT_EXPAND);
+    } catch (err) {
+      warn(batch, ctx, `Confluence comment search failed, comments will be missing: ${String(err)}`);
+      return;
+    }
+
+    for (const comment of comments) {
+      const container = comment.container;
+      if (!container?.id) continue;
+
+      const at = instant(comment.history?.createdDate);
+      if (!keep(at)) continue;
+
+      // An event needs an item to hang off. A page we only learned about through a comment
+      // has no snapshot yet, so it gets one here.
+      if (!known.has(container.id)) {
+        known.add(container.id);
+        batch.snapshots.push({
+          id: container.id,
+          firstSeenAt: spottedAt,
+          payload: confluencePayload(container.id, container.title, confluenceUrl(ctx.config, container._links), container.space?.name ?? ""),
+        });
+      }
+
+      batch.events.push({
+        source: "confluence",
+        kind: EVENT_KINDS.comment,
+        itemId: container.id,
+        at: at ? at.iso : spottedAt,
+        id: comment.id,
+        payload: at ? {} : { [PAYLOAD_SPOTTED]: true },
+      });
+    }
+  }
+
   return {
     name: "confluence",
 
@@ -502,64 +682,73 @@ export function confluenceSource(now: Clock = () => new Date()): Source {
       }
 
       const commentCql = `type = comment AND creator = "${accountId}" AND created >= "${startDate}" AND created <= "${endDate}"`;
-      // Comments are supplementary: a page's own history is still worth having without them.
-      let comments: ConfluenceCommentDetail[] = [];
-      try {
-        comments = await searchConfluence<ConfluenceCommentDetail>(ctx.config, headersOf(ctx), commentCql, CONFLUENCE_COMMENT_EXPAND);
-      } catch (err) {
-        warn(batch, ctx, `Confluence comment search failed, comments will be missing from this window: ${String(err)}`);
-      }
-
-      for (const comment of comments) {
-        const container = comment.container;
-        if (!container?.id) continue;
-
-        // An event needs an item to hang off. A page we only learned about through a comment
-        // has no snapshot yet, so it gets one here.
-        if (!seen.has(container.id)) {
-          seen.add(container.id);
-          batch.snapshots.push({
-            id: container.id,
-            firstSeenAt: spottedAt,
-            payload: confluencePayload(container.id, container.title, confluenceUrl(ctx.config, container._links), container.space?.name ?? ""),
-          });
-        }
-
-        const at = instant(comment.history?.createdDate);
-        batch.events.push({
-          source: "confluence",
-          kind: EVENT_KINDS.comment,
-          itemId: container.id,
-          at: at ? at.iso : spottedAt,
-          id: comment.id,
-          payload: at ? {} : { [PAYLOAD_SPOTTED]: true },
-        });
-      }
+      await commentBatch(commentCql, ctx, batch, seen, spottedAt, (at) => !at || inWindow(at, window));
 
       return batch;
     },
 
     async fetchSince(since, itemIds, ctx) {
-      if (itemIds.length === 0) return emptyBatch();
-
       const batch = emptyBatch();
-      const cql = `id in (${itemIds.join(", ")}) AND lastModified > "${isoDate(since)}"`;
+      const spottedAt = now().toISOString();
+      const accountId = accountIdOf(ctx);
+      const sinceDate = isoDate(since);
+
+      // The contributor half finds pages that did not exist when the week was fetched;
+      // the id half catches edits to pages already being tracked.
+      const mine = `contributor = "${accountId}" AND type = page`;
+      const scope = itemIds.length > 0 ? `((${mine}) OR id in (${itemIds.join(", ")}))` : `(${mine})`;
+      const cql = `${scope} AND lastModified > "${sinceDate}"`;
+
       const pages = await searchConfluence<ConfluencePageDetail>(ctx.config, headersOf(ctx), cql, CONFLUENCE_PAGE_EXPAND, "any");
       logOf(ctx)(`confluence: ${pages.length} page(s) changed since ${since.toISOString()}`);
 
+      const known = new Set(itemIds);
       for (const page of pages) {
-        const updated = instant(page.history?.lastUpdated?.when);
-        // CQL only filters to the day, so the exact watermark is applied here.
-        if (!updated || !after(updated, since)) continue;
-        batch.events.push({
-          source: "confluence",
-          kind: EVENT_KINDS.version,
-          itemId: page.id,
-          at: updated.iso,
-          id: page.version?.number ? `${page.id}:v${page.version.number}` : undefined,
-          payload: {},
-        });
+        if (!known.has(page.id)) {
+          known.add(page.id);
+          batch.snapshots.push({
+            id: page.id,
+            firstSeenAt: spottedAt,
+            payload: confluencePayload(page.id, page.title, confluenceUrl(ctx.config, page._links), page.space?.name ?? ""),
+          });
+        }
+
+        // Every version made since the watermark, each dated when it was made, rather
+        // than only the newest one dated when the page last moved.
+        const versions = await versionsOf(page.id, ctx, batch);
+        for (const version of versions) {
+          const at = instant(version.createdAt);
+          // CQL only filters to the day, so the exact watermark is applied here.
+          if (!at || !after(at, since)) continue;
+          batch.events.push({
+            source: "confluence",
+            kind: EVENT_KINDS.version,
+            itemId: page.id,
+            at: at.iso,
+            id: version.number ? `${page.id}:v${version.number}` : undefined,
+            payload: version.message ? { [PAYLOAD_TEXT]: version.message } : {},
+          });
+        }
+
+        // The version history could not be read at all, so fall back to what the search
+        // itself knows: one edit, at the page's own last-updated time.
+        if (versions.length === 0) {
+          const updated = instant(page.history?.lastUpdated?.when);
+          if (updated && after(updated, since)) {
+            batch.events.push({
+              source: "confluence",
+              kind: EVENT_KINDS.version,
+              itemId: page.id,
+              at: updated.iso,
+              id: page.version?.number ? `${page.id}:v${page.version.number}` : undefined,
+              payload: {},
+            });
+          }
+        }
       }
+
+      const commentCql = `type = comment AND creator = "${accountId}" AND created > "${sinceDate}"`;
+      await commentBatch(commentCql, ctx, batch, known, spottedAt, (at) => Boolean(at && after(at, since)));
 
       return batch;
     },
@@ -679,8 +868,13 @@ export function githubSource(now: Clock = () => new Date()): Source {
       const startDate = isoDate(window.start);
       const endDate = isoDate(window.end);
 
-      const authored = await fetchGitHubPRs(headersOf(ctx), `type:pr author:${username} ${orgFilter} created:${startDate}..${endDate}`, "created");
-      logOf(ctx)(`github: ${authored.length} authored PR(s) in the window`);
+      // On `updated`, not `created`. A PR opened in one week and merged in the next is
+      // only ever created once: searching by creation date means the week it was merged
+      // in never sees it, and the week it was opened in throws the merge away for being
+      // out of range. Searching by activity finds it in both, and each week keeps the
+      // events that actually belong to it.
+      const authored = await fetchGitHubPRs(headersOf(ctx), `type:pr author:${username} ${orgFilter} updated:${startDate}..${endDate}`, "updated");
+      logOf(ctx)(`github: ${authored.length} authored PR(s) active in the window`);
 
       const authoredUrls = new Set(authored.map((pr) => pr.html_url));
 
@@ -724,12 +918,36 @@ export function githubSource(now: Clock = () => new Date()): Source {
     },
 
     async fetchSince(since, itemIds, ctx) {
-      if (itemIds.length === 0) return emptyBatch();
-
       const batch = emptyBatch();
-      logOf(ctx)(`github: checking ${itemIds.length} PR(s) for changes since ${since.toISOString()}`);
+      const spottedAt = now().toISOString();
+      const username = githubUserOf(ctx);
+      const orgFilter = ctx.config.githubOrgs.map((org) => `org:${org}`).join(" ");
 
-      for (const itemId of itemIds) {
+      // Anything of the user's that has moved since the watermark, whether or not the
+      // ledger has heard of it. A PR opened after a week was first fetched is in nobody's
+      // list of known ids, so without this it stays invisible for ever.
+      const known = new Set(itemIds);
+      let discovered: GitHubPR[] = [];
+      try {
+        discovered = await fetchGitHubPRs(headersOf(ctx), `type:pr author:${username} ${orgFilter} updated:>=${isoDate(since)}`, "updated");
+      } catch (err) {
+        warn(batch, ctx, `GitHub search for new pull requests failed, anything opened since the last run will be missing: ${String(err)}`);
+      }
+
+      for (const pr of discovered) {
+        if (known.has(pr.html_url)) continue;
+        known.add(pr.html_url);
+        batch.snapshots.push({ id: pr.html_url, firstSeenAt: spottedAt, payload: githubPayload(pr) });
+
+        const created = instant(pr.created_at);
+        if (created && after(created, since)) {
+          batch.events.push({ source: "github", kind: EVENT_KINDS.created, itemId: pr.html_url, at: created.iso, payload: {} });
+        }
+      }
+
+      logOf(ctx)(`github: checking ${known.size} PR(s) for changes since ${since.toISOString()}`);
+
+      for (const itemId of known) {
         const parsed = parsePrUrl(itemId);
         if (!parsed) {
           warn(batch, ctx, `Skipped ${itemId}: it is not a pull request url this source can read.`);

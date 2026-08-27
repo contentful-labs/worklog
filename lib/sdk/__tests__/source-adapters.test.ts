@@ -119,7 +119,16 @@ const jiraIssue = {
         {
           id: "c-1",
           created: "2026-03-04T11:30:00.000+0000",
+          author: { accountId: ACCOUNT_ID },
           body: { content: [{ content: [{ text: "Looks good." }] }] },
+        },
+        // A colleague's comment on the same ticket. It is not this user's work and must
+        // not turn up in this user's week.
+        {
+          id: "c-them",
+          created: "2026-03-04T12:00:00.000+0000",
+          author: { accountId: "someone-else" },
+          body: { content: [{ content: [{ text: "Thanks for picking this up." }] }] },
         },
       ],
     },
@@ -194,7 +203,12 @@ describe("jiraSource", () => {
         ...jiraIssue.fields,
         comment: {
           comments: [
-            { id: "c-late", created: "2026-03-16T08:15:00.000+0000", body: { content: [{ content: [{ text: "Still relevant." }] }] } },
+            {
+              id: "c-late",
+              created: "2026-03-16T08:15:00.000+0000",
+              author: { accountId: ACCOUNT_ID },
+              body: { content: [{ content: [{ text: "Still relevant." }] }] },
+            },
           ],
         },
       },
@@ -255,10 +269,29 @@ describe("jiraSource", () => {
     await expect(jiraSource(() => NOW).fetchWindow(window, makeContext())).rejects.toThrow("Jira API error 500");
   });
 
-  it("makes no HTTP call when there is nothing to ask about", async () => {
-    server.use(...noRequestsAllowed);
+  it("goes looking for issues it has never seen, not only the ones it knows", async () => {
+    // Nothing known: the trigger is a ticket created after the week was first fetched,
+    // which is in nobody's list of known ids and would otherwise stay invisible.
+    const seenJql: string[] = [];
+    const fresh = {
+      ...jiraIssue,
+      key: "TEAM-7777",
+      fields: { ...jiraIssue.fields, created: "2026-03-09T09:00:00.000+0000", comment: { comments: [] } },
+    };
+    server.use(
+      http.post(`${BASE_URL}/rest/api/3/search/jql`, async ({ request }) => {
+        seenJql.push(z.object({ jql: z.string() }).parse(await request.json()).jql);
+        return HttpResponse.json({ issues: [fresh] });
+      }),
+    );
+
     const batch = await jiraSource(() => NOW).fetchSince(new Date("2026-03-08T00:00:00Z"), [], makeContext());
-    expect(batch).toEqual({ snapshots: [], events: [], warnings: [] });
+
+    expect(seenJql[0]).toBe(
+      '(assignee = "user@example.com" OR reporter = "user@example.com") AND updated > "2026-03-08 00:00"',
+    );
+    expect(batch.snapshots.map((s) => s.id)).toEqual(["TEAM-7777"]);
+    expect(findEvent(batch.events, "created")?.at).toBe("2026-03-09T09:00:00.000Z");
   });
 
   it("reports only changelog entries and comments newer than the watermark", async () => {
@@ -276,8 +309,8 @@ describe("jiraSource", () => {
                 ...jiraIssue.fields,
                 comment: {
                   comments: [
-                    { id: "c-old", created: "2026-03-04T11:30:00.000+0000", body: { content: [{ content: [{ text: "Old." }] }] } },
-                    { id: "c-new", created: "2026-03-07T09:00:00.000+0000", body: { content: [{ content: [{ text: "New." }] }] } },
+                    { id: "c-old", created: "2026-03-04T11:30:00.000+0000", author: { accountId: ACCOUNT_ID }, body: { content: [{ content: [{ text: "Old." }] }] } },
+                    { id: "c-new", created: "2026-03-07T09:00:00.000+0000", author: { accountId: ACCOUNT_ID }, body: { content: [{ content: [{ text: "New." }] }] } },
                   ],
                 },
               },
@@ -306,7 +339,9 @@ describe("jiraSource", () => {
 
     const batch = await jiraSource(() => NOW).fetchSince(since, ["TEAM-1234"], makeContext());
 
-    expect(seenBody?.jql).toBe('key in (TEAM-1234) AND updated > "2026-03-06 00:00"');
+    expect(seenBody?.jql).toBe(
+      '(assignee = "user@example.com" OR reporter = "user@example.com" OR key in (TEAM-1234)) AND updated > "2026-03-06 00:00"',
+    );
     expect(seenBody?.expand).toBe("changelog");
 
     expect(kinds(batch.events).sort()).toEqual(["comment", "description", "status"]);
@@ -461,37 +496,68 @@ describe("confluenceSource", () => {
     expect(batch.snapshots).toHaveLength(1);
   });
 
-  it("makes no HTTP call when there is nothing to ask about", async () => {
-    server.use(...noRequestsAllowed);
+  it("goes looking for pages it has never seen, not only the ones it knows", async () => {
+    const seenCql: string[] = [];
+    server.use(
+      http.get(`${BASE_URL}/wiki/rest/api/content/search`, ({ request }) => {
+        const cql = new URL(request.url).searchParams.get("cql") || "";
+        seenCql.push(cql);
+        return HttpResponse.json({ results: cql.includes("type = comment") ? [] : [{ ...confluencePage, id: "page-new" }] });
+      }),
+      http.get(`${BASE_URL}/wiki/api/v2/pages/page-new/versions`, () =>
+        HttpResponse.json({ results: [{ number: 1, createdAt: "2026-03-09T10:00:00.000Z" }] }),
+      ),
+    );
+
     const batch = await confluenceSource(() => NOW).fetchSince(new Date("2026-03-08T00:00:00Z"), [], makeContext());
-    expect(batch).toEqual({ snapshots: [], events: [], warnings: [] });
+
+    expect(seenCql[0]).toBe(`(contributor = "${ACCOUNT_ID}" AND type = page) AND lastModified > "2026-03-08"`);
+    expect(batch.snapshots.map((s) => s.id)).toEqual(["page-new"]);
+    expect(batch.events[0]).toMatchObject({ kind: "version", itemId: "page-new", at: "2026-03-09T10:00:00.000Z" });
   });
 
-  it("reports only versions newer than the watermark", async () => {
+  it("reports every version made since the watermark, each on its own date", async () => {
+    // The trigger: two edits and a comment between two runs. Reporting only the page's
+    // current version would put one edit in one week and lose the other entirely.
     const since = new Date("2026-03-06T00:00:00Z");
     const seenCql: string[] = [];
     server.use(
       http.get(`${BASE_URL}/wiki/rest/api/content/search`, ({ request }) => {
-        seenCql.push(new URL(request.url).searchParams.get("cql") || "");
-        return HttpResponse.json({
-          results: [
-            confluencePage, // last updated 5 March: older than the watermark
-            {
-              ...confluencePage,
-              id: "page-3",
-              version: { number: 2 },
-              history: { ...confluencePage.history, lastUpdated: { when: "2026-03-07T10:00:00.000Z" } },
-            },
-          ],
-        });
+        const cql = new URL(request.url).searchParams.get("cql") || "";
+        seenCql.push(cql);
+        if (cql.includes("type = comment")) {
+          return HttpResponse.json({
+            results: [{
+              id: "comment-9",
+              history: { createdDate: "2026-03-09T12:00:00.000Z" },
+              container: { id: "page-1", title: "Search Revamp design", _links: { webui: "/spaces/ENG/pages/page-1" } },
+            }],
+          });
+        }
+        return HttpResponse.json({ results: [confluencePage] });
       }),
+      http.get(`${BASE_URL}/wiki/api/v2/pages/page-1/versions`, () =>
+        HttpResponse.json({
+          results: [
+            { number: 5, createdAt: "2026-03-08T10:00:00.000Z" },
+            { number: 4, createdAt: "2026-03-07T10:00:00.000Z" },
+            { number: 3, createdAt: "2026-03-05T10:00:00.000Z" }, // older than the watermark
+          ],
+        }),
+      ),
     );
 
-    const batch = await confluenceSource(() => NOW).fetchSince(since, ["page-1", "page-3"], makeContext());
+    const batch = await confluenceSource(() => NOW).fetchSince(since, ["page-1"], makeContext());
 
-    expect(seenCql[0]).toBe('id in (page-1, page-3) AND lastModified > "2026-03-06"');
-    expect(batch.events).toHaveLength(1);
-    expect(batch.events[0]).toMatchObject({ kind: "version", itemId: "page-3", at: "2026-03-07T10:00:00.000Z", id: "page-3:v2" });
+    expect(seenCql[0]).toBe(`((contributor = "${ACCOUNT_ID}" AND type = page) OR id in (page-1)) AND lastModified > "2026-03-06"`);
+    expect(seenCql[1]).toBe(`type = comment AND creator = "${ACCOUNT_ID}" AND created > "2026-03-06"`);
+
+    const versions = batch.events.filter((e) => e.kind === "version");
+    expect(versions.map((e) => e.at)).toEqual(["2026-03-08T10:00:00.000Z", "2026-03-07T10:00:00.000Z"]);
+    expect(versions.map((e) => e.id)).toEqual(["page-1:v5", "page-1:v4"]);
+
+    const comment = findEvent(batch.events, "comment");
+    expect(comment).toMatchObject({ itemId: "page-1", at: "2026-03-09T12:00:00.000Z", id: "comment-9" });
   });
 });
 
@@ -564,7 +630,7 @@ describe("githubSource", () => {
 
     const batch = await githubSource(() => NOW).fetchWindow(window, makeContext());
 
-    expect(seenQueries[0]).toBe(`type:pr author:${USERNAME} org:example-org created:2026-03-02..2026-03-08`);
+    expect(seenQueries[0]).toBe(`type:pr author:${USERNAME} org:example-org updated:2026-03-02..2026-03-08`);
     expect(seenQueries[1]).toBe(`type:pr reviewed-by:${USERNAME} org:example-org updated:2026-03-02..2026-03-08`);
 
     expect(batch.snapshots[0]).toMatchObject({
@@ -646,10 +712,24 @@ describe("githubSource", () => {
     await expect(githubSource(() => NOW).fetchWindow(window, makeContext())).rejects.toThrow("GitHub API error 502");
   });
 
-  it("makes no HTTP call when there is nothing to ask about", async () => {
-    server.use(...noRequestsAllowed);
+  it("goes looking for pull requests it has never seen, not only the ones it knows", async () => {
+    const seenQueries: string[] = [];
+    const freshPR = { ...authoredPR, number: 99, html_url: "https://github.com/example-org/repo/pull/99",
+      created_at: "2026-03-09T09:00:00Z", merged_at: null, closed_at: null };
+    server.use(
+      http.get("https://api.github.com/search/issues", ({ request }) => {
+        seenQueries.push(new URL(request.url).searchParams.get("q") || "");
+        return HttpResponse.json({ total_count: 1, items: [freshPR] });
+      }),
+      http.get("https://api.github.com/repos/example-org/repo/pulls/99/reviews", () => HttpResponse.json([])),
+      http.get("https://api.github.com/repos/example-org/repo/pulls/99", () => HttpResponse.json(freshPR)),
+    );
+
     const batch = await githubSource(() => NOW).fetchSince(new Date("2026-03-08T00:00:00Z"), [], makeContext());
-    expect(batch).toEqual({ snapshots: [], events: [], warnings: [] });
+
+    expect(seenQueries[0]).toBe("type:pr author:example-user org:example-org updated:>=2026-03-08");
+    expect(batch.snapshots.map((s) => s.id)).toEqual(["https://github.com/example-org/repo/pull/99"]);
+    expect(findEvent(batch.events, "created")?.at).toBe("2026-03-09T09:00:00.000Z");
   });
 
   it("reports reviews, merges and closures newer than the watermark, and stores their ETags", async () => {
@@ -687,6 +767,8 @@ describe("githubSource", () => {
   it("sends the stored ETag and does nothing at all with a 304", async () => {
     const sentHeaders: Array<string | null> = [];
     server.use(
+      // Nothing new to discover; the point of this test is the two conditional GETs.
+      http.get("https://api.github.com/search/issues", () => HttpResponse.json({ total_count: 0, items: [] })),
       http.get("https://api.github.com/repos/example-org/repo/pulls/42/reviews", ({ request }) => {
         sentHeaders.push(request.headers.get("If-None-Match"));
         return new HttpResponse(null, { status: 304 });
@@ -710,7 +792,7 @@ describe("githubSource", () => {
   });
 
   it("warns on an id it cannot read as a pull request url", async () => {
-    server.use(...noRequestsAllowed);
+    server.use(http.get("https://api.github.com/search/issues", () => HttpResponse.json({ total_count: 0, items: [] })));
     const ctx = makeContext();
     const batch = await githubSource(() => NOW).fetchSince(new Date("2026-03-06T00:00:00Z"), ["not-a-pr-url"], ctx);
 
