@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
 import { generateMarkdown } from "../markdown";
 import type { WorklogConfig } from "../types";
 import type { JiraIssue, GitHubPR } from "../../types";
@@ -148,10 +148,22 @@ describe("generateMarkdown Slack section", () => {
   const base: SlackMessage = {
     permalink: "https://example.slack.com/archives/C1/p1",
     channel: "team-updates",
+    author: "Test User",
+    channelType: "public",
     at: "2026-03-03T09:14:00.000Z",
     text: "Picked the migration order.",
     isReply: false,
   };
+
+  // The header carries `**Generated:** <now>`, so the two renders being compared for
+  // byte-equality have to happen at the same instant.
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-03-09T12:00:00.000Z"));
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
 
   it("is absent, along with its summary row, when there are no messages", () => {
     const withArg = generateMarkdown([], [], [], [], [], weekInfo, "", config, ACCOUNT_ID, []);
@@ -194,5 +206,14 @@ describe("generateMarkdown Slack section", () => {
 
     expect(md).toContain("  > First line.");
     expect(md).toContain("  > Second line.");
+  });
+
+  it("escapes characters that would break out of the markdown link destination", () => {
+    const md = generateMarkdown([], [], [], [], [], weekInfo, "", config, ACCOUNT_ID, [
+      { ...base, permalink: "https://example.slack.com/archives/C1/p(1)?q=a b" },
+    ]);
+
+    expect(md).toContain("[View in Slack](https://example.slack.com/archives/C1/p%281%29?q=a%20b)");
+    expect(md).not.toContain("p(1)");
   });
 });

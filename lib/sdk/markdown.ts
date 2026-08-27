@@ -4,6 +4,29 @@ import type { PRReview, WeekInfo } from "./data-fetch";
 import type { SlackMessage } from "./sources/slack";
 import { extractText, formatDate } from "../utils";
 
+/**
+ * A link destination cannot carry a space, a parenthesis or an angle bracket without breaking
+ * out of `[text](dest)`. The permalink is model output, so percent-encode those rather than
+ * trusting it. Linear scan, no regex over untrusted text.
+ */
+const LINK_DESTINATION_ESCAPES = new Map([
+  [" ", "%20"],
+  ["(", "%28"],
+  [")", "%29"],
+  ["<", "%3C"],
+  [">", "%3E"],
+  ['"', "%22"],
+  ["'", "%27"],
+]);
+
+function escapeLinkDestination(url: string): string {
+  let out = "";
+  for (const char of url) {
+    out += LINK_DESTINATION_ESCAPES.get(char) ?? (char.charCodeAt(0) < 0x20 ? "" : char);
+  }
+  return out;
+}
+
 /** `2026-03-02T09:14:00.000Z` reads as `2026-03-02 09:14 UTC`. */
 function formatSlackTime(at: string): string {
   return `${at.slice(0, 16).replace("T", " ")} UTC`;
@@ -56,11 +79,11 @@ function renderSlackSection(messages: SlackMessage[]): string[] {
       if (thread.length > 1 || thread[0].isReply) {
         lines.push(`- **Thread** (${thread.length} message${thread.length === 1 ? "" : "s"})`);
         for (const message of thread) {
-          lines.push(`  - **${formatSlackTime(message.at)}** — [View in Slack](${message.permalink})`);
+          lines.push(`  - **${formatSlackTime(message.at)}** — [View in Slack](${escapeLinkDestination(message.permalink)})`);
           lines.push(...quoteLines(message.text, "    "));
         }
       } else {
-        lines.push(`- **${formatSlackTime(thread[0].at)}** — [View in Slack](${thread[0].permalink})`);
+        lines.push(`- **${formatSlackTime(thread[0].at)}** — [View in Slack](${escapeLinkDestination(thread[0].permalink)})`);
         lines.push(...quoteLines(thread[0].text, "  "));
       }
     }
