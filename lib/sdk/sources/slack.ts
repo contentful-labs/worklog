@@ -28,7 +28,7 @@
 import { execFile } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { z } from "zod";
 import type { WorklogConfig } from "../types";
@@ -318,17 +318,33 @@ function keepOwnPublic(messages: SlackMessage[], config: WorklogConfig): OwnPubl
 
 // --- Isolation ---
 
+const CWD_PREFIX = "worklog-slack-";
+
+/**
+ * Only ever delete a directory this module made. `rm -rf` on a path someone else chose is how a
+ * cleanup step turns into data loss, and the cost of being wrong here is somebody's working
+ * directory. Proved the hard way while mutation-testing this function.
+ */
+function isOwnTempDir(path: string): boolean {
+  const parent = dirname(path);
+  return parent === tmpdir() && basename(path).startsWith(CWD_PREFIX);
+}
+
 /**
  * Run something with a working directory that has nothing in it. Claude Code discovers project
  * settings, CLAUDE.md and memory by walking up from its cwd, so the child is given a directory
  * where there is nothing to find.
  */
-async function withEmptyCwd<T>(body: (cwd: string) => Promise<T>): Promise<T> {
-  const cwd = await mkdtemp(join(tmpdir(), "worklog-slack-"));
+export async function withEmptyCwd<T>(
+  body: (cwd: string) => Promise<T>,
+  /** Injectable so the refusal above can be tested without an fs stub. */
+  makeDir: () => Promise<string> = () => mkdtemp(join(tmpdir(), CWD_PREFIX)),
+): Promise<T> {
+  const cwd = await makeDir();
   try {
     return await body(cwd);
   } finally {
-    await rm(cwd, { recursive: true, force: true });
+    if (isOwnTempDir(cwd)) await rm(cwd, { recursive: true, force: true });
   }
 }
 

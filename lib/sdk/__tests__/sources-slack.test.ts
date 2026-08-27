@@ -1,9 +1,11 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   createSlackSource,
   slackMessagesFrom,
+  withEmptyCwd,
   type ProcessRunner,
   type RunResult,
   type SlackMessage,
@@ -494,6 +496,39 @@ describe("slack source time budget", () => {
 
     expect(timeouts).toEqual([240_000, 140_000]);
     expect(batch.events).toHaveLength(1);
+  });
+});
+
+describe("withEmptyCwd", () => {
+  it("makes an empty directory under the temp dir and removes it afterwards", async () => {
+    let seen = "";
+    await withEmptyCwd(async (cwd) => {
+      seen = cwd;
+      expect(readdirSync(cwd)).toEqual([]);
+      expect(cwd.startsWith(tmpdir())).toBe(true);
+    });
+
+    expect(existsSync(seen)).toBe(false);
+  });
+
+  // The cleanup is an rm -rf, so it has to refuse a path it did not create. A mutation that
+  // pointed it at process.cwd() once deleted a whole working tree. Both cases below hand it a
+  // throwaway directory, so a broken guard costs nothing but that directory.
+  it.each([
+    ["a directory whose name is not ours", () => mkdtempSync(join(tmpdir(), "not-worklog-"))],
+    ["a directory that is not directly under the temp dir", () => {
+      const nested = join(mkdtempSync(join(tmpdir(), "worklog-slack-")), "nested");
+      mkdirSync(nested);
+      return nested;
+    }],
+  ])("removes nothing given %s", async (_name, make) => {
+    const decoy = make();
+    try {
+      await withEmptyCwd(async () => undefined, async () => decoy);
+      expect(existsSync(decoy)).toBe(true);
+    } finally {
+      rmSync(decoy, { recursive: true, force: true });
+    }
   });
 });
 
