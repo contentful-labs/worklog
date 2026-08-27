@@ -220,10 +220,14 @@ async function readParsed<T>(path: string, schema: z.ZodType<T>, fallback: T): P
  * it can read, and the caller is told which file and which row so a person can look,
  * because the alternative is a cache that heals itself by deleting evidence.
  */
-function parseRows<T>(rows: Iterable<readonly [string, unknown]>, schema: z.ZodType<T>): {
+interface ParsedRows<T> {
+  /** What parsed, in file order, each with the key it was found under. */
   kept: [string, T][];
+  /** The keys of what did not, for the person who has to go and look. */
   bad: string[];
-} {
+}
+
+function parseRows<T>(rows: Iterable<readonly [string, unknown]>, schema: z.ZodType<T>): ParsedRows<T> {
   const kept: [string, T][] = [];
   const bad: string[] = [];
   for (const [key, row] of rows) {

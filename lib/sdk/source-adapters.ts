@@ -965,6 +965,9 @@ export function githubSource(now: Clock = () => new Date()): Source {
             warn(batch, ctx, `Could not read ${repo}#${number}, its merges and closures will be missing: HTTP ${status}`);
             continue;
           }
+          // SAFETY: the pull request endpoint returns one pull request. Both fields read
+          // below are optional on GitHubPR and go through `instant`, so a shape change
+          // costs this PR's merge and closure rather than throwing.
           const pr = body as GitHubPR;
 
           const merged = instant(pr.merged_at);

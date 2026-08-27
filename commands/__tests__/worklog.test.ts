@@ -386,6 +386,8 @@ describe("amending a week that already has an entry", () => {
         paths,
         timeline: readTeamTimeline(paths),
         log: () => {},
+        // SAFETY: generateWeek calls start/stop/message on the spinner and nothing else,
+        // and @clack's own type carries members no fake can supply.
         spinner: { start: vi.fn(), stop: vi.fn(), message: vi.fn() } as never,
         amend: { existingBragBook: EXISTING_BRAG_BOOK, newMaterial: "- a comment" },
       })).rejects.toThrow(/Refusing to write the brag book/);

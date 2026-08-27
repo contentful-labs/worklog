@@ -129,7 +129,9 @@ broke. Two known exceptions are pinned in the test itself: the work log carries 
 **Vault docs**: The AI reads context from markdown files in the user's vault (profile, work context, coach persona). These are seeded at init but owned by the user -- they can edit them freely.
 
 **The event ledger**: Activity is cached as first-seen snapshots plus timestamped events
-under `$XDG_CACHE_HOME/worklog/ledger`, never in the vault. A week is exactly the events
+under `$XDG_CACHE_HOME/worklog/ledger`, never in the vault. How far a source has been
+read is recorded per week, not per source, so refreshing one week cannot claim coverage
+on behalf of a week it never asked about. A week is exactly the events
 whose timestamps fall inside it, which is what makes a past week a closed record rather
 than a view of today: a ticket closed in September does not turn August's entry into a
 story about a finished ticket. Recording is idempotent, so re-fetching a week matches
@@ -179,17 +181,29 @@ gets rewritten, what the model is told — is the ledger's job.
    events for the things that happened to them. Date each event by when it happened.
    When the system gives you no date, date it now and mark the payload `spotted: true`
    so the work log can say so.
-2. Give every event the system's own id when there is one. That is what makes a
+2. `fetchWindow` must find an item by its **activity** in the window, not by when it was
+   created, and must report each thing that happened to it on that thing's own date —
+   read the changelog or version history rather than the item's current state. A ticket
+   opened in one week and closed in the next has something to say to both weeks.
+3. `fetchSince` gets the ids the ledger already knows, but it must also **go looking**:
+   run the source's own "what have I touched since" query and union the two. An item
+   created after a week was first fetched is in nobody's list of known ids, and a source
+   that only asks about what it already knows will never see it again.
+4. Report only the user's own work. A ticket assigned to them collects other people's
+   comments; filter by `ctx.identity`.
+5. Give every event the system's own id when there is one. That is what makes a
    re-fetch match instead of duplicate.
-3. Report soft failures through `ctx.onWarning` and the batch's `warnings`, and say why
+6. Report soft failures through `ctx.onWarning` and the batch's `warnings`, and say why
    in `isAvailable` when the source cannot run. An unavailable source is skipped, never
    fatal.
-4. Add it to `allSources()`, which is the one list both `worklog` and `worklog refresh`
+7. Name it in `/^[a-z0-9_-]+$/`. The name becomes a file name in the cache, and anything
+   that could be a path is refused.
+8. Add it to `allSources()`, which is the one list both `worklog` and `worklog refresh`
    read.
-5. Test it with msw in `lib/sdk/__tests__/source-adapters.test.ts`. Note that
+9. Test it with msw in `lib/sdk/__tests__/source-adapters.test.ts`. Note that
    `vitest.config.ts` only includes `lib/__tests__`, `lib/sdk/__tests__` and
    `commands/__tests__` — a test elsewhere is silently skipped.
-6. Update `prompts/weekly-brag-prompt.md` if the AI needs to understand the new data.
+10. Update `prompts/weekly-brag-prompt.md` if the AI needs to understand the new data.
 
 ## Submitting changes
 

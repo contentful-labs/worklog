@@ -100,9 +100,16 @@ worklog refresh --source jira      # one source
 Each change is filed in the week it happened, not the week you ran the command: a
 comment written this week lands in this week even when the ticket is from August. Only
 the weeks whose activity actually changed are written again, so a run that finds
-nothing makes no AI call and touches no file. When a week does need writing again, its
-existing brag book goes back to the model along with only the new material, and the
-instruction is to add to the entry rather than replace it.
+nothing makes no AI call and touches no file.
+
+A regeneration **adds** to a week's brag book and never removes from it. The existing
+entry goes back to the model with only the new material, and the run refuses to write a
+document that has dropped an achievement or a coaching heading the entry already had —
+your week keeps what it had, and the error names what went missing.
+
+If a refresh turns up activity belonging to a week outside the range you asked for, it
+files the activity where it belongs and tells you which weeks are still waiting to be
+written. Run `worklog refresh --since` far enough back to pick them up.
 
 The table at the end shows what each source contributed per week and how long it took.
 
@@ -160,6 +167,10 @@ An item is snapshotted once, as it looked when first seen, and everything after 
 an event with its own date. That is what keeps a past week honest — a ticket opened in
 August and closed in September reads as work in progress in August, because September
 is not in August's file. Deleting the cache costs you nothing but a refetch.
+
+If a file in the cache is edited into something the tool cannot read, it says which file
+and which row, carries on with the rest, and does not write that file back. Nothing in
+there heals itself by deleting the evidence.
 
 ## Weekly workflow
 
