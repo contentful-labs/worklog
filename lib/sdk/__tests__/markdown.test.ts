@@ -1,8 +1,9 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
 import { generateMarkdown } from "../markdown";
 import type { WorklogConfig } from "../types";
 import type { JiraIssue, GitHubPR } from "../../types";
 import type { WeekInfo } from "../data-fetch";
+import type { SlackMessage } from "../sources/slack";
 
 const config: WorklogConfig = {
   version: 1,
@@ -140,5 +141,79 @@ describe("generateMarkdown", () => {
     expect(md).not.toContain("## Confluence Documents");
     expect(md).not.toContain("## GitHub Pull Requests");
     expect(md).not.toContain("## Additional Context");
+  });
+});
+
+describe("generateMarkdown Slack section", () => {
+  const base: SlackMessage = {
+    permalink: "https://example.slack.com/archives/C1/p1",
+    channel: "team-updates",
+    author: "Test User",
+    channelType: "public",
+    at: "2026-03-03T09:14:00.000Z",
+    text: "Picked the migration order.",
+    isReply: false,
+  };
+
+  // The header carries `**Generated:** <now>`, so the two renders being compared for
+  // byte-equality have to happen at the same instant.
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-03-09T12:00:00.000Z"));
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("is absent, along with its summary row, when there are no messages", () => {
+    const withArg = generateMarkdown([], [], [], [], [], weekInfo, "", config, ACCOUNT_ID, []);
+    const without = generateMarkdown([], [], [], [], [], weekInfo, "", config, ACCOUNT_ID);
+
+    expect(withArg).not.toContain("## Slack");
+    expect(withArg).not.toContain("| Slack Messages |");
+    expect(withArg).toBe(without);
+  });
+
+  it("groups messages by channel with permalink, time and text", () => {
+    const md = generateMarkdown([], [], [], [], [], weekInfo, "", config, ACCOUNT_ID, [
+      base,
+      { ...base, permalink: "https://example.slack.com/archives/C2/p1", channel: "arch-review", at: "2026-03-04T15:00:00.000Z", text: "Second one." },
+    ]);
+
+    expect(md).toContain("| Slack Messages | 2 |");
+    expect(md).toContain("## Slack (2)");
+    expect(md).toContain("### #arch-review");
+    expect(md).toContain("### #team-updates");
+    expect(md).toContain("- **2026-03-03 09:14 UTC** — [View in Slack](https://example.slack.com/archives/C1/p1)");
+    expect(md).toContain("  > Picked the migration order.");
+  });
+
+  it("groups a thread and its replies under one entry", () => {
+    const md = generateMarkdown([], [], [], [], [], weekInfo, "", config, ACCOUNT_ID, [
+      { ...base, permalink: "https://example.slack.com/archives/C1/p2", at: "2026-03-03T11:00:00.000Z", text: "Follow-up.", isReply: true, threadRoot: base.permalink },
+      base,
+    ]);
+
+    expect(md).toContain("- **Thread** (2 messages)");
+    expect(md).toContain("  - **2026-03-03 09:14 UTC** — [View in Slack](https://example.slack.com/archives/C1/p1)");
+    expect(md).toContain("    > Follow-up.");
+  });
+
+  it("quotes every line of a multi-line message", () => {
+    const md = generateMarkdown([], [], [], [], [], weekInfo, "", config, ACCOUNT_ID, [
+      { ...base, text: "First line.\nSecond line." },
+    ]);
+
+    expect(md).toContain("  > First line.");
+    expect(md).toContain("  > Second line.");
+  });
+
+  it("escapes characters that would break out of the markdown link destination", () => {
+    const md = generateMarkdown([], [], [], [], [], weekInfo, "", config, ACCOUNT_ID, [
+      { ...base, permalink: "https://example.slack.com/archives/C1/p(1)?q=a b" },
+    ]);
+
+    expect(md).toContain("[View in Slack](https://example.slack.com/archives/C1/p%281%29?q=a%20b)");
+    expect(md).not.toContain("p(1)");
   });
 });

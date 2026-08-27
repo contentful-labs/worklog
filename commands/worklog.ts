@@ -41,6 +41,8 @@ import {
   type WeekInfo,
 } from "../lib/sdk/data-fetch";
 import { generateMarkdown } from "../lib/sdk/markdown";
+import { slackMessagesFrom, slackSource, type SlackMessage } from "../lib/sdk/sources/slack";
+import type { SourceContext } from "../lib/sdk/sources";
 import {
   toBragBookResult,
   parseReviewCycle,
@@ -77,16 +79,42 @@ function weeksBefore(date: Date, weeks: number): Date {
   return new Date(date.getTime() - weeks * 7 * 24 * 60 * 60 * 1000);
 }
 
+/**
+ * Slack comes in through an LLM query, so it is slow and can be unavailable. It is fetched
+ * separately from the API sources: a Slack failure must never cost the week its Jira,
+ * Confluence or GitHub data.
+ */
+async function fetchSlackMessages(
+  weekInfo: WeekInfo,
+  ctx: SourceContext,
+  spinner: ReturnType<typeof p.spinner>,
+): Promise<{ messages: SlackMessage[]; ms: number }> {
+  const started = performance.now();
+  spinner.start("Fetching Slack via Glean (this takes a while)...");
+
+  // WeekInfo dates are calendar days at UTC midnight, so the week runs to the end of endDate.
+  const end = new Date(weekInfo.endDate.getTime() + 24 * 60 * 60 * 1000 - 1);
+  const batch = await slackSource.fetchWindow({ start: weekInfo.startDate, end }, ctx);
+
+  const messages = slackMessagesFrom(batch.snapshots.map((snapshot) => snapshot.payload));
+  const ms = Math.round(performance.now() - started);
+  spinner.stop(`Slack fetched in ${formatDuration(ms)} (${messages.length} messages)`);
+  for (const warning of batch.warnings) p.log.warn(warning);
+  return { messages, ms };
+}
+
 // --- Stats ---
 
 interface TimingRecord {
   weekId: string;
   date: string;
   fetch: number;
+  /** Slack is timed on its own: it is an LLM call, not an API fetch, and it is optional. */
+  slack: number;
   bragBook: number;
   contextUpdates: number;
   total: number;
-  counts: { jira: number; confluence: number; prs: number; reviews: number };
+  counts: { jira: number; confluence: number; prs: number; reviews: number; slack: number };
 }
 
 async function loadStats(): Promise<TimingRecord[]> {
@@ -141,6 +169,7 @@ async function clearProgress(): Promise<void> {
 interface WeekTiming {
   weekId: string;
   fetch: number;
+  slack: number;
   bragBook: number;
   contextUpdates: number;
   total: number;
@@ -152,6 +181,7 @@ interface WeekResult {
   confluence: number;
   prs: number;
   reviews: number;
+  slack: number;
   memoryAdded: number;
   memoryRemoved: number;
   impactLog: boolean;
@@ -168,12 +198,14 @@ async function printReport(timings: WeekTiming[], results: WeekResult[]): Promis
   const totalFetch = timings.reduce((s, t) => s + t.fetch, 0);
   const totalBrag = timings.reduce((s, t) => s + t.bragBook, 0);
   const totalCtx = timings.reduce((s, t) => s + t.contextUpdates, 0);
+  const totalSlack = timings.reduce((s, t) => s + t.slack, 0);
   const avg = totalTime / timings.length;
   const fastest = timings.reduce((a, b) => (a.total < b.total ? a : b));
   const slowest = timings.reduce((a, b) => (a.total > b.total ? a : b));
   const pctFetch = totalTime > 0 ? Math.round((totalFetch / totalTime) * 100) : 0;
   const pctBrag = totalTime > 0 ? Math.round((totalBrag / totalTime) * 100) : 0;
   const pctCtx = totalTime > 0 ? Math.round((totalCtx / totalTime) * 100) : 0;
+  const pctSlack = totalTime > 0 ? Math.round((totalSlack / totalTime) * 100) : 0;
 
   const pad = (s: string | number, w: number) => String(s).padStart(w);
   const rows = results.map((r, i) => {
@@ -201,6 +233,7 @@ async function printReport(timings: WeekTiming[], results: WeekResult[]): Promis
     ``,
     `Breakdown:`,
     `  Data fetching: ${formatDuration(totalFetch)} (${pctFetch}%)`,
+    ...(totalSlack > 0 ? [`  Slack via Glean: ${formatDuration(totalSlack)} (${pctSlack}%)`] : []),
     `  Brag book gen: ${formatDuration(totalBrag)} (${pctBrag}%)`,
     `  Context updates: ${formatDuration(totalCtx)} (${pctCtx}%)`,
   ];
@@ -470,12 +503,13 @@ export async function runWorklog(opts: {
   week?: string;
   since?: string;
   noPrompt: boolean;
+  noSlack?: boolean;
   force: boolean;
   verbose: boolean;
   prompt?: string;
   contextFile?: string;
 }): Promise<void> {
-  const { weeks: weeksBack, week: specificWeek, since: sinceDate, noPrompt, force, verbose, prompt: sharedPrompt, contextFile } = opts;
+  const { weeks: weeksBack, week: specificWeek, since: sinceDate, noPrompt, noSlack = false, force, verbose, prompt: sharedPrompt, contextFile } = opts;
   const log = createLogger(verbose);
 
   p.intro("worklog");
@@ -567,6 +601,15 @@ export async function runWorklog(opts: {
   s.stop("Account IDs ready");
   log(`Atlassian accountId: ${accountId}, GitHub username: ${githubUsername}`);
 
+  // Optional source, checked once per run rather than once per week. --no-slack skips the
+  // check entirely: an explicit opt-out should not pay for a probe or narrate itself.
+  let slackAvailable = false;
+  if (!noSlack) {
+    const slackAvailability = await slackSource.isAvailable({ config, log });
+    slackAvailable = slackAvailability.ok;
+    if (!slackAvailability.ok) p.log.info(`Slack source skipped: ${slackAvailability.reason}`);
+  }
+
   const provider = config.ai.provider ?? "openai";
   const timings: WeekTiming[] = [];
   const results: WeekResult[] = [];
@@ -592,7 +635,12 @@ export async function runWorklog(opts: {
     s.stop(`Fetched in ${formatDuration(fetchMs)} (${issues.length} jira, ${pages.length} confluence, ${prs.length} PRs, ${reviews.length} reviews)`);
     log(`Jira: ${issues.length}, Confluence: ${pages.length}, PRs: ${prs.length}, Reviews: ${reviews.length}`);
 
-    const markdown = generateMarkdown(issues, pages, prs, reviews, teamSprintItems, weekInfo, additionalContext, config, accountId);
+    const slack = slackAvailable
+      ? await fetchSlackMessages(weekInfo, { config, log }, s)
+      : { messages: [], ms: 0 };
+    const slackMessages = slack.messages;
+
+    const markdown = generateMarkdown(issues, pages, prs, reviews, teamSprintItems, weekInfo, additionalContext, config, accountId, slackMessages);
     const workLogPath = `${paths.vault}/${weekInfo.filename}`;
     // Held in memory until the whole week validates. Writing it here would mean a --force
     // run destroyed the previous work log before the model had said anything usable.
@@ -705,14 +753,14 @@ export async function runWorklog(opts: {
     const weekTotal = Math.round(performance.now() - weekStart);
     p.log.success(`${wid} done in ${formatDuration(weekTotal)}`);
 
-    timings.push({ weekId: wid, fetch: fetchMs, bragBook: bragMs, contextUpdates: ctxMs, total: weekTotal });
-    results.push({ weekId: wid, jira: issues.length, confluence: pages.length, prs: prs.length, reviews: reviews.length, memoryAdded: memoryResult.added + memoryResult.merged, memoryRemoved: memoryResult.removed, impactLog: impactResult.added + impactResult.merged > 0, workContextUpdates: workContextResult.added + workContextResult.merged, profileUpdated: profileResult.status === "written", focusItems: focusItems.length, focusUpdates: focusUpdates.length });
+    timings.push({ weekId: wid, fetch: fetchMs, slack: slack.ms, bragBook: bragMs, contextUpdates: ctxMs, total: weekTotal });
+    results.push({ weekId: wid, jira: issues.length, confluence: pages.length, prs: prs.length, reviews: reviews.length, slack: slackMessages.length, memoryAdded: memoryResult.added + memoryResult.merged, memoryRemoved: memoryResult.removed, impactLog: impactResult.added + impactResult.merged > 0, workContextUpdates: workContextResult.added + workContextResult.merged, profileUpdated: profileResult.status === "written", focusItems: focusItems.length, focusUpdates: focusUpdates.length });
 
     progress.completedWeeks.push(wid);
     await saveProgress(progress);
   }
 
-  await appendStats(timings.map((t, i) => ({ weekId: t.weekId, date: new Date().toISOString(), fetch: t.fetch, bragBook: t.bragBook, contextUpdates: t.contextUpdates, total: t.total, counts: { jira: results[i].jira, confluence: results[i].confluence, prs: results[i].prs, reviews: results[i].reviews } })));
+  await appendStats(timings.map((t, i) => ({ weekId: t.weekId, date: new Date().toISOString(), fetch: t.fetch, slack: t.slack, bragBook: t.bragBook, contextUpdates: t.contextUpdates, total: t.total, counts: { jira: results[i].jira, confluence: results[i].confluence, prs: results[i].prs, reviews: results[i].reviews, slack: results[i].slack } })));
   await clearProgress();
   await printReport(timings, results);
 
@@ -755,6 +803,7 @@ export function makeWorklogCommand(): Command {
     })
     .option("--force", "Regenerate weeks even if brag book already exists", false)
     .option("--no-prompt", "Skip per-week additional context prompts")
+    .option("--no-slack", "Skip the Slack source even when Glean is reachable")
     .option("-v, --verbose", "Show detailed logs", false)
     .addHelpText("after", `
 Examples:
@@ -762,7 +811,8 @@ Examples:
   worklog --weeks 4          Last 4 weeks
   worklog --week 2026-W07    Specific week
   worklog --force            Regenerate even if exists
-  worklog --since 2025-01-01 From date to now`);
+  worklog --since 2025-01-01 From date to now
+  worklog --no-slack         Skip the Slack source for this run`);
 
   cmd.action(async (opts) => {
     const { weeks, week, since, force, verbose, contextFile } = opts;
@@ -775,7 +825,10 @@ Examples:
     const noPrompt = opts.prompt === false;
     const sharedPrompt = typeof opts.prompt === "string" ? opts.prompt : undefined;
 
-    await runWorklog({ weeks, week, since, noPrompt, force, verbose, prompt: sharedPrompt, contextFile });
+    // commander parses --no-slack as opts.slack === false, the same way it does --no-prompt
+    const noSlack = opts.slack === false;
+
+    await runWorklog({ weeks, week, since, noPrompt, noSlack, force, verbose, prompt: sharedPrompt, contextFile });
   });
 
   return cmd;

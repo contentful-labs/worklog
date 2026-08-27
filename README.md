@@ -15,6 +15,7 @@ You *can* generate retroactively for past weeks — and it works fine for that. 
 ## What it does
 
 - Pulls your Jira tickets, GitHub PRs, and Confluence pages each week
+- Optionally pulls your public Slack messages through Glean, when Claude Code can reach it (`--no-slack` to skip)
 - Generates a brag book entry with coaching feedback
 - Generates prep docs for 1:1s, self-reviews, promotion cases, and resume bullets
 - Everything stays local in a markdown vault on your machine
@@ -127,7 +128,14 @@ worklog configure coaching
 4. Reads the work log + your context docs and generates a brag book with achievements and a coaching session
 5. Updates your running docs: memory (small contributions), impact log (big wins), and focus tracking (week-over-week accountability)
 
-All data stays local. Nothing leaves your machine except API calls to OpenAI to generate text, and API calls to Jira/GitHub/Confluence to fetch your own activity.
+All data stays local. What leaves your machine: API calls to OpenAI or Anthropic to generate text,
+and API calls to Jira/GitHub/Confluence to fetch your own activity. If the optional Slack source is
+on, worklog also starts a `claude` subprocess and sends it your profile name and the week's date
+range; Claude Code and Glean see that query and return your messages. The subprocess runs with no
+tools, no MCP server but Glean, and your own settings and hooks not loaded — though hooks your
+organisation manages by policy still apply and would see the Glean traffic. Pass `--no-slack`, or
+leave `glean_default` disconnected, to turn all of it off. See
+[docs/setup.md](docs/setup.md#what-leaves-your-machine).
 
 ## Weekly workflow
 
@@ -150,6 +158,10 @@ AI provider (pick one during `worklog init`):
 | `GITHUB_TOKEN` | GitHub PR data | [GitHub tokens](https://github.com/settings/tokens) |
 | `ANTHROPIC_API_KEY` | AI — Anthropic (if not using Claude Code CLI) | [Anthropic console](https://console.anthropic.com/settings/keys) |
 | `OPENAI_API_KEY` | AI — OpenAI (if not using ChatGPT subscription) | [OpenAI dashboard](https://platform.openai.com/api-keys) |
+
+Slack is optional and needs no token: it comes through Glean, which worklog reaches by asking your
+local Claude Code CLI. Turn it off for a run with `--no-slack`. See
+[docs/setup.md](docs/setup.md#slack-optional).
 
 See [docs/setup.md](docs/setup.md) for detailed AI provider setup, first-time walkthrough, and configuration.
 
